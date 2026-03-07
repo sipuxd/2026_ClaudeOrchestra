@@ -4,6 +4,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import { readFileSync } from 'node:fs';
 import { Role, type RoleInstance } from '../roles/role-types.js';
 
 // --- Message delimiter protocol ---
@@ -93,17 +94,26 @@ export class AgentProcess extends EventEmitter<AgentProcessEvents> {
     }
 
     const bin = this.spawnOptions.claudeBin ?? 'claude';
-    const args = this.spawnOptions.spawnArgs ?? [
-      '--model', this.spawnOptions.model,
-      '--system-prompt', this.spawnOptions.systemPromptPath,
-      '--output-format', 'json',
-    ];
+
+    let args: string[];
+    if (this.spawnOptions.spawnArgs) {
+      args = this.spawnOptions.spawnArgs;
+    } else {
+      const systemPrompt = readFileSync(this.spawnOptions.systemPromptPath, 'utf-8');
+      args = [
+        '-p',
+        '--model', this.spawnOptions.model,
+        '--system-prompt', systemPrompt,
+        '--output-format', 'json',
+      ];
+    }
 
     const env = {
       ...process.env,
       CLAUDE_ORCHESTRA_ROLE: this.spawnOptions.role,
       CLAUDE_ORCHESTRA_INSTANCE: this.spawnOptions.instance,
       CLAUDE_ORCHESTRA_TEAM_ID: this.spawnOptions.teamId,
+      CLAUDECODE: undefined,
     };
 
     this.process = spawn(bin, args, {

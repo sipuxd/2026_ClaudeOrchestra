@@ -47,11 +47,12 @@ to validate the engine works end-to-end.
 When the human is ready to start Milestone 4, remind them to
 disable sandboxing and explain why before proceeding.
 
-**To disable:** Type `/sandbox` in the Claude Code CLI prompt.
-This toggles sandboxing off for the current session. The CLI
-will confirm with: "Bash commands will no longer be sandboxed."
+**To disable:** Type `/sandbox` in the Claude Code CLI prompt
+to toggle sandboxing off. The CLI will confirm with:
+"Bash commands will no longer be sandboxed."
 
-**To re-enable:** Type `/sandbox` again. It toggles back on.
+**To re-enable later:** Type `/sandbox` again to toggle it
+back on.
 
 **Why it's needed:** The orchestration engine's core job is
 spawning and managing Claude Code CLI instances as child

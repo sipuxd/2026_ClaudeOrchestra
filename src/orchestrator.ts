@@ -403,7 +403,9 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
           }
         } catch {
           // If spawning fails, mark as errored
+          const fromPhase = state.currentPhase;
           this.phaseController.forceError(state, 'Failed to respawn agents on recovery');
+          this.emit('phase-transition', teamId, fromPhase, TeamPhase.Errored, 'recovery-spawn-failure');
           this.persistence.persistNow(state);
           continue;
         }

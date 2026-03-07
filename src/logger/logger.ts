@@ -261,8 +261,9 @@ export class Logger {
     orchestrator.on('phase-transition', (teamId, from, to, trigger) => {
       const level = to === TeamPhase.Errored ? LogLevel.Error :
         to === TeamPhase.Cancelled ? LogLevel.Warn : LogLevel.Info;
-      const event: LogEvent = to === TeamPhase.Errored && trigger.includes('loop')
-        ? 'loop_limit_reached' : 'phase_transition';
+      const isLoopLimit = to === TeamPhase.Errored &&
+        (trigger.includes('revision') || trigger.includes('rejection') || trigger.includes('backward'));
+      const event: LogEvent = isLoopLimit ? 'loop_limit_reached' : 'phase_transition';
 
       this.log(level, event, `${teamId}: ${from} -> ${to} (${trigger})`, {
         teamId,

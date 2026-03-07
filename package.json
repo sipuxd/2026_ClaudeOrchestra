@@ -4,6 +4,9 @@
   "description": "Multi-agent orchestration engine for Claude Code CLI",
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "claude-orchestra": "dist/index.js"
+  },
   "scripts": {
     "build": "tsc",
     "test": "vitest run",

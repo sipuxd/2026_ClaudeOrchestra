@@ -1,0 +1,355 @@
+#!/usr/bin/env node
+
+// CLI entry point for ClaudeOrchestra.
+// Commands: create-team, assign-task, status, list
+
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { Orchestrator, type OrchestraConfig } from './orchestrator.js';
+import { TeamPhase } from './state/team-state.js';
+import { Role } from './roles/role-types.js';
+import { Logger } from './logger/logger.js';
+
+// --- Config Loading ---
+
+function loadConfig(configPath: string): Partial<OrchestraConfig> {
+  if (!fs.existsSync(configPath)) return {};
+  try {
+    const raw = fs.readFileSync(configPath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    const config: Partial<OrchestraConfig> = {};
+
+    if (parsed.engine?.dataDirectory) config.dataDirectory = parsed.engine.dataDirectory;
+    if (parsed.engine?.logDirectory) config.logDirectory = parsed.engine.logDirectory;
+    if (parsed.engine?.tickIntervalMs) config.tickIntervalMs = parsed.engine.tickIntervalMs;
+    if (parsed.teams?.maxConcurrentTeams) config.maxConcurrentTeams = parsed.teams.maxConcurrentTeams;
+    if (parsed.limits?.maxRevisions || parsed.limits?.maxRejections || parsed.limits?.maxTotalBackwardTransitions) {
+      config.limits = {
+        maxRevisions: parsed.limits.maxRevisions ?? 3,
+        maxRejections: parsed.limits.maxRejections ?? 2,
+        maxTotalBackwardTransitions: parsed.limits.maxTotalBackwardTransitions ?? 5,
+      };
+    }
+    if (parsed.limits?.maxRespawnsPerAgent) config.maxRespawns = parsed.limits.maxRespawnsPerAgent;
+    if (parsed.limits?.maxMalformedRetries) config.maxMalformedRetries = parsed.limits.maxMalformedRetries;
+    if (parsed.models) {
+      config.models = {};
+      for (const [role, model] of Object.entries(parsed.models)) {
+        config.models[role as Role] = model as string;
+      }
+    }
+
+    return config;
+  } catch {
+    return {};
+  }
+}
+
+// --- CLI Argument Parsing ---
+
+interface ParsedArgs {
+  command: string;
+  positional: string[];
+  flags: Record<string, string>;
+}
+
+function parseArgs(argv: string[]): ParsedArgs {
+  const args = argv.slice(2);
+  const command = args[0] ?? 'help';
+  const positional: string[] = [];
+  const flags: Record<string, string> = {};
+
+  for (let i = 1; i < args.length; i++) {
+    if (args[i].startsWith('--')) {
+      const key = args[i];
+      const val = args[i + 1] ?? '';
+      flags[key] = val;
+      i++;
+    } else {
+      positional.push(args[i]);
+    }
+  }
+
+  return { command, positional, flags };
+}
+
+// --- Terminal Colors ---
+
+const colors = {
+  reset: '\x1b[0m',
+  blue: '\x1b[34m',
+  green: '\x1b[32m',
+  red: '\x1b[31m',
+  yellow: '\x1b[33m',
+  purple: '\x1b[35m',
+  brightRed: '\x1b[91m',
+  dim: '\x1b[2m',
+  bold: '\x1b[1m',
+};
+
+const PHASE_COLORS: Record<string, string> = {
+  [TeamPhase.PreWork]: colors.blue,
+  [TeamPhase.Work]: colors.green,
+  [TeamPhase.Handoff]: colors.yellow,
+  [TeamPhase.Review]: colors.purple,
+  [TeamPhase.Done]: colors.green,
+  [TeamPhase.Errored]: colors.brightRed,
+  [TeamPhase.Cancelled]: colors.dim,
+};
+
+function log(msg: string): void {
+  const ts = new Date().toISOString().substring(11, 19);
+  console.log(`${colors.dim}[${ts}]${colors.reset} ${msg}`);
+}
+
+function logError(msg: string): void {
+  console.error(`${colors.brightRed}ERROR:${colors.reset} ${msg}`);
+}
+
+
+function getRoleColor(instance: string): string {
+  if (instance.startsWith('Supervisor')) return colors.blue;
+  if (instance.startsWith('Worker')) return colors.green;
+  if (instance.startsWith('Security')) return colors.red;
+  if (instance.startsWith('Reviewer')) return colors.yellow;
+  return colors.reset;
+}
+
+// --- Commands ---
+
+function printUsage(): void {
+  console.log(`
+${colors.bold}ClaudeOrchestra${colors.reset} — Multi-Agent Orchestration Engine
+
+${colors.bold}Usage:${colors.reset}
+  claude-orchestra <command> [args] [flags]
+
+${colors.bold}Commands:${colors.reset}
+  create-team <name> <project-path>   Create a new agent team
+  assign-task <team-id> <description>  Assign a task to a team
+  status <team-id>                     Show team status
+  list                                 List all teams
+  recover                              Recover teams from persisted state
+
+${colors.bold}Flags:${colors.reset}
+  --data-dir <path>          Data directory (default: ./data)
+  --tick-interval <ms>       Main loop interval (default: 1000)
+  --max-teams <n>            Max concurrent teams (default: 5)
+  --config <path>            Config file path (default: ./orchestra.config.json)
+`);
+}
+
+function showStatus(orchestrator: Orchestrator, teamId: string): void {
+  const status = orchestrator.getTeamStatus(teamId);
+  if (!status) {
+    logError(`Team "${teamId}" not found`);
+    process.exit(1);
+  }
+
+  const phaseColor = PHASE_COLORS[status.currentPhase] ?? colors.reset;
+
+  console.log(`
+${colors.bold}Team:${colors.reset} ${status.teamName} (${status.teamId})
+${colors.bold}Phase:${colors.reset} ${phaseColor}${status.currentPhase}${colors.reset}
+${colors.bold}Project:${colors.reset} ${status.projectPath}
+${colors.bold}Task:${colors.reset} ${status.currentTask?.description ?? 'none'}
+${colors.bold}Counters:${colors.reset} revisions=${status.counters.revisions} rejections=${status.counters.rejections} backward=${status.counters.totalBackwardTransitions}
+${colors.bold}Created:${colors.reset} ${status.createdAt}
+${colors.bold}Updated:${colors.reset} ${status.updatedAt}
+
+${colors.bold}Agents:${colors.reset}`);
+
+  for (const [instance, agent] of Object.entries(status.agents)) {
+    const roleColor = getRoleColor(instance);
+    const stateIndicator = agent.state === 'active' ? colors.green + 'active' :
+      agent.state === 'errored' ? colors.brightRed + 'errored' :
+      agent.state === 'idle' ? colors.dim + 'idle' :
+      colors.yellow + agent.state;
+    console.log(
+      `  ${roleColor}${instance}${colors.reset}: ${stateIndicator}${colors.reset}` +
+      (agent.currentJob ? ` — ${agent.currentJob}` : '') +
+      (agent.pid ? ` (pid ${agent.pid})` : '')
+    );
+  }
+  console.log();
+}
+
+function showList(orchestrator: Orchestrator): void {
+  const teams = orchestrator.getAllTeams();
+  if (teams.length === 0) {
+    console.log('No active teams.');
+    return;
+  }
+
+  console.log(`\n${colors.bold}Active Teams:${colors.reset}\n`);
+  for (const t of teams) {
+    const phaseColor = PHASE_COLORS[t.currentPhase] ?? colors.reset;
+    console.log(
+      `  ${t.teamId}: ${phaseColor}${t.currentPhase}${colors.reset}` +
+      (t.currentTask ? ` — ${t.currentTask.description.substring(0, 60)}` : '')
+    );
+  }
+  console.log();
+}
+
+// --- Main ---
+
+async function main(): Promise<void> {
+  const parsed = parseArgs(process.argv);
+
+  if (parsed.command === 'help' || parsed.command === '--help') {
+    printUsage();
+    return;
+  }
+
+  // Load config
+  const configPath = parsed.flags['--config'] ??
+    process.env.CLAUDE_ORCHESTRA_CONFIG ??
+    './orchestra.config.json';
+  const fileConfig = loadConfig(configPath);
+
+  // Apply CLI flag overrides
+  const config: Partial<OrchestraConfig> = { ...fileConfig };
+  if (parsed.flags['--data-dir']) config.dataDirectory = parsed.flags['--data-dir'];
+  if (parsed.flags['--tick-interval']) config.tickIntervalMs = parseInt(parsed.flags['--tick-interval'], 10);
+  if (parsed.flags['--max-teams']) config.maxConcurrentTeams = parseInt(parsed.flags['--max-teams'], 10);
+  if (parsed.flags['--model-supervisor']) {
+    config.models = config.models ?? {};
+    config.models[Role.Supervisor] = parsed.flags['--model-supervisor'];
+  }
+  if (parsed.flags['--model-worker']) {
+    config.models = config.models ?? {};
+    config.models[Role.Worker] = parsed.flags['--model-worker'];
+  }
+  if (parsed.flags['--model-security']) {
+    config.models = config.models ?? {};
+    config.models[Role.Security] = parsed.flags['--model-security'];
+  }
+  if (parsed.flags['--model-reviewer']) {
+    config.models = config.models ?? {};
+    config.models[Role.Reviewer] = parsed.flags['--model-reviewer'];
+  }
+
+  // Resolve rolesDir relative to CWD
+  if (!config.rolesDir) {
+    config.rolesDir = path.resolve('roles');
+  }
+
+  const orchestrator = new Orchestrator(config);
+
+  // Create and attach structured logger
+  const logDir = config.logDirectory ?? config.dataDirectory
+    ? path.join(config.dataDirectory!, 'logs')
+    : './data/logs';
+  const teamsDir = config.dataDirectory
+    ? path.join(config.dataDirectory, 'teams')
+    : './data/teams';
+
+  const logger = new Logger({
+    logDirectory: logDir,
+    teamsDirectory: teamsDir,
+  });
+  logger.attach(orchestrator);
+
+  // Signal handling
+  let shutdownRequested = false;
+  const handleShutdown = async () => {
+    if (shutdownRequested) {
+      log(`${colors.brightRed}Force kill — second signal received${colors.reset}`);
+      orchestrator.forceKillAll();
+      process.exit(1);
+    }
+    shutdownRequested = true;
+    log(`${colors.yellow}Shutting down gracefully...${colors.reset}`);
+    await orchestrator.shutdown();
+    logger.dispose();
+    process.exit(0);
+  };
+
+  process.on('SIGTERM', handleShutdown);
+  process.on('SIGINT', handleShutdown);
+
+  // Execute command
+  switch (parsed.command) {
+    case 'create-team': {
+      const name = parsed.positional[0];
+      const projectPath = parsed.positional[1];
+      if (!name || !projectPath) {
+        logError('Usage: create-team <name> <project-path>');
+        process.exit(1);
+      }
+      orchestrator.createTeam(name, projectPath);
+      showStatus(orchestrator, name);
+      break;
+    }
+
+    case 'assign-task': {
+      const teamId = parsed.positional[0];
+      const description = parsed.positional.slice(1).join(' ');
+      if (!teamId || !description) {
+        logError('Usage: assign-task <team-id> <task-description>');
+        process.exit(1);
+      }
+
+      // Recover existing teams first
+      orchestrator.recover();
+
+      if (!orchestrator.getTeamStatus(teamId)) {
+        logError(`Team "${teamId}" not found. Create it first with create-team.`);
+        process.exit(1);
+      }
+
+      orchestrator.assignTask(teamId, description);
+
+      // Start the main loop
+      log(`${colors.bold}Main loop started${colors.reset} (tick every ${config.tickIntervalMs ?? 1000}ms). Press Ctrl+C to stop.`);
+      orchestrator.start();
+
+      // Keep process alive
+      await new Promise<void>(() => {
+        // The process stays alive via the tick interval timer.
+        // Shutdown is handled by signal handlers.
+      });
+      break;
+    }
+
+    case 'status': {
+      const teamId = parsed.positional[0];
+      if (!teamId) {
+        logError('Usage: status <team-id>');
+        process.exit(1);
+      }
+      orchestrator.recover();
+      showStatus(orchestrator, teamId);
+      break;
+    }
+
+    case 'list': {
+      orchestrator.recover();
+      showList(orchestrator);
+      break;
+    }
+
+    case 'recover': {
+      const recovered = orchestrator.recover();
+      if (recovered.length === 0) {
+        console.log('No teams to recover.');
+      } else {
+        log(`Recovered ${recovered.length} team(s): ${recovered.join(', ')}`);
+        orchestrator.start();
+        await new Promise<void>(() => {});
+      }
+      break;
+    }
+
+    default:
+      logError(`Unknown command: ${parsed.command}`);
+      printUsage();
+      process.exit(1);
+  }
+}
+
+main().catch((err) => {
+  logError(err.message);
+  process.exit(1);
+});

@@ -152,10 +152,10 @@ concrete and validated.
 
 **Build:**
 - `src/types/index.ts` — shared enums and base types
-- `src/router/message-types.ts` — full message schema as TS 
-  interfaces, matching the spec's JSON contract exactly
-- `src/router/flag-enums.ts` — all flag enums per role pair, 
-  matching the spec's flag definitions exactly
+- `src/router/message-types.ts` — full message schema as TS
+  interfaces, matching the JSON contract exactly
+- `src/router/flag-enums.ts` — all flag enums per role pair,
+  matching the flag definitions exactly
 - `src/roles/role-types.ts` — role enum, role instance types, 
   JTBD type definitions
 
@@ -163,8 +163,8 @@ concrete and validated.
 valid and invalid messages, confirming the type system catches 
 malformed contracts at compile time.
 
-**Reference:** Spec → "JSON Message Contract" section and 
-"Flag Enums Per Role Pair" section.
+**Reference:** [`docs/message-contract.md`](docs/message-contract.md) —
+JSON schema, flag enums, flag validation matrix.
 
 ---
 
@@ -188,9 +188,13 @@ filesystem bus. Routing by role and instance works.
   - File locking to prevent race conditions when multiple 
     agents write simultaneously
 
-**Validate:** Unit tests — send a message, receive it, 
-acknowledge it, verify threading, verify file locking under 
-concurrent writes.
+**Validate:** Unit tests — send a message, receive it,
+acknowledge it, verify threading, verify atomic writes under
+concurrent access.
+
+**Reference:** [`docs/message-contract.md`](docs/message-contract.md) —
+atomic writes, message ordering, flag validation matrix,
+deduplication, size limits.
 
 ---
 
@@ -217,9 +221,13 @@ task.
   - Debounced writes (don't write on every state change)
   - Read on startup for recovery
 
-**Validate:** Unit tests — create team state, transition 
-phases, verify invalid transitions are rejected, persist 
+**Validate:** Unit tests — create team state, transition
+phases, verify invalid transitions are rejected, persist
 and recover.
+
+**Reference:** [`docs/state-machine.md`](docs/state-machine.md) —
+team phase states, agent states, valid transitions, state
+persistence schema, crash recovery.
 
 ---
 
@@ -258,9 +266,16 @@ CLI instance with a test CLAUDE.md, send it a simple prompt,
 verify output is captured, terminate it. Then spawn a full 
 team of 5 and verify all are running.
 
-**Important:** This milestone requires Claude Code CLI to be 
-installed. Test with a minimal CLAUDE.md first before using 
+**Important:** This milestone requires Claude Code CLI to be
+installed. Test with a minimal CLAUDE.md first before using
 the real role files.
+
+**Reference:**
+[`docs/context-management.md`](docs/context-management.md) —
+agent-engine communication protocol (stdin pipe), response
+parsing (ORCHESTRA-MESSAGE delimiters).
+[`docs/operations.md`](docs/operations.md) — health checks,
+crash recovery (respawn protocol), graceful shutdown.
 
 ---
 
@@ -274,7 +289,7 @@ protocol, and constraints.
 
 Each CLAUDE.md must include:
 1. **Identity** — what role this agent is, its instance name
-2. **Mission** — from the spec's JTBD section
+2. **Mission** — from the JTBD section
 3. **Phase-specific jobs** — what to do in each workflow phase
 4. **Communication protocol** — how to send messages (write 
    JSON to the message bus directory), what flags to use, 
@@ -291,15 +306,22 @@ is autonomous — it reads its inbox, does its job, writes
 messages to other agents' inboxes.
 
 **Files:**
-- `roles/supervisor.claude.md` — ref spec "Supervisor JTBD"
-- `roles/worker.claude.md` — ref spec "Worker JTBD" 
+- `roles/supervisor.claude.md` — ref "Supervisor JTBD"
+- `roles/worker.claude.md` — ref "Worker JTBD"
   (same file for both workers, instance name set via env var)
-- `roles/security.claude.md` — ref spec "Security Agent JTBD"
-- `roles/reviewer.claude.md` — ref spec "Reviewer JTBD"
+- `roles/security.claude.md` — ref "Security Agent JTBD"
+- `roles/reviewer.claude.md` — ref "Reviewer JTBD"
 
-**Validate:** Spawn a single agent with its role CLAUDE.md, 
-give it a simple task, verify it produces output and attempts 
+**Validate:** Spawn a single agent with its role CLAUDE.md,
+give it a simple task, verify it produces output and attempts
 to write messages in the correct format.
+
+**Reference:**
+[`docs/roles-and-jtbd.md`](docs/roles-and-jtbd.md) — JTBD
+per role, CLAUDE.md prompt engineering guidelines, few-shot
+examples, output format enforcement.
+[`docs/context-management.md`](docs/context-management.md) —
+prompt size guidelines, model selection per role.
 
 ---
 
@@ -346,9 +368,13 @@ and triggers the right actions at each phase boundary.
     back to Work
   - If review-rejected: transition back to Pre-Work
 
-**Validate:** Unit test the state machine with mock messages. 
-Verify all valid transitions work. Verify invalid transitions 
+**Validate:** Unit test the state machine with mock messages.
+Verify all valid transitions work. Verify invalid transitions
 are rejected. Verify preconditions are enforced.
+
+**Reference:** [`docs/state-machine.md`](docs/state-machine.md) —
+all states, transitions, preconditions, timeouts, loop limits,
+deadlock detection, error/cancelled states.
 
 ---
 
@@ -374,10 +400,13 @@ Accepts a task, creates a team, runs the full workflow cycle.
   - Commands: `create-team`, `assign-task`, `status`, `list`
   - Runs the main loop (polling interval for tick())
 
-**Validate:** Full integration test — create a team, assign 
-a task, watch it flow through all 4 phases to completion 
-(or at least to the first phase transition). This is the 
+**Validate:** Full integration test — create a team, assign
+a task, watch it flow through all 4 phases to completion
+(or at least to the first phase transition). This is the
 first end-to-end test.
+
+**Reference:** [`docs/architecture.md`](docs/architecture.md) —
+topology, agent lifecycle, multi-team coordination.
 
 ---
 
@@ -390,13 +419,16 @@ human orchestrator full visibility without a dashboard.
 - `src/logger/logger.ts`
   - Logs every message sent/received with role colors
   - Logs phase transitions
-  - Logs attention-needed events (using the priority system 
-    from the spec)
+  - Logs attention-needed events (using the priority system)
   - Formats output for terminal readability
   - Optionally writes to a log file for post-run analysis
 
-**Validate:** Run a full cycle and verify the log output 
+**Validate:** Run a full cycle and verify the log output
 tells a coherent story of what happened.
+
+**Reference:** [`docs/operations.md`](docs/operations.md) —
+structured log format, event types, log levels, role colors,
+log file locations.
 
 ---
 

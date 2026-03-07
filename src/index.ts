@@ -238,9 +238,8 @@ async function main(): Promise<void> {
   const orchestrator = new Orchestrator(config);
 
   // Create and attach structured logger
-  const logDir = config.logDirectory ?? config.dataDirectory
-    ? path.join(config.dataDirectory!, 'logs')
-    : './data/logs';
+  const logDir = config.logDirectory ??
+    (config.dataDirectory ? path.join(config.dataDirectory, 'logs') : './data/logs');
   const teamsDir = config.dataDirectory
     ? path.join(config.dataDirectory, 'teams')
     : './data/teams';

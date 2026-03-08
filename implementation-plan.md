@@ -65,16 +65,22 @@ The orchestrator is a single TypeScript process that:
 1. Spawns Claude Code CLI instances (one per agent role)
 2. Routes messages between agents via the filesystem bus
 3. Manages workflow phase transitions
-4. Persists team state for the dashboard to read later
+4. Persists team state inside each project's `.claude-orchestra/`
+   directory for the dashboard to read
+5. Maintains a lightweight `registry.json` with pointers to all
+   active teams across projects
 
 ---
 
 ## Project Structure
 
+### Engine Repo
+
 ```
 claude-orchestra/
 ├── package.json
 ├── tsconfig.json
+├── registry.json                 # Lightweight pointers to active teams
 ├── src/
 │   ├── index.ts                  # Entry point — CLI interface
 │   ├── orchestrator.ts           # Main orchestrator class
@@ -115,7 +121,18 @@ claude-orchestra/
 │   ├── security.claude.md
 │   └── reviewer.claude.md
 │
-├── data/                         # Runtime data directory
+└── tests/
+    ├── message-bus.test.ts
+    ├── phase-controller.test.ts
+    └── integration/
+        └── full-cycle.test.ts
+```
+
+### Target Project (created by engine on attach)
+
+```
+{project-root}/
+├── .claude-orchestra/            # Runtime data (gitignored)
 │   └── teams/
 │       └── {team-id}/
 │           ├── state.json        # Team state snapshot
@@ -130,12 +147,29 @@ claude-orchestra/
 │           └── reports/
 │               ├── clearance/    # Security clearance reports
 │               └── reviews/      # Reviewer verdicts
-│
-└── tests/
-    ├── message-bus.test.ts
-    ├── phase-controller.test.ts
-    └── integration/
-        └── full-cycle.test.ts
+├── .gitignore                    # Engine adds .claude-orchestra/ here
+├── src/                          # (project's own source code)
+└── ...
+```
+
+### Registry (engine repo)
+
+The engine maintains a lightweight `registry.json` with pointers
+to active teams — no runtime data, only references. The dashboard
+reads this on load to discover all active teams across projects.
+
+```json
+{
+  "teams": [
+    {
+      "teamId": "uuid",
+      "teamName": "string",
+      "projectPath": "/absolute/path/to/local/repo",
+      "createdAt": "ISO-8601",
+      "lastActiveAt": "ISO-8601"
+    }
+  ]
+}
 ```
 
 ---
@@ -217,9 +251,11 @@ task.
     (e.g., can't go from pre-work to review without 
     passing through work and handoff)
 - `src/state/persistence.ts`
-  - Writes `state.json` to `data/teams/{team-id}/`
+  - Writes `state.json` to `{projectPath}/.claude-orchestra/teams/{team-id}/`
+  - Runtime data lives inside each target project, not the engine repo
   - Debounced writes (don't write on every state change)
-  - Read on startup for recovery
+  - Read on startup for recovery — uses `registry.json` to locate
+    all active teams across projects
 
 **Validate:** Unit tests — create team state, transition
 phases, verify invalid transitions are rejected, persist
@@ -385,8 +421,11 @@ Accepts a task, creates a team, runs the full workflow cycle.
 
 **Build:**
 - `src/orchestrator.ts`
-  - `createTeam(name, projectPath): TeamState` — initializes 
-    team state, creates data directories
+  - `createTeam(name, projectPath): TeamState` — creates
+    `.claude-orchestra/teams/{team-id}/` inside the target
+    project, adds `.claude-orchestra/` to the project's
+    `.gitignore` if not already present, and adds a registry
+    entry to the engine's `registry.json`
   - `assignTask(teamId, taskDescription): void` — kicks off 
     the pre-work phase
   - `tick(): void` — main loop iteration: check all inboxes, 
@@ -486,6 +525,14 @@ referenced docs for full specifications.
    `fs.rename()`. Message ordering by timestamp. See
    [Message Contract — Atomic Writes](docs/message-contract.md#atomic-writes).
 
+6. **Runtime data locality:** Runtime data (messages, team
+   state, reports) lives inside each target project's
+   `.claude-orchestra/` directory, not the engine repo. The
+   engine maintains a lightweight `registry.json` with
+   pointers to active teams across projects. The engine
+   does not create projects — it attaches teams to existing
+   local repos.
+
 ---
 
 ## Error Handling and Recovery
@@ -543,7 +590,7 @@ for the full schema.
 
 Key settings:
 - `engine.tickIntervalMs` — main loop interval (default: 1000)
-- `engine.dataDirectory` — data directory (default: `./data`)
+- `engine.registryPath` — path to registry file (default: `./registry.json`)
 - `models.*` — model selection per role
 - `timeouts.*` — timeout values per message type and phase
 - `limits.*` — max revisions, rejections, respawns

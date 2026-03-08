@@ -31,6 +31,11 @@ worker progress update because it *is* different.
 
 ## How It Works
 
+The engine does not create projects. You create a repo on
+GitHub, clone it locally, then attach one or more teams from
+ClaudeOrchestra to that project. The engine can be attached to
+any existing local repo.
+
 ```
          ┌──────────────┐
          │    HUMAN      │  ← you, via CLI/dashboard
@@ -45,6 +50,17 @@ worker progress update because it *is* different.
             ▼  ▼  ▼  ▼
           5 Claude Code CLI instances (per team)
 ```
+
+When the engine attaches a team to a project, it creates a
+`.claude-orchestra/` directory inside that project (gitignored)
+to store all runtime data — messages between agents, team state,
+security clearance reports, reviewer verdicts. Each team gets
+its own subdirectory inside `.claude-orchestra/teams/`. The
+engine repo stays clean — no runtime data from other projects.
+
+The engine maintains a lightweight `registry.json` in its own
+repo with pointers to active teams across projects. No runtime
+data, only references.
 
 Each team of 5 agents moves through 4 phases per task:
 
@@ -164,7 +180,9 @@ and priority levels:
 - View reviewer feedback and revision history
 
 ### Task Assignment
-- Create a new team or assign a task to an existing team
+- Attach a new team to any existing local repo by providing
+  the project path
+- Assign a task to an existing team
 - Dashboard kicks off the Pre-Work phase automatically
 
 ### Interactions

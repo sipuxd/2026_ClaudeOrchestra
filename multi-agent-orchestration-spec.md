@@ -279,6 +279,67 @@ A custom orchestration layer for Claude Code CLI built on top of the official ag
 
 ---
 
+## Runtime Data
+
+Runtime data (messages between agents, team state, security
+clearance reports, reviewer verdicts) lives inside each target
+project in a `.claude-orchestra/` directory, added to the
+project's `.gitignore`. The engine does not store runtime data
+from other projects inside its own repo.
+
+When the engine attaches a team to a project, it creates:
+
+```
+{project-root}/
+├── .claude-orchestra/
+│   └── teams/
+│       └── {team-id}/
+│           ├── state.json
+│           ├── messages/
+│           │   ├── inbox/
+│           │   │   ├── supervisor-1/
+│           │   │   ├── worker-1/
+│           │   │   ├── worker-2/
+│           │   │   ├── security-1/
+│           │   │   └── reviewer-1/
+│           │   └── archive/
+│           └── reports/
+│               ├── clearance/
+│               └── reviews/
+```
+
+Multiple teams on the same project each get their own
+subdirectory under `.claude-orchestra/teams/`.
+
+### Registry
+
+The engine keeps a lightweight registry file in its own repo —
+just a JSON file with pointers to active teams. No runtime data,
+only references. The dashboard reads this registry on load to
+know which projects to look at, then reaches into each project's
+`.claude-orchestra/` directory to pull actual state.
+
+Registry location: `{engine-repo}/registry.json`
+
+```json
+{
+  "teams": [
+    {
+      "teamId": "uuid",
+      "teamName": "string",
+      "projectPath": "/absolute/path/to/local/repo",
+      "createdAt": "ISO-8601",
+      "lastActiveAt": "ISO-8601"
+    }
+  ]
+}
+```
+
+When the engine attaches a team to a project, it adds an entry
+to the registry. When a team is removed, the entry is deleted.
+
+---
+
 ## Multi-Team & Dashboard
 
 ### Problem
@@ -291,6 +352,7 @@ A purpose-built terminal interface that understands the orchestration framework:
 - Differentiates between role types — a Security alert looks different from a Worker progress update.
 - Highlights blocked agents, unanswered messages (requiresResponse = true, status = pending), and completed reviews awaiting human sign-off.
 - Allows the human orchestrator to drill into any team, any agent, any message thread.
+- Reads the engine's `registry.json` on load to discover all active teams across all projects.
 
 ### Attention Priority (Dashboard Surfacing)
 1. **Critical** — Security alerts, blocked Workers, Reviewer rejections.
@@ -301,8 +363,4 @@ A purpose-built terminal interface that understands the orchestration framework:
 ---
 
 ## Open Items
-- Message transport mechanism: existing agent teams inbox system vs custom filesystem bus.
-- CLAUDE.md templates per role for spawn prompts.
-- Dashboard tech stack and implementation approach.
-- How the human orchestrator creates and assigns tasks to teams.
 - Scaling considerations — max teams, token costs, coordination overhead.

@@ -117,6 +117,10 @@ export class DashboardServer {
       this.broadcast('error', { teamId, message: error.message });
     });
 
+    this.orchestrator.on('feedback', (teamId, feedback) => {
+      this.broadcast('feedback', { teamId, ...feedback });
+    });
+
     this.orchestrator.on('shutdown', () => {
       this.broadcast('shutdown', {});
       for (const client of this.sseClients) {
@@ -183,6 +187,18 @@ export class DashboardServer {
     const pushMergeMatch = pathname.match(/^\/api\/teams\/([^/]+)\/push-merge$/);
     if (pushMergeMatch && method === 'POST') {
       this.handlePushMerge(pushMergeMatch[1], res);
+      return;
+    }
+
+    const feedbackMatch = pathname.match(/^\/api\/teams\/([^/]+)\/feedback$/);
+    if (feedbackMatch && method === 'POST') {
+      this.handleFeedbackResponse(feedbackMatch[1], req, res);
+      return;
+    }
+
+    const askMatch = pathname.match(/^\/api\/teams\/([^/]+)\/ask$/);
+    if (askMatch && method === 'POST') {
+      this.handleAskAgent(askMatch[1], req, res);
       return;
     }
 
@@ -318,6 +334,51 @@ export class DashboardServer {
       this.sendJSON(res, result, result.success ? 200 : 500);
     } catch (err: any) {
       this.sendJSON(res, { error: err.message }, 500);
+    }
+  }
+
+  private async handleFeedbackResponse(
+    teamId: string,
+    req: http.IncomingMessage,
+    res: http.ServerResponse
+  ): Promise<void> {
+    try {
+      const body = JSON.parse(await this.readBody(req));
+      const { feedbackId, value } = body;
+
+      if (!feedbackId || value === undefined) {
+        this.sendJSON(res, { error: 'feedbackId and value are required' }, 400);
+        return;
+      }
+
+      this.orchestrator.resolveFeedback(teamId, feedbackId, value);
+      this.sendJSON(res, { ok: true });
+    } catch (err: any) {
+      this.sendJSON(res, { error: err.message }, 400);
+    }
+  }
+
+  private async handleAskAgent(
+    teamId: string,
+    req: http.IncomingMessage,
+    res: http.ServerResponse
+  ): Promise<void> {
+    try {
+      const body = JSON.parse(await this.readBody(req));
+      const { message } = body;
+
+      if (!message) {
+        this.sendJSON(res, { error: 'message is required' }, 400);
+        return;
+      }
+
+      // Fire and forget — response comes via SSE feedback events
+      this.orchestrator.sendMessage(teamId, message).catch(() => {
+        // Errors are emitted as feedback events
+      });
+      this.sendJSON(res, { ok: true });
+    } catch (err: any) {
+      this.sendJSON(res, { error: err.message }, 400);
     }
   }
 

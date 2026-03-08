@@ -173,12 +173,21 @@ describe('phase transitions', () => {
     expect(() => team.transitionPhase(TeamPhase.PreWork)).toThrow(TransitionError);
   });
 
-  it('rejects transitions from done', () => {
+  it('allows done → pre_work (re-launch)', () => {
     team.transitionPhase(TeamPhase.Work);
     team.transitionPhase(TeamPhase.Handoff);
     team.transitionPhase(TeamPhase.Review);
     team.transitionPhase(TeamPhase.Done);
-    expect(() => team.transitionPhase(TeamPhase.PreWork)).toThrow(TransitionError);
+    team.transitionPhase(TeamPhase.PreWork);
+    expect(team.currentPhase).toBe(TeamPhase.PreWork);
+  });
+
+  it('rejects done → work (must go through pre_work)', () => {
+    team.transitionPhase(TeamPhase.Work);
+    team.transitionPhase(TeamPhase.Handoff);
+    team.transitionPhase(TeamPhase.Review);
+    team.transitionPhase(TeamPhase.Done);
+    expect(() => team.transitionPhase(TeamPhase.Work)).toThrow(TransitionError);
   });
 
   it('rejects transitions from cancelled', () => {

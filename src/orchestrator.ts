@@ -70,8 +70,20 @@ export interface OrchestratorEvents {
   'malformed-output': [teamId: string, instance: RoleInstance, raw: string];
   'deadlock-detected': [teamId: string];
   'error': [teamId: string, error: Error];
+  'feedback': [teamId: string, feedback: FeedbackPayload];
+  'feedback-response': [teamId: string, feedbackId: string, value: string];
   'tick': [teamId: string];
   'shutdown': [];
+}
+
+export interface FeedbackPayload {
+  id: string;
+  type: 'info' | 'warning' | 'question' | 'decision';
+  title: string;
+  message: string;
+  actions?: Array<{ label: string; value: string }>;
+  blocking?: boolean;
+  timestamp: string;
 }
 
 // --- Per-team runtime context ---

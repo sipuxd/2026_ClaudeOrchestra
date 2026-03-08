@@ -44,6 +44,7 @@ ${CSS}
     </div>
     <div class="detail-project" id="detailProject"></div>
     <div class="phase-bar" id="phaseBar"></div>
+    <div class="feedback-bar" id="feedbackBar" style="display:none"></div>
     <div class="task-section" id="taskSection"></div>
     <div class="agent-panels" id="agentPanels"></div>
     <div class="controls-bar" id="controlsBar">
@@ -53,10 +54,13 @@ ${CSS}
         <button class="btn btn-preview" id="previewBtn" onclick="previewProject()" style="display:none">Preview</button>
       </div>
       <div class="relaunch-group" id="relaunchGroup">
-        <label class="relaunch-label">Next Task</label>
+        <label class="relaunch-label">Next Task or Ask</label>
         <div class="relaunch-input">
-          <textarea id="relaunchText" placeholder="Describe what to build next..."></textarea>
-          <button class="btn btn-primary" id="relaunchBtn" onclick="relaunchCurrentTeam()">Run Task</button>
+          <textarea id="relaunchText" placeholder="Describe what to build next, or ask a question..."></textarea>
+          <div class="relaunch-buttons">
+            <button class="btn btn-primary" id="relaunchBtn" onclick="relaunchCurrentTeam()">Run Task</button>
+            <button class="btn btn-ask" id="askBtn" onclick="askAgent()">Ask</button>
+          </div>
         </div>
       </div>
     </div>
@@ -559,6 +563,33 @@ body {
   border-color: #58a6ff;
 }
 
+.relaunch-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.btn-ask {
+  background: #21262d;
+  border: 1px solid #30363d;
+  color: #c9d1d9;
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s;
+}
+.btn-ask:hover {
+  background: #30363d;
+  border-color: #484f58;
+}
+.btn-ask:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* --- Buttons --- */
 .btn {
   padding: 8px 16px;
@@ -678,6 +709,102 @@ body {
   min-height: 20px;
 }
 
+/* --- Feedback Bar --- */
+.feedback-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.feedback-item {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 12px 16px;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  animation: feedback-slide 0.3s ease;
+}
+
+.feedback-item.info     { border-left: 3px solid #58a6ff; }
+.feedback-item.warning  { border-left: 3px solid #d29922; }
+.feedback-item.question { border-left: 3px solid #bc8cff; }
+.feedback-item.decision { border-left: 3px solid #f78166; }
+
+.feedback-icon {
+  font-size: 16px;
+  flex-shrink: 0;
+  margin-top: 1px;
+  width: 20px;
+  text-align: center;
+}
+
+.feedback-content { flex: 1; min-width: 0; }
+
+.feedback-title {
+  font-weight: 600;
+  color: #e6edf3;
+  font-size: 0.85rem;
+  margin-bottom: 2px;
+}
+
+.feedback-message {
+  color: #8b949e;
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.feedback-time {
+  color: #484f58;
+  font-size: 0.7rem;
+  margin-top: 4px;
+}
+
+.feedback-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.feedback-actions button {
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  color: #c9d1d9;
+  padding: 4px 12px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.feedback-actions button:hover {
+  background: #30363d;
+  border-color: #484f58;
+}
+
+.feedback-dismiss {
+  background: none;
+  border: none;
+  color: #484f58;
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+  flex-shrink: 0;
+  transition: color 0.15s;
+}
+.feedback-dismiss:hover {
+  color: #c9d1d9;
+}
+
+@keyframes feedback-slide {
+  from { transform: translateY(-8px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
 /* --- Notifications --- */
 .notification-area {
   position: fixed;
@@ -721,6 +848,7 @@ let agentPanelCollapsed = {};
 let projectCollapsed = {};
 let taskStartTimes = {};
 let timingIntervals = {};
+let feedbackItems = {};
 
 // --- Phase config ---
 const PHASES = ['pre_work', 'work', 'handoff', 'review', 'done'];
@@ -757,6 +885,7 @@ evtSource.addEventListener('task-assigned', (e) => {
     teams[teamId].currentTask = { description, assignedAt: timestamp };
     taskStartTimes[teamId] = Date.now();
     agentOutputs[teamId] = {};
+    feedbackItems[teamId] = [];
     startTimingInterval(teamId);
   }
   if (teamId === selectedTeamId) renderTeamDetail();
@@ -821,6 +950,14 @@ evtSource.addEventListener('task-complete', (e) => {
 evtSource.addEventListener('error', (e) => {
   const { teamId, message } = JSON.parse(e.data);
   showNotification('Error in ' + teamId + ': ' + message, 'error');
+});
+
+evtSource.addEventListener('feedback', (e) => {
+  const data = JSON.parse(e.data);
+  const { teamId } = data;
+  if (!feedbackItems[teamId]) feedbackItems[teamId] = [];
+  feedbackItems[teamId].push(data);
+  if (teamId === selectedTeamId) renderFeedbackBar();
 });
 
 // --- Render Functions ---
@@ -911,6 +1048,7 @@ function renderTeamDetail() {
 
   renderProjectInfo();
   renderPhaseBar();
+  renderFeedbackBar();
   renderTaskSection();
   renderAgentPanels();
   renderControlsBar();
@@ -964,6 +1102,84 @@ function renderPhaseBar() {
     }
     return step;
   }).join('');
+}
+
+function renderFeedbackBar() {
+  const bar = document.getElementById('feedbackBar');
+  const items = feedbackItems[selectedTeamId] || [];
+  if (!items.length) {
+    bar.style.display = 'none';
+    return;
+  }
+  bar.style.display = 'flex';
+
+  const ICONS = { info: '\\u2139\\uFE0F', warning: '\\u26A0\\uFE0F', question: '\\u2753', decision: '\\uD83D\\uDD36' };
+
+  bar.innerHTML = items.map((item, idx) => {
+    const icon = ICONS[item.type] || '\\u2139\\uFE0F';
+    let actionsHtml = '';
+    if (item.actions && item.actions.length > 0) {
+      actionsHtml = '<div class="feedback-actions">'
+        + item.actions.map(a =>
+          '<button onclick="respondToFeedback(\\'' + escapeAttr(item.id) + '\\', \\'' + escapeAttr(a.value) + '\\')">'
+          + escapeHtml(a.label) + '</button>'
+        ).join('')
+        + '</div>';
+    }
+    const timeAgo = formatTimeAgo(item.timestamp);
+    return '<div class="feedback-item ' + (item.type || 'info') + '">'
+      + '<span class="feedback-icon">' + icon + '</span>'
+      + '<div class="feedback-content">'
+      + '<div class="feedback-title">' + escapeHtml(item.title) + '</div>'
+      + '<div class="feedback-message">' + escapeHtml(item.message) + '</div>'
+      + actionsHtml
+      + '<div class="feedback-time">' + timeAgo + '</div>'
+      + '</div>'
+      + '<button class="feedback-dismiss" onclick="dismissFeedback(' + idx + ')">&times;</button>'
+      + '</div>';
+  }).join('');
+
+  // Scroll to latest item
+  bar.scrollTop = bar.scrollHeight;
+}
+
+function dismissFeedback(idx) {
+  const items = feedbackItems[selectedTeamId];
+  if (items && idx >= 0 && idx < items.length) {
+    items.splice(idx, 1);
+    renderFeedbackBar();
+  }
+}
+
+async function respondToFeedback(feedbackId, value) {
+  if (!selectedTeamId) return;
+  try {
+    await fetch('/api/teams/' + encodeURIComponent(selectedTeamId) + '/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ feedbackId, value }),
+    });
+    // Remove the item from the list
+    const items = feedbackItems[selectedTeamId];
+    if (items) {
+      const idx = items.findIndex(i => i.id === feedbackId);
+      if (idx !== -1) items.splice(idx, 1);
+    }
+    renderFeedbackBar();
+    showNotification('Response sent', 'success');
+  } catch (err) {
+    showNotification('Failed to send response: ' + err.message, 'error');
+  }
+}
+
+function formatTimeAgo(isoTimestamp) {
+  const diff = Date.now() - new Date(isoTimestamp).getTime();
+  const seconds = Math.floor(diff / 1000);
+  if (seconds < 5) return 'just now';
+  if (seconds < 60) return seconds + 's ago';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return minutes + 'm ago';
+  return Math.floor(minutes / 60) + 'h ago';
 }
 
 function renderTaskSection() {
@@ -1061,6 +1277,12 @@ function renderControlsBar() {
 
   // Preview button — visible when phase is done
   document.getElementById('previewBtn').style.display = phase === 'done' ? '' : 'none';
+
+  // Ask button — visible when pipeline is not running (terminal state)
+  const askBtn = document.getElementById('askBtn');
+  askBtn.style.display = !isRunning ? '' : 'none';
+  askBtn.disabled = false;
+  askBtn.textContent = 'Ask';
 }
 
 function renderTiming(ms) {
@@ -1160,6 +1382,35 @@ async function relaunchCurrentTeam() {
     }
   } catch (err) {
     showNotification('Network error: ' + err.message, 'error');
+  }
+}
+
+async function askAgent() {
+  if (!selectedTeamId) return;
+  const msg = document.getElementById('relaunchText').value.trim();
+  if (!msg) { showNotification('Type a question first', 'error'); return; }
+
+  const btn = document.getElementById('askBtn');
+  btn.disabled = true;
+  btn.textContent = 'Asking...';
+
+  try {
+    const res = await fetch('/api/teams/' + encodeURIComponent(selectedTeamId) + '/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: msg }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      showNotification(data.error || 'Failed to ask', 'error');
+    } else {
+      document.getElementById('relaunchText').value = '';
+    }
+  } catch (err) {
+    showNotification('Network error: ' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Ask';
   }
 }
 

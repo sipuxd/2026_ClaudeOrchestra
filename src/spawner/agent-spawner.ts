@@ -8,10 +8,10 @@ import { AgentProcess, type AgentSpawnOptions, ProcessState } from './agent-proc
 // --- Default model configuration ---
 
 export const DEFAULT_MODELS: Record<Role, string> = {
-  [Role.Supervisor]: 'claude-sonnet-4-6',
-  [Role.Worker]: 'claude-haiku-4-5',
+  [Role.Supervisor]: 'claude-opus-4-6',
+  [Role.Worker]: 'claude-opus-4-6',
   [Role.Security]: 'claude-opus-4-6',
-  [Role.Reviewer]: 'claude-sonnet-4-6',
+  [Role.Reviewer]: 'claude-opus-4-6',
 };
 
 // --- Default effort levels per role ---

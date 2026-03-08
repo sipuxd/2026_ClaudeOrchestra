@@ -203,12 +203,12 @@ describe('SubagentOrchestrator', () => {
 
       const agents = (mockControls.options.agents as Record<string, any>);
 
-      // Default models: Worker=haiku, Supervisor=sonnet, Security=opus, Reviewer=sonnet
-      expect(agents['Supervisor'].model).toBe('sonnet');
-      expect(agents['Worker-1'].model).toBe('haiku');
-      expect(agents['Worker-2'].model).toBe('haiku');
+      // Default models: all Opus 4.6
+      expect(agents['Supervisor'].model).toBe('opus');
+      expect(agents['Worker-1'].model).toBe('opus');
+      expect(agents['Worker-2'].model).toBe('opus');
       expect(agents['Security'].model).toBe('opus');
-      expect(agents['Reviewer'].model).toBe('sonnet');
+      expect(agents['Reviewer'].model).toBe('opus');
 
       mockControls.complete();
     });

@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 
 // CLI entry point for ClaudeOrchestra.
-// Commands: create-team, assign-task, status, list
+// Commands: create-team, assign-task, status, list, dashboard
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Orchestrator, type OrchestraConfig } from './orchestrator.js';
 import { SubagentOrchestrator, type SubagentOrchestraConfig } from './subagent-orchestrator.js';
 import { PipelineOrchestrator, type PipelineOrchestraConfig } from './pipeline-orchestrator.js';
+import { DashboardServer } from './dashboard/index.js';
 import { TeamPhase } from './state/team-state.js';
 import { Role } from './roles/role-types.js';
 import { Logger } from './logger/logger.js';
@@ -150,6 +151,7 @@ ${colors.bold}Usage:${colors.reset}
   claude-orchestra <command> [args] [flags]
 
 ${colors.bold}Commands:${colors.reset}
+  dashboard                            Start live dashboard (pipeline mode)
   create-team <name> <project-path>   Create a new agent team
   assign-task <team-id> <description>  Assign a task to a team
   status <team-id>                     Show team status
@@ -158,6 +160,7 @@ ${colors.bold}Commands:${colors.reset}
 
 ${colors.bold}Flags:${colors.reset}
   --mode <legacy|subagent|pipeline>  Orchestration mode (default: legacy)
+  --port <n>                 Dashboard port (default: 3460)
   --data-dir <path>          Data directory (default: ./data)
   --tick-interval <ms>       Main loop interval (default: 1000)
   --max-teams <n>            Max concurrent teams (default: 5)
@@ -428,6 +431,63 @@ async function main(): Promise<void> {
         orchestrator.start();
         await new Promise<void>(() => {});
       }
+      break;
+    }
+
+    case 'dashboard': {
+      // Dashboard mode requires pipeline orchestrator
+      if (mode !== 'pipeline') {
+        logError('Dashboard requires --mode pipeline');
+        process.exit(1);
+      }
+
+      const port = parseInt(parsed.flags['--port'] ?? '3460', 10);
+
+      // Recover existing teams
+      recoverTeams(orchestrator);
+
+      // Start dashboard server
+      const dashboard = new DashboardServer({
+        orchestrator: orchestrator as PipelineOrchestrator,
+        port,
+      });
+
+      await dashboard.start();
+      log(`${colors.green}Dashboard running at${colors.reset} ${colors.bold}http://localhost:${port}${colors.reset}`);
+      log(`${colors.dim}Create teams and launch tasks from the browser. Press Ctrl+C to stop.${colors.reset}`);
+
+      // Auto-open browser (best effort, macOS/Linux/Windows)
+      try {
+        const { exec } = await import('node:child_process');
+        const openCmd = process.platform === 'darwin' ? 'open' :
+                        process.platform === 'win32' ? 'start' : 'xdg-open';
+        exec(`${openCmd} http://localhost:${port}`);
+      } catch {
+        // Silent fail — user can open manually
+      }
+
+      // Override shutdown to close dashboard first
+      process.removeListener('SIGTERM', handleShutdown);
+      process.removeListener('SIGINT', handleShutdown);
+
+      const dashboardShutdown = async () => {
+        if (shutdownRequested) {
+          orchestrator.forceKillAll();
+          process.exit(1);
+        }
+        shutdownRequested = true;
+        log(`${colors.yellow}Shutting down dashboard + orchestrator...${colors.reset}`);
+        await dashboard.close();
+        await orchestrator.shutdown();
+        logger.dispose();
+        process.exit(0);
+      };
+
+      process.on('SIGTERM', dashboardShutdown);
+      process.on('SIGINT', dashboardShutdown);
+
+      // Keep process alive
+      await new Promise<void>(() => {});
       break;
     }
 

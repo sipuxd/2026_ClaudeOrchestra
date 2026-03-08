@@ -1,0 +1,305 @@
+// DashboardServer — Live dashboard for PipelineOrchestrator.
+//
+// Serves a single-page dashboard over HTTP and streams real-time
+// orchestrator events via SSE. Uses Node.js built-in http module
+// (no Express or WebSocket dependencies).
+
+import * as http from 'node:http';
+import type { PipelineOrchestrator } from '../pipeline-orchestrator.js';
+import type { RoleInstance } from '../roles/role-types.js';
+import { buildDashboardHTML } from './dashboard-ui.js';
+
+export interface DashboardServerOptions {
+  orchestrator: PipelineOrchestrator;
+  port: number;
+  host?: string;
+}
+
+export class DashboardServer {
+  private readonly orchestrator: PipelineOrchestrator;
+  private readonly port: number;
+  private readonly host: string;
+  private server: http.Server | null = null;
+  private sseClients: Set<http.ServerResponse> = new Set();
+  private cachedHTML: string | null = null;
+
+  // Throttle agent-progress events to avoid flooding SSE clients
+  private progressThrottles: Map<string, number> = new Map();
+  private readonly PROGRESS_THROTTLE_MS = 500;
+
+  constructor(options: DashboardServerOptions) {
+    this.orchestrator = options.orchestrator;
+    this.port = options.port;
+    this.host = options.host ?? '0.0.0.0';
+  }
+
+  /**
+   * Start the HTTP server and attach to orchestrator events.
+   */
+  async start(): Promise<void> {
+    this.cachedHTML = buildDashboardHTML();
+    this.attach();
+
+    return new Promise<void>((resolve, reject) => {
+      this.server = http.createServer((req, res) => {
+        this.handleRequest(req, res);
+      });
+
+      this.server.on('error', reject);
+
+      this.server.listen(this.port, this.host, () => {
+        resolve();
+      });
+    });
+  }
+
+  /**
+   * Close the server and all SSE connections.
+   */
+  async close(): Promise<void> {
+    // Close all SSE connections
+    for (const client of this.sseClients) {
+      try { client.end(); } catch { /* best effort */ }
+    }
+    this.sseClients.clear();
+
+    // Close HTTP server
+    return new Promise<void>((resolve) => {
+      if (!this.server) { resolve(); return; }
+      this.server.close(() => resolve());
+    });
+  }
+
+  // --- Event Subscription ---
+
+  private attach(): void {
+    this.orchestrator.on('team-created', (teamId) => {
+      const status = this.orchestrator.getTeamStatus(teamId);
+      this.broadcast('team-created', { teamId, team: status ?? null });
+    });
+
+    this.orchestrator.on('task-assigned', (teamId, description) => {
+      this.broadcast('task-assigned', { teamId, description, timestamp: new Date().toISOString() });
+    });
+
+    this.orchestrator.on('task-classified', (teamId, complexity, agentCount) => {
+      this.broadcast('task-classified', { teamId, complexity, agentCount });
+    });
+
+    this.orchestrator.on('phase-transition', (teamId, from, to, trigger) => {
+      this.broadcast('phase-transition', {
+        teamId, from, to, trigger,
+        timestamp: new Date().toISOString(),
+      });
+    });
+
+    this.orchestrator.on('agent-output', (teamId, instance, data) => {
+      this.broadcast('agent-output', { teamId, instance, text: data });
+    });
+
+    this.orchestrator.on('agent-progress', (teamId, instance, text) => {
+      // Throttle progress events per agent
+      const key = `${teamId}:${instance}`;
+      const now = Date.now();
+      const last = this.progressThrottles.get(key) ?? 0;
+      if (now - last < this.PROGRESS_THROTTLE_MS) return;
+      this.progressThrottles.set(key, now);
+      this.broadcast('agent-progress', { teamId, instance, text });
+    });
+
+    this.orchestrator.on('task-complete', (teamId, phase, durationMs) => {
+      this.broadcast('task-complete', { teamId, phase, durationMs });
+    });
+
+    this.orchestrator.on('error', (teamId, error) => {
+      this.broadcast('error', { teamId, message: error.message });
+    });
+
+    this.orchestrator.on('shutdown', () => {
+      this.broadcast('shutdown', {});
+      for (const client of this.sseClients) {
+        try { client.end(); } catch { /* best effort */ }
+      }
+      this.sseClients.clear();
+    });
+  }
+
+  // --- SSE Broadcasting ---
+
+  private broadcast(event: string, data: object): void {
+    const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    for (const client of this.sseClients) {
+      try {
+        client.write(payload);
+      } catch {
+        // Client disconnected, clean up on next request
+        this.sseClients.delete(client);
+      }
+    }
+  }
+
+  // --- HTTP Request Handling ---
+
+  private handleRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
+    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+    const pathname = url.pathname;
+    const method = req.method ?? 'GET';
+
+    // CORS headers
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+    if (method === 'OPTIONS') {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    // Route matching
+    if (method === 'GET' && pathname === '/') return this.serveHTML(res);
+    if (method === 'GET' && pathname === '/events') return this.serveSSE(req, res);
+    if (method === 'GET' && pathname === '/api/teams') return this.handleGetTeams(res);
+
+    // /api/teams/:id patterns
+    const teamMatch = pathname.match(/^\/api\/teams\/([^/]+)$/);
+    if (teamMatch && method === 'GET') return this.handleGetTeam(teamMatch[1], res);
+
+    const taskMatch = pathname.match(/^\/api\/teams\/([^/]+)\/task$/);
+    if (taskMatch && method === 'POST') {
+      this.handleAssignTask(taskMatch[1], req, res);
+      return;
+    }
+
+    const stopMatch = pathname.match(/^\/api\/teams\/([^/]+)\/stop$/);
+    if (stopMatch && method === 'POST') {
+      this.handleStopTeam(stopMatch[1], res);
+      return;
+    }
+
+    if (method === 'POST' && pathname === '/api/teams') {
+      this.handleCreateTeam(req, res);
+      return;
+    }
+
+    this.send404(res);
+  }
+
+  // --- Route Handlers ---
+
+  private serveHTML(res: http.ServerResponse): void {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(this.cachedHTML);
+  }
+
+  private serveSSE(req: http.IncomingMessage, res: http.ServerResponse): void {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+    });
+
+    // Send initial state dump
+    const teams = this.orchestrator.getAllTeams();
+    res.write(`event: init\ndata: ${JSON.stringify({ teams })}\n\n`);
+
+    this.sseClients.add(res);
+
+    req.on('close', () => {
+      this.sseClients.delete(res);
+    });
+  }
+
+  private handleGetTeams(res: http.ServerResponse): void {
+    const teams = this.orchestrator.getAllTeams();
+    this.sendJSON(res, teams);
+  }
+
+  private handleGetTeam(teamId: string, res: http.ServerResponse): void {
+    const status = this.orchestrator.getTeamStatus(teamId);
+    if (!status) {
+      this.sendJSON(res, { error: `Team "${teamId}" not found` }, 404);
+      return;
+    }
+    this.sendJSON(res, status);
+  }
+
+  private async handleCreateTeam(
+    req: http.IncomingMessage,
+    res: http.ServerResponse
+  ): Promise<void> {
+    try {
+      const body = JSON.parse(await this.readBody(req));
+      const { name, projectPath, task } = body;
+
+      if (!name || !projectPath) {
+        this.sendJSON(res, { error: 'name and projectPath are required' }, 400);
+        return;
+      }
+
+      const state = this.orchestrator.createTeam(name, projectPath);
+
+      if (task) {
+        this.orchestrator.assignTask(name, task);
+      }
+
+      this.sendJSON(res, state.snapshot, 201);
+    } catch (err: any) {
+      this.sendJSON(res, { error: err.message }, 400);
+    }
+  }
+
+  private async handleAssignTask(
+    teamId: string,
+    req: http.IncomingMessage,
+    res: http.ServerResponse
+  ): Promise<void> {
+    try {
+      const body = JSON.parse(await this.readBody(req));
+      const { description } = body;
+
+      if (!description) {
+        this.sendJSON(res, { error: 'description is required' }, 400);
+        return;
+      }
+
+      this.orchestrator.assignTask(teamId, description);
+      this.sendJSON(res, { ok: true });
+    } catch (err: any) {
+      this.sendJSON(res, { error: err.message }, 400);
+    }
+  }
+
+  private async handleStopTeam(
+    teamId: string,
+    res: http.ServerResponse
+  ): Promise<void> {
+    try {
+      await this.orchestrator.terminateTeam(teamId);
+      this.sendJSON(res, { ok: true });
+    } catch (err: any) {
+      this.sendJSON(res, { error: err.message }, 400);
+    }
+  }
+
+  // --- Helpers ---
+
+  private readBody(req: http.IncomingMessage): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+      let data = '';
+      req.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+      req.on('end', () => resolve(data));
+      req.on('error', reject);
+    });
+  }
+
+  private sendJSON(res: http.ServerResponse, data: unknown, status = 200): void {
+    res.writeHead(status, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(data));
+  }
+
+  private send404(res: http.ServerResponse): void {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Not found' }));
+  }
+}

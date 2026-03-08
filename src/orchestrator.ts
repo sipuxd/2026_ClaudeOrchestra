@@ -61,6 +61,7 @@ export interface OrchestratorEvents {
   'task-complete': [teamId: string, phase: TeamPhase, durationMs: number];
   'message-routed': [teamId: string, message: AgentMessage];
   'agent-output': [teamId: string, instance: RoleInstance, data: string];
+  'agent-progress': [teamId: string, instance: RoleInstance, text: string];
   'agent-message': [teamId: string, instance: RoleInstance, message: AgentMessage];
   'agent-crashed': [teamId: string, instance: RoleInstance, code: number | null];
   'agent-stderr': [teamId: string, instance: RoleInstance, data: string];

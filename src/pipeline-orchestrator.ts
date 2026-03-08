@@ -110,6 +110,7 @@ interface SessionOpts {
   effort: 'low' | 'medium' | 'high' | 'max';
   disallowedTools?: string[];
   maxTurns?: number;
+  onProgress?: (accumulated: string) => void;
 }
 
 class AgentSession {
@@ -119,11 +120,13 @@ class AgentSession {
   private pendingResolve: ((text: string) => void) | null = null;
   private pendingReject: ((err: Error) => void) | null = null;
   private accumulated = '';
+  private onProgress?: (accumulated: string) => void;
   private consuming: Promise<void>;
   private _closed = false;
 
   constructor(name: string, systemPrompt: string, opts: SessionOpts) {
     this.name = name;
+    this.onProgress = opts.onProgress;
     this.channel = new PromptChannel();
 
     this.queryGen = query({
@@ -195,6 +198,10 @@ class AgentSession {
         const text = extractSdkText(msg);
         if (text) {
           this.accumulated += text;
+          // Notify progress listener (for dashboard streaming)
+          if (this.onProgress) {
+            this.onProgress(this.accumulated);
+          }
         }
 
         // Result message = turn complete
@@ -521,7 +528,12 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     ctx.pipelineRunning = false;
   }
 
-  private createSession(name: string, role: Role, cwd: string): AgentSession {
+  private createSession(
+    name: string,
+    role: Role,
+    cwd: string,
+    onProgress?: (accumulated: string) => void
+  ): AgentSession {
     const systemPrompt = this.loadRolePrompt(
       role === Role.Worker ? 'worker.claude.md' :
         role === Role.Security ? 'security.claude.md' :
@@ -536,6 +548,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
         ? this.disallowedTools[role]
         : undefined,
       maxTurns: this.maxTurnsPerRole[role],
+      onProgress,
     });
   }
 
@@ -554,7 +567,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       this.tryTransitionPhase(ctx.state, teamId, fromPhase, TeamPhase.Work, 'simple pipeline start');
 
       // Create Worker-1 session
-      const worker = this.createSession('Worker-1', Role.Worker, ctx.state.snapshot.projectPath);
+      const worker = this.createSession('Worker-1', Role.Worker, ctx.state.snapshot.projectPath,
+        (text) => this.emit('agent-progress', teamId, 'Worker-1' as any, text));
       ctx.sessions.push(worker);
 
       this.emit('agent-output', teamId, 'Worker-1' as any, `[Pipeline] Starting simple task...`);
@@ -583,10 +597,14 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
     try {
       // Create all 4 agent sessions in parallel (cold starts happen simultaneously)
-      const security = this.createSession('Security', Role.Security, cwd);
-      const worker1 = this.createSession('Worker-1', Role.Worker, cwd);
-      const worker2 = this.createSession('Worker-2', Role.Worker, cwd);
-      const reviewer = this.createSession('Reviewer', Role.Reviewer, cwd);
+      const security = this.createSession('Security', Role.Security, cwd,
+        (text) => this.emit('agent-progress', teamId, 'Security-1' as any, text));
+      const worker1 = this.createSession('Worker-1', Role.Worker, cwd,
+        (text) => this.emit('agent-progress', teamId, 'Worker-1' as any, text));
+      const worker2 = this.createSession('Worker-2', Role.Worker, cwd,
+        (text) => this.emit('agent-progress', teamId, 'Worker-2' as any, text));
+      const reviewer = this.createSession('Reviewer', Role.Reviewer, cwd,
+        (text) => this.emit('agent-progress', teamId, 'Reviewer-1' as any, text));
       ctx.sessions = [security, worker1, worker2, reviewer];
 
       // Outer loop: handles REJECTED verdicts (restart from scan)

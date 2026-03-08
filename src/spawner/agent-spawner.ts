@@ -134,6 +134,47 @@ export class AgentSpawner {
   }
 
   /**
+   * Spawn agents for selected roles only (complexity routing).
+   * For simple tasks, only Supervisor + Worker-1 are needed.
+   * For each role, spawns all instances defined in ROLE_INSTANCES,
+   * unless limitInstances is provided to restrict which instances spawn.
+   */
+  spawnSelected(
+    teamId: string,
+    projectPath: string,
+    roles: Role[],
+    limitInstances?: RoleInstance[]
+  ): AgentProcess[] {
+    if (this.teams.has(teamId)) {
+      throw new Error(`Team ${teamId} already has spawned agents`);
+    }
+
+    const agents: AgentProcess[] = [];
+    const teamMap = new Map<RoleInstance, AgentProcess>();
+    const respawnMap = new Map<RoleInstance, number>();
+
+    for (const role of roles) {
+      const instances = ROLE_INSTANCES[role];
+      if (!instances) continue;
+
+      for (const instance of instances) {
+        // Skip instances not in the filter (when filter is provided)
+        if (limitInstances && !limitInstances.includes(instance)) continue;
+
+        const agent = this.createAgent(teamId, role, instance, projectPath);
+        agent.spawn();
+        teamMap.set(instance, agent);
+        respawnMap.set(instance, 0);
+        agents.push(agent);
+      }
+    }
+
+    this.teams.set(teamId, teamMap);
+    this.respawnCounts.set(teamId, respawnMap);
+    return agents;
+  }
+
+  /**
    * Spawn a single agent for a team.
    */
   spawnAgent(teamId: string, role: Role, instance: RoleInstance, projectPath: string): AgentProcess {

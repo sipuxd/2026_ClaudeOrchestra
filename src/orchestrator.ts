@@ -15,6 +15,7 @@ import { StatePersistence } from './state/persistence.js';
 import { AgentSpawner } from './spawner/agent-spawner.js';
 import { AgentProcess, ProcessState } from './spawner/agent-process.js';
 import { PhaseController, type PhaseAction, type PhaseEvaluation } from './phases/phase-controller.js';
+import { classifyComplexity } from './router/complexity-router.js';
 
 // --- Configuration ---
 
@@ -55,6 +56,7 @@ const DEFAULT_CONFIG: Required<Omit<OrchestraConfig, 'claudeBin' | 'spawnArgs' |
 export interface OrchestratorEvents {
   'team-created': [teamId: string];
   'task-assigned': [teamId: string, description: string];
+  'task-classified': [teamId: string, complexity: string, agentCount: number];
   'phase-transition': [teamId: string, from: TeamPhase, to: TeamPhase, trigger: string];
   'task-complete': [teamId: string, phase: TeamPhase, durationMs: number];
   'message-routed': [teamId: string, message: AgentMessage];
@@ -198,12 +200,26 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     if (ctx.state.isTerminal) throw new Error(`Team "${teamId}" is in terminal state: ${ctx.state.currentPhase}`);
     if (ctx.state.snapshot.currentTask) throw new Error(`Team "${teamId}" already has an active task`);
 
-    // Record the task
+    // Record the task and classify complexity
     ctx.state.assignTask(taskDescription);
+    const complexity = classifyComplexity(taskDescription);
+    ctx.state.setTaskComplexity(complexity);
     this.spawner.resetRespawnCounts(teamId);
 
-    // Spawn all agents
-    const agents = this.spawner.spawnTeam(teamId, ctx.state.snapshot.projectPath);
+    // Spawn agents based on complexity routing
+    let agents: AgentProcess[];
+    if (complexity === 'simple') {
+      // Simple: Supervisor-1 + Worker-1 only (skip Security, Reviewer, Worker-2)
+      agents = this.spawner.spawnSelected(
+        teamId,
+        ctx.state.snapshot.projectPath,
+        [Role.Supervisor, Role.Worker],
+        ['Supervisor-1', 'Worker-1'] as RoleInstance[]
+      );
+    } else {
+      // Standard: all 5 agents (full pipeline)
+      agents = this.spawner.spawnTeam(teamId, ctx.state.snapshot.projectPath);
+    }
     ctx.agentsReady = true;
 
     // Wire up agent events
@@ -224,6 +240,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
 
     // Persist state
     this.persistence.persistNow(ctx.state);
+    this.emit('task-classified', teamId, complexity, agents.length);
     this.emit('task-assigned', teamId, taskDescription);
   }
 
@@ -830,6 +847,24 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
   // --- Private: Prompt Builders ---
 
   private buildTaskPrompt(taskDescription: string, ctx: TeamContext): string {
+    const complexity = ctx.state.snapshot.currentTask?.complexity ?? 'standard';
+
+    if (complexity === 'simple') {
+      // Simple pipeline: only Supervisor-1 + Worker-1
+      // Skip Security scan, skip Review, assign directly to Worker-1
+      return (
+        'You are the Supervisor for this team. A new task has been assigned.\n\n' +
+        `TASK: ${taskDescription}\n\n` +
+        'PIPELINE: SIMPLE — Only Worker-1 is available. No Security Agent. No Reviewer.\n\n' +
+        'Begin immediately:\n' +
+        '1. Send a task-assignment directly to Worker-1 with clear instructions.\n' +
+        '2. Do NOT send scan-requests to Security (not available).\n' +
+        '3. Do NOT send to Worker-2 (not available).\n\n' +
+        'Use the ORCHESTRA-MESSAGE-START/END delimiters to send messages.'
+      );
+    }
+
+    // Standard pipeline: full 5-agent team
     return (
       'You are the Supervisor for this team. A new task has been assigned.\n\n' +
       `TASK: ${taskDescription}\n\n` +

@@ -202,6 +202,69 @@ describe('Work phase', () => {
     const result = controller.evaluate(team, msg);
     expect(result.shouldTransition).toBe(false);
   });
+
+  // --- Complexity routing ---
+
+  it('transitions to Done on task-complete when complexity is simple', () => {
+    // Set task with simple complexity
+    team.assignTask('Create hello.txt');
+    team.setTaskComplexity('simple');
+
+    const msg = mockMessage({
+      flag: WorkerToSupervisorFlag.TaskComplete,
+      roleSource: Role.Worker,
+      roleSourceInstance: 'Worker-1',
+      phase: Phase.Work,
+    });
+
+    const result = controller.evaluate(team, msg);
+    expect(result.shouldTransition).toBe(true);
+    expect(result.targetPhase).toBe(TeamPhase.Done);
+    expect(result.trigger).toContain('simple');
+  });
+
+  it('does not include send-sweep-request for simple tasks', () => {
+    team.assignTask('Create hello.txt');
+    team.setTaskComplexity('simple');
+
+    const msg = mockMessage({
+      flag: WorkerToSupervisorFlag.TaskComplete,
+      roleSource: Role.Worker,
+      roleSourceInstance: 'Worker-1',
+      phase: Phase.Work,
+    });
+
+    const result = controller.evaluate(team, msg);
+    expect(result.actions.some((a) => a.type === 'send-sweep-request')).toBe(false);
+  });
+
+  it('transitions to Handoff on task-complete when complexity is standard', () => {
+    team.assignTask('Build an HTTP server with tests');
+    team.setTaskComplexity('standard');
+
+    const msg = mockMessage({
+      flag: WorkerToSupervisorFlag.TaskComplete,
+      roleSource: Role.Worker,
+      roleSourceInstance: 'Worker-1',
+      phase: Phase.Work,
+    });
+
+    const result = controller.evaluate(team, msg);
+    expect(result.shouldTransition).toBe(true);
+    expect(result.targetPhase).toBe(TeamPhase.Handoff);
+  });
+
+  it('defaults to standard routing when no complexity is set', () => {
+    const msg = mockMessage({
+      flag: WorkerToSupervisorFlag.TaskComplete,
+      roleSource: Role.Worker,
+      roleSourceInstance: 'Worker-1',
+      phase: Phase.Work,
+    });
+
+    const result = controller.evaluate(team, msg);
+    expect(result.targetPhase).toBe(TeamPhase.Handoff);
+  });
 });
 
 // =============================================

@@ -40,6 +40,7 @@ function parseLogLevel(value: string | undefined): LogLevel {
 export type LogEvent =
   | 'team_created'
   | 'task_assigned'
+  | 'task_classified'
   | 'task_complete'
   | 'agent_spawned'
   | 'agent_errored'
@@ -250,6 +251,13 @@ export class Logger {
   attach(orchestrator: Orchestrator): void {
     orchestrator.on('team-created', (teamId) => {
       this.info('team_created', `Team created: ${teamId}`, { teamId });
+    });
+
+    orchestrator.on('task-classified', (teamId, complexity, agentCount) => {
+      this.info('task_classified', `Complexity: ${complexity} (${agentCount} agents)`, {
+        teamId,
+        data: { complexity, agentCount },
+      });
     });
 
     orchestrator.on('task-assigned', (teamId, description) => {
@@ -475,6 +483,14 @@ export class Logger {
 
       case 'team_created': {
         line += `${ANSI.bold}Team created${ANSI.reset}`;
+        break;
+      }
+
+      case 'task_classified': {
+        const cplx = entry.data.complexity as string;
+        const count = entry.data.agentCount as number;
+        const cplxColor = cplx === 'simple' ? ANSI.green : ANSI.cyan;
+        line += `${ANSI.bold}Route:${ANSI.reset} ${cplxColor}${cplx}${ANSI.reset} pipeline (${count} agents)`;
         break;
       }
 

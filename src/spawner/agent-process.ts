@@ -14,6 +14,20 @@ import { Role, type RoleInstance } from '../roles/role-types.js';
 const MESSAGE_START = '---ORCHESTRA-MESSAGE-START---';
 const MESSAGE_END = '---ORCHESTRA-MESSAGE-END---';
 
+// --- Decision categories for "last message wins" ---
+// Flags in the same category are contradictory within a turn —
+// if an agent sends multiple, only the last one counts.
+// Flags in DIFFERENT categories are independent and all pass through.
+const REVIEW_VERDICT_FLAGS = new Set([
+  'review-approved', 'review-revise', 'review-rejected',
+]);
+
+function getDecisionCategory(flag: string): string {
+  if (REVIEW_VERDICT_FLAGS.has(flag)) return 'review-verdict';
+  // Every other flag is its own category — no deduplication
+  return flag;
+}
+
 // --- Agent process events ---
 
 export interface AgentProcessEvents {
@@ -517,26 +531,48 @@ export class AgentProcess extends EventEmitter<AgentProcessEvents> {
 
   /**
    * Flush the turn message buffer.
-   * "Last message wins" — if the agent sent multiple messages in one turn
-   * (e.g., rejected then reconsidered and approved), only the final message
-   * is emitted as an authoritative 'message' event. Earlier messages are
-   * emitted as 'output' so they're visible in logs but don't trigger
-   * phase transitions.
+   *
+   * "Last message wins" applies ONLY within a decision category.
+   * Review verdicts (review-approved/revise/rejected) are one category —
+   * if an agent sends review-rejected then review-approved in the same turn,
+   * only the approval (last) is emitted as a real message.
+   *
+   * Messages in different categories (e.g., task-assignment to Worker-1 and
+   * scan-request to Security-1) are NOT contradictory — they all pass through.
    */
   private flushTurnMessages(): void {
     if (this.turnMessageBuffer.length === 0) return;
 
-    if (this.turnMessageBuffer.length === 1) {
-      // Single message — emit directly
-      this.emit('message', this.turnMessageBuffer[0]);
-    } else {
-      // Multiple messages — agent deliberated and changed its mind.
-      // Emit earlier messages as output (deliberation log),
-      // only the last one as the authoritative decision.
-      for (let i = 0; i < this.turnMessageBuffer.length - 1; i++) {
-        this.emit('output', `[deliberation] ${this.turnMessageBuffer[i]}`);
+    // Parse flags and group by decision category
+    const entries: Array<{ json: string; category: string }> = [];
+    for (const raw of this.turnMessageBuffer) {
+      let category = 'unknown';
+      try {
+        const parsed = JSON.parse(raw);
+        const flag = parsed.flag ?? '';
+        category = getDecisionCategory(flag);
+      } catch {
+        // If we can't parse, treat as unique category
+        category = `unparseable-${entries.length}`;
       }
-      this.emit('message', this.turnMessageBuffer[this.turnMessageBuffer.length - 1]);
+      entries.push({ json: raw, category });
+    }
+
+    // For each category, find the LAST entry — that's the authoritative one.
+    // Track which indices are authoritative.
+    const lastByCategory = new Map<string, number>();
+    for (let i = 0; i < entries.length; i++) {
+      lastByCategory.set(entries[i].category, i);
+    }
+
+    // Emit in original order: authoritative as 'message', superseded as 'output'
+    for (let i = 0; i < entries.length; i++) {
+      const isAuthoritative = lastByCategory.get(entries[i].category) === i;
+      if (isAuthoritative) {
+        this.emit('message', entries[i].json);
+      } else {
+        this.emit('output', `[deliberation] ${entries[i].json}`);
+      }
     }
 
     this.turnMessageBuffer = [];

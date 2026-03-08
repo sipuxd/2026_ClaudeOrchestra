@@ -143,6 +143,12 @@ export class AgentProcess extends EventEmitter<AgentProcessEvents> {
   private abortController: AbortController | null = null;
   private sdkStreamActive = false;
 
+  // "Last message wins" — in SDK mode, buffer messages within a turn
+  // so the agent can deliberate and change its mind. Only the final
+  // message in a turn is treated as the authoritative decision.
+  private turnMessageBuffer: string[] = [];
+  private isSDKMode = false;
+
   private _state: ProcessState = ProcessState.Starting;
   private _pid: number | null = null;
   private _exitCode: number | null = null;
@@ -307,6 +313,7 @@ export class AgentProcess extends EventEmitter<AgentProcessEvents> {
 
     this._state = ProcessState.Running;
     this.sdkStreamActive = true;
+    this.isSDKMode = true;
 
     // Consume the SDK stream in the background
     this.consumeSdkStream();
@@ -327,11 +334,13 @@ export class AgentProcess extends EventEmitter<AgentProcessEvents> {
 
         // On result message, the turn is complete
         if (msg.type === 'result') {
-          // Flush remaining buffer as output
+          // Flush remaining stdout buffer as output
           if (this.stdoutBuffer.trim()) {
             this.emit('output', this.stdoutBuffer.trim());
             this.stdoutBuffer = '';
           }
+          // Flush the turn message buffer — "last message wins"
+          this.flushTurnMessages();
         }
       }
     } catch (err: any) {
@@ -487,7 +496,13 @@ export class AgentProcess extends EventEmitter<AgentProcessEvents> {
       const msgStart = startIdx + MESSAGE_START.length;
       const msgJson = this.stdoutBuffer.substring(msgStart, endIdx).trim();
       if (msgJson) {
-        this.emit('message', msgJson);
+        if (this.isSDKMode) {
+          // Buffer messages during the turn — flush on turn completion
+          this.turnMessageBuffer.push(msgJson);
+        } else {
+          // child_process mode (tests) — emit immediately
+          this.emit('message', msgJson);
+        }
       }
 
       this.stdoutBuffer = this.stdoutBuffer.substring(endIdx + MESSAGE_END.length);
@@ -498,6 +513,33 @@ export class AgentProcess extends EventEmitter<AgentProcessEvents> {
       if (remaining) this.emit('output', remaining);
       this.stdoutBuffer = '';
     }
+  }
+
+  /**
+   * Flush the turn message buffer.
+   * "Last message wins" — if the agent sent multiple messages in one turn
+   * (e.g., rejected then reconsidered and approved), only the final message
+   * is emitted as an authoritative 'message' event. Earlier messages are
+   * emitted as 'output' so they're visible in logs but don't trigger
+   * phase transitions.
+   */
+  private flushTurnMessages(): void {
+    if (this.turnMessageBuffer.length === 0) return;
+
+    if (this.turnMessageBuffer.length === 1) {
+      // Single message — emit directly
+      this.emit('message', this.turnMessageBuffer[0]);
+    } else {
+      // Multiple messages — agent deliberated and changed its mind.
+      // Emit earlier messages as output (deliberation log),
+      // only the last one as the authoritative decision.
+      for (let i = 0; i < this.turnMessageBuffer.length - 1; i++) {
+        this.emit('output', `[deliberation] ${this.turnMessageBuffer[i]}`);
+      }
+      this.emit('message', this.turnMessageBuffer[this.turnMessageBuffer.length - 1]);
+    }
+
+    this.turnMessageBuffer = [];
   }
 
   private killProcess(signal: NodeJS.Signals): void {

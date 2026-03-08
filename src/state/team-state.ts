@@ -88,7 +88,7 @@ const VALID_PHASE_TRANSITIONS: Record<TeamPhase, readonly TeamPhase[]> = {
   [TeamPhase.Work]: [TeamPhase.Handoff, TeamPhase.Done, TeamPhase.Errored, TeamPhase.Cancelled],
   [TeamPhase.Handoff]: [TeamPhase.Review, TeamPhase.Work, TeamPhase.Errored, TeamPhase.Cancelled],
   [TeamPhase.Review]: [TeamPhase.Done, TeamPhase.Work, TeamPhase.PreWork, TeamPhase.Errored, TeamPhase.Cancelled],
-  [TeamPhase.Done]: [],
+  [TeamPhase.Done]: [TeamPhase.PreWork],
   [TeamPhase.Errored]: [TeamPhase.PreWork, TeamPhase.Cancelled],
   [TeamPhase.Cancelled]: [],
 };
@@ -316,6 +316,23 @@ export class TeamState {
       assignedAt: new Date().toISOString(),
     };
     this.data.counters = { revisions: 0, rejections: 0, totalBackwardTransitions: 0 };
+    this.touch();
+  }
+
+  clearTask(): void {
+    this.data.currentTask = null;
+    this.data.counters = { revisions: 0, rejections: 0, totalBackwardTransitions: 0 };
+    this.touch();
+  }
+
+  /** Reset all agents to Spawning state (used on re-launch). */
+  resetAgents(): void {
+    for (const agent of Object.values(this.data.agents)) {
+      agent.state = AgentState.Spawning;
+      agent.currentJob = '';
+      agent.lastMessageAt = null;
+      agent.pid = null;
+    }
     this.touch();
   }
 

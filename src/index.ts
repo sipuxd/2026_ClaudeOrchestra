@@ -24,7 +24,7 @@ function loadConfig(configPath: string): Partial<OrchestraConfig> {
     const parsed = JSON.parse(raw);
     const config: Partial<OrchestraConfig> = {};
 
-    if (parsed.engine?.dataDirectory) config.dataDirectory = parsed.engine.dataDirectory;
+    if (parsed.engine?.registryPath) config.registryPath = parsed.engine.registryPath;
     if (parsed.engine?.logDirectory) config.logDirectory = parsed.engine.logDirectory;
     if (parsed.engine?.tickIntervalMs) config.tickIntervalMs = parsed.engine.tickIntervalMs;
     if (parsed.teams?.maxConcurrentTeams) config.maxConcurrentTeams = parsed.teams.maxConcurrentTeams;
@@ -161,7 +161,7 @@ ${colors.bold}Commands:${colors.reset}
 ${colors.bold}Flags:${colors.reset}
   --mode <legacy|subagent|pipeline>  Orchestration mode (default: legacy)
   --port <n>                 Dashboard port (default: 3460)
-  --data-dir <path>          Data directory (default: ./data)
+  --registry <path>          Registry file path (default: ./registry.json)
   --tick-interval <ms>       Main loop interval (default: 1000)
   --max-teams <n>            Max concurrent teams (default: 5)
   --config <path>            Config file path (default: ./orchestra.config.json)
@@ -252,7 +252,7 @@ async function main(): Promise<void> {
 
   // Apply CLI flag overrides
   const config: Partial<OrchestraConfig> = { ...fileConfig };
-  if (parsed.flags['--data-dir']) config.dataDirectory = parsed.flags['--data-dir'];
+  if (parsed.flags['--registry']) config.registryPath = parsed.flags['--registry'];
   if (parsed.flags['--tick-interval']) config.tickIntervalMs = parseInt(parsed.flags['--tick-interval'], 10);
   if (parsed.flags['--max-teams']) config.maxConcurrentTeams = parseInt(parsed.flags['--max-teams'], 10);
   if (parsed.flags['--model-supervisor']) {
@@ -283,7 +283,7 @@ async function main(): Promise<void> {
 
   if (mode === 'pipeline') {
     const pipelineConfig: Partial<PipelineOrchestraConfig> = {
-      dataDirectory: config.dataDirectory,
+      registryPath: config.registryPath,
       rolesDir: path.resolve('roles/subagent'),
       maxConcurrentTeams: config.maxConcurrentTeams,
       models: config.models,
@@ -295,7 +295,7 @@ async function main(): Promise<void> {
     log(`${colors.green}Mode: pipeline${colors.reset} (deterministic code-driven orchestration)`);
   } else if (mode === 'subagent') {
     const subagentConfig: Partial<SubagentOrchestraConfig> = {
-      dataDirectory: config.dataDirectory,
+      registryPath: config.registryPath,
       rolesDir: path.resolve('roles/subagent'),
       maxConcurrentTeams: config.maxConcurrentTeams,
       models: config.models,
@@ -312,15 +312,11 @@ async function main(): Promise<void> {
   }
 
   // Create and attach structured logger
-  const logDir = config.logDirectory ??
-    (config.dataDirectory ? path.join(config.dataDirectory, 'logs') : './data/logs');
-  const teamsDir = config.dataDirectory
-    ? path.join(config.dataDirectory, 'teams')
-    : './data/teams';
+  const logDir = config.logDirectory ?? './logs';
 
   const logger = new Logger({
     logDirectory: logDir,
-    teamsDirectory: teamsDir,
+    teamsDirectory: path.join(logDir, 'teams'),
   });
   // Logger.attach() expects Orchestrator but both emit compatible events
   logger.attach(orchestrator as Orchestrator);

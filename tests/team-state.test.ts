@@ -173,12 +173,21 @@ describe('phase transitions', () => {
     expect(() => team.transitionPhase(TeamPhase.PreWork)).toThrow(TransitionError);
   });
 
-  it('rejects transitions from done', () => {
+  it('allows done → pre_work (re-launch)', () => {
     team.transitionPhase(TeamPhase.Work);
     team.transitionPhase(TeamPhase.Handoff);
     team.transitionPhase(TeamPhase.Review);
     team.transitionPhase(TeamPhase.Done);
-    expect(() => team.transitionPhase(TeamPhase.PreWork)).toThrow(TransitionError);
+    team.transitionPhase(TeamPhase.PreWork);
+    expect(team.currentPhase).toBe(TeamPhase.PreWork);
+  });
+
+  it('rejects done → work (must go through pre_work)', () => {
+    team.transitionPhase(TeamPhase.Work);
+    team.transitionPhase(TeamPhase.Handoff);
+    team.transitionPhase(TeamPhase.Review);
+    team.transitionPhase(TeamPhase.Done);
+    expect(() => team.transitionPhase(TeamPhase.Work)).toThrow(TransitionError);
   });
 
   it('rejects transitions from cancelled', () => {
@@ -440,20 +449,28 @@ describe('task management', () => {
 // =============================================
 
 describe('StatePersistence', () => {
-  let teamsDir: string;
+  let baseDir: string;
   let persistence: StatePersistence;
 
   beforeEach(() => {
-    teamsDir = path.join('/private/tmp/claude-501', `test-state-${randomUUID()}`);
-    persistence = new StatePersistence({ teamsDir, debounceMs: 50 });
+    baseDir = path.join('/private/tmp/claude-501', `test-state-${randomUUID()}`);
+    persistence = new StatePersistence({ debounceMs: 50 });
   });
 
   afterEach(() => {
     persistence.dispose();
-    fs.rmSync(teamsDir, { recursive: true, force: true });
+    fs.rmSync(baseDir, { recursive: true, force: true });
   });
 
+  /** Helper to register a team dir under baseDir. */
+  function registerTeam(teamId: string): string {
+    const teamDir = path.join(baseDir, 'teams', teamId);
+    persistence.registerTeamDir(teamId, teamDir);
+    return teamDir;
+  }
+
   it('persists and loads team state', () => {
+    registerTeam('team-1');
     const team = TeamState.create('team-1', 'test', '/path');
     persistence.ensureTeamDir('team-1');
     persistence.persistNow(team);
@@ -467,23 +484,25 @@ describe('StatePersistence', () => {
   });
 
   it('returns null for nonexistent team', () => {
+    registerTeam('nonexistent');
     expect(persistence.load('nonexistent')).toBeNull();
   });
 
-  it('lists all teams with persisted state', () => {
+  it('loads state from a directory path', () => {
+    const teamDir = registerTeam('team-1');
     const team1 = TeamState.create('team-1', 'a', '/a');
-    const team2 = TeamState.create('team-2', 'b', '/b');
     persistence.ensureTeamDir('team-1');
-    persistence.ensureTeamDir('team-2');
     persistence.persistNow(team1);
-    persistence.persistNow(team2);
 
-    const teams = persistence.listTeams();
-    expect(teams).toContain('team-1');
-    expect(teams).toContain('team-2');
+    // loadFromDir works without prior registration
+    const newPersistence = new StatePersistence({ debounceMs: 50 });
+    const loaded = newPersistence.loadFromDir(teamDir);
+    expect(loaded).not.toBeNull();
+    expect(loaded!.teamId).toBe('team-1');
   });
 
   it('restores state with fromData', () => {
+    registerTeam('team-1');
     const team = TeamState.create('team-1', 'test', '/path');
     team.transitionPhase(TeamPhase.Work);
     persistence.ensureTeamDir('team-1');
@@ -496,6 +515,7 @@ describe('StatePersistence', () => {
   });
 
   it('force-persists on phase transition', () => {
+    registerTeam('team-1');
     const team = TeamState.create('team-1', 'test', '/path');
     persistence.ensureTeamDir('team-1');
 
@@ -507,6 +527,7 @@ describe('StatePersistence', () => {
   });
 
   it('debounces non-phase-transition writes', async () => {
+    registerTeam('team-1');
     const team = TeamState.create('team-1', 'test', '/path');
     persistence.ensureTeamDir('team-1');
     persistence.persistNow(team); // Initial write
@@ -527,6 +548,7 @@ describe('StatePersistence', () => {
   });
 
   it('marks state as not dirty after persist', () => {
+    registerTeam('team-1');
     const team = TeamState.create('team-1', 'test', '/path');
     persistence.ensureTeamDir('team-1');
 
@@ -541,6 +563,7 @@ describe('StatePersistence', () => {
   });
 
   it('survives crash recovery — phase and counters preserved', () => {
+    const teamDir = registerTeam('team-1');
     const team = TeamState.create('team-1', 'test', '/path');
     persistence.ensureTeamDir('team-1');
     team.transitionPhase(TeamPhase.Work);
@@ -548,9 +571,9 @@ describe('StatePersistence', () => {
     team.transitionPhase(TeamPhase.Work); // rev 1
     persistence.persistNow(team);
 
-    // Simulate crash and recovery
-    const newPersistence = new StatePersistence({ teamsDir, debounceMs: 50 });
-    const data = newPersistence.load('team-1')!;
+    // Simulate crash and recovery — use loadFromDir (no prior registration)
+    const newPersistence = new StatePersistence({ debounceMs: 50 });
+    const data = newPersistence.loadFromDir(teamDir)!;
     const restored = TeamState.fromData(data);
 
     expect(restored.currentPhase).toBe(TeamPhase.Work);

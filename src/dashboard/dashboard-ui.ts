@@ -42,14 +42,26 @@ ${CSS}
       </div>
       <div class="detail-timing" id="detailTiming"></div>
     </div>
+    <div class="detail-project" id="detailProject"></div>
     <div class="phase-bar" id="phaseBar"></div>
+    <div class="feedback-bar" id="feedbackBar" style="display:none"></div>
     <div class="task-section" id="taskSection"></div>
     <div class="agent-panels" id="agentPanels"></div>
     <div class="controls-bar" id="controlsBar">
-      <button class="btn btn-danger" id="stopBtn" onclick="stopCurrentTeam()">Stop</button>
-      <div class="relaunch-group">
-        <textarea id="relaunchText" placeholder="Edit task description and re-launch..."></textarea>
-        <button class="btn btn-primary" id="relaunchBtn" onclick="relaunchCurrentTeam()">Re-launch</button>
+      <div class="controls-actions" id="controlsActions">
+        <button class="btn btn-danger" id="stopBtn" onclick="stopCurrentTeam()">Stop</button>
+        <button class="btn btn-merge" id="pushMergeBtn" onclick="pushAndMerge()" style="display:none">Push &amp; Merge to Main</button>
+        <button class="btn btn-preview" id="previewBtn" onclick="previewProject()" style="display:none">Preview</button>
+      </div>
+      <div class="relaunch-group" id="relaunchGroup">
+        <label class="relaunch-label">Next Task or Ask</label>
+        <div class="relaunch-input">
+          <textarea id="relaunchText" placeholder="Describe what to build next, or ask a question..."></textarea>
+          <div class="relaunch-buttons">
+            <button class="btn btn-primary" id="relaunchBtn" onclick="relaunchCurrentTeam()">Run Task</button>
+            <button class="btn btn-ask" id="askBtn" onclick="askAgent()">Ask</button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -141,6 +153,53 @@ body {
   color: #484f58;
   padding: 40px 16px;
   font-size: 0.9rem;
+}
+
+.sidebar-project-group {
+  margin-bottom: 12px;
+}
+
+.sidebar-project-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px 4px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.sidebar-project-header:hover .sidebar-project-name { color: #c9d1d9; }
+
+.sidebar-project-chevron {
+  font-size: 0.55rem;
+  color: #484f58;
+  transition: transform 0.15s;
+}
+
+.sidebar-project-header.collapsed .sidebar-project-chevron {
+  transform: rotate(-90deg);
+}
+
+.sidebar-project-name {
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: #8b949e;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.sidebar-project-count {
+  font-size: 0.6rem;
+  color: #484f58;
+  margin-left: auto;
+}
+
+.sidebar-project-teams {
+  overflow: hidden;
+}
+
+.sidebar-project-teams.collapsed {
+  display: none;
 }
 
 .team-item {
@@ -249,6 +308,33 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+.detail-project {
+  font-size: 0.8rem;
+  color: #484f58;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  margin-bottom: 16px;
+  padding: 6px 10px;
+  background: #0d1117;
+  border-radius: 6px;
+  border: 1px solid #21262d;
+  display: none;
+}
+
+.detail-project .project-label {
+  color: #8b949e;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-size: 0.65rem;
+  margin-right: 8px;
+}
+
+.detail-project .git-info {
+  color: #58a6ff;
+  margin-left: 16px;
+}
+
 /* --- Phase Bar --- */
 .phase-bar {
   display: flex;
@@ -281,28 +367,31 @@ body {
 }
 
 .phase-dot.past {
-  border-color: var(--phase-color);
-  background: var(--phase-color);
-  color: #0d1117;
+  border-color: #3fb950;
+  background: #3fb950;
+  color: #fff;
+  font-weight: 700;
 }
 
 .phase-dot.active {
-  border-color: var(--phase-color);
-  background: var(--phase-color);
-  color: #0d1117;
-  box-shadow: 0 0 12px var(--phase-color);
+  border-color: #3fb950;
+  background: #3fb950;
+  color: #fff;
+  font-weight: 700;
+  box-shadow: 0 0 12px #3fb950;
   animation: pulse 1.5s infinite;
 }
 
 .phase-dot.errored {
   border-color: #f85149;
   background: #f85149;
-  color: #0d1117;
+  color: #fff;
+  font-weight: 700;
 }
 
 @keyframes pulse {
-  0%, 100% { box-shadow: 0 0 8px var(--phase-color); }
-  50% { box-shadow: 0 0 20px var(--phase-color); }
+  0%, 100% { box-shadow: 0 0 8px #3fb950; }
+  50% { box-shadow: 0 0 20px #3fb950; }
 }
 
 .phase-label {
@@ -324,7 +413,7 @@ body {
   transition: background 0.3s;
 }
 
-.phase-connector.past { background: var(--conn-color); }
+.phase-connector.past { background: #3fb950; }
 
 /* --- Task Section --- */
 .task-section {
@@ -424,20 +513,38 @@ body {
 /* --- Controls Bar --- */
 .controls-bar {
   display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding-top: 8px;
+  flex-direction: column;
+  gap: 16px;
+  padding-top: 12px;
   border-top: 1px solid #30363d;
 }
 
+.controls-actions {
+  display: flex;
+  gap: 10px;
+}
+
 .relaunch-group {
-  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.relaunch-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: #8b949e;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.relaunch-input {
   display: flex;
   gap: 8px;
   align-items: flex-start;
 }
 
-.relaunch-group textarea {
+.relaunch-input textarea {
   flex: 1;
   background: #0d1117;
   border: 1px solid #30363d;
@@ -451,9 +558,36 @@ body {
   max-height: 120px;
 }
 
-.relaunch-group textarea:focus {
+.relaunch-input textarea:focus {
   outline: none;
   border-color: #58a6ff;
+}
+
+.relaunch-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.btn-ask {
+  background: #21262d;
+  border: 1px solid #30363d;
+  color: #c9d1d9;
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, border-color 0.15s;
+}
+.btn-ask:hover {
+  background: #30363d;
+  border-color: #484f58;
+}
+.btn-ask:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* --- Buttons --- */
@@ -479,6 +613,24 @@ body {
   color: #fff;
 }
 .btn-danger:hover { background: #f85149; }
+
+.btn-merge {
+  background: #1f6feb;
+  color: #fff;
+}
+.btn-merge:hover { background: #388bfd; }
+.btn-merge:disabled {
+  background: #21262d;
+  color: #484f58;
+  cursor: not-allowed;
+}
+
+.btn-preview {
+  background: #21262d;
+  color: #c9d1d9;
+  border: 1px solid #30363d;
+}
+.btn-preview:hover { background: #30363d; color: #f0f6fc; }
 
 .btn-ghost {
   background: transparent;
@@ -557,6 +709,102 @@ body {
   min-height: 20px;
 }
 
+/* --- Feedback Bar --- */
+.feedback-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.feedback-item {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 12px 16px;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  animation: feedback-slide 0.3s ease;
+}
+
+.feedback-item.info     { border-left: 3px solid #58a6ff; }
+.feedback-item.warning  { border-left: 3px solid #d29922; }
+.feedback-item.question { border-left: 3px solid #bc8cff; }
+.feedback-item.decision { border-left: 3px solid #f78166; }
+
+.feedback-icon {
+  font-size: 16px;
+  flex-shrink: 0;
+  margin-top: 1px;
+  width: 20px;
+  text-align: center;
+}
+
+.feedback-content { flex: 1; min-width: 0; }
+
+.feedback-title {
+  font-weight: 600;
+  color: #e6edf3;
+  font-size: 0.85rem;
+  margin-bottom: 2px;
+}
+
+.feedback-message {
+  color: #8b949e;
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+
+.feedback-time {
+  color: #484f58;
+  font-size: 0.7rem;
+  margin-top: 4px;
+}
+
+.feedback-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.feedback-actions button {
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  color: #c9d1d9;
+  padding: 4px 12px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.feedback-actions button:hover {
+  background: #30363d;
+  border-color: #484f58;
+}
+
+.feedback-dismiss {
+  background: none;
+  border: none;
+  color: #484f58;
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+  flex-shrink: 0;
+  transition: color 0.15s;
+}
+.feedback-dismiss:hover {
+  color: #c9d1d9;
+}
+
+@keyframes feedback-slide {
+  from { transform: translateY(-8px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
 /* --- Notifications --- */
 .notification-area {
   position: fixed;
@@ -597,8 +845,10 @@ let teams = {};
 let selectedTeamId = null;
 let agentOutputs = {};
 let agentPanelCollapsed = {};
+let projectCollapsed = {};
 let taskStartTimes = {};
 let timingIntervals = {};
+let feedbackItems = {};
 
 // --- Phase config ---
 const PHASES = ['pre_work', 'work', 'handoff', 'review', 'done'];
@@ -635,6 +885,7 @@ evtSource.addEventListener('task-assigned', (e) => {
     teams[teamId].currentTask = { description, assignedAt: timestamp };
     taskStartTimes[teamId] = Date.now();
     agentOutputs[teamId] = {};
+    feedbackItems[teamId] = [];
     startTimingInterval(teamId);
   }
   if (teamId === selectedTeamId) renderTeamDetail();
@@ -654,7 +905,10 @@ evtSource.addEventListener('phase-transition', (e) => {
     teams[teamId].currentPhase = to;
   }
   renderSidebar();
-  if (teamId === selectedTeamId) renderPhaseBar();
+  if (teamId === selectedTeamId) {
+    renderPhaseBar();
+    renderControlsBar();
+  }
 });
 
 evtSource.addEventListener('agent-output', (e) => {
@@ -681,6 +935,7 @@ evtSource.addEventListener('task-complete', (e) => {
   if (teamId === selectedTeamId) {
     renderPhaseBar();
     renderTiming(durationMs);
+    renderControlsBar();
     // Mark all agent panels as done
     AGENTS.forEach(a => {
       const dot = document.querySelector('#agent-' + CSS.escape(a) + ' .agent-dot');
@@ -697,6 +952,14 @@ evtSource.addEventListener('error', (e) => {
   showNotification('Error in ' + teamId + ': ' + message, 'error');
 });
 
+evtSource.addEventListener('feedback', (e) => {
+  const data = JSON.parse(e.data);
+  const { teamId } = data;
+  if (!feedbackItems[teamId]) feedbackItems[teamId] = [];
+  feedbackItems[teamId].push(data);
+  if (teamId === selectedTeamId) renderFeedbackBar();
+});
+
 // --- Render Functions ---
 
 function renderSidebar() {
@@ -706,24 +969,60 @@ function renderSidebar() {
     list.innerHTML = '<div class="empty-sidebar">No teams yet</div>';
     return;
   }
-  // Sort: active teams first, then by name
+
+  // Group teams by project path
+  const groups = {};
+  ids.forEach(id => {
+    const proj = teams[id].projectPath || 'Unknown Project';
+    if (!groups[proj]) groups[proj] = [];
+    groups[proj].push(id);
+  });
+
+  // Sort teams within each group: active first, then by name
   const terminal = ['done', 'errored', 'cancelled'];
-  ids.sort((a, b) => {
-    const aActive = !terminal.includes(teams[a].currentPhase);
-    const bActive = !terminal.includes(teams[b].currentPhase);
-    if (aActive !== bActive) return aActive ? -1 : 1;
+  Object.values(groups).forEach(group => {
+    group.sort((a, b) => {
+      const aActive = !terminal.includes(teams[a].currentPhase);
+      const bActive = !terminal.includes(teams[b].currentPhase);
+      if (aActive !== bActive) return aActive ? -1 : 1;
+      return a.localeCompare(b);
+    });
+  });
+
+  // Sort project groups: projects with active teams first
+  const projKeys = Object.keys(groups);
+  projKeys.sort((a, b) => {
+    const aHasActive = groups[a].some(id => !terminal.includes(teams[id].currentPhase));
+    const bHasActive = groups[b].some(id => !terminal.includes(teams[id].currentPhase));
+    if (aHasActive !== bHasActive) return aHasActive ? -1 : 1;
     return a.localeCompare(b);
   });
-  list.innerHTML = ids.map(id => {
-    const t = teams[id];
-    const phase = t.currentPhase;
-    const color = PHASE_COLORS[phase] || '#484f58';
-    const isActive = id === selectedTeamId;
-    return '<div class="team-item' + (isActive ? ' active' : '') + '" onclick="selectTeam(\\'' + escapeAttr(id) + '\\')">'
-      + '<span class="team-item-name">' + escapeHtml(t.teamName || id) + '</span>'
-      + '<span class="team-item-phase" style="background:' + color + '22;color:' + color + '">' + (PHASE_LABELS[phase] || phase) + '</span>'
+
+  let html = '';
+  projKeys.forEach(proj => {
+    const projName = proj.split('/').pop() || proj;
+    const isCollapsed = projectCollapsed[proj] || false;
+    const colClass = isCollapsed ? ' collapsed' : '';
+    html += '<div class="sidebar-project-group">';
+    html += '<div class="sidebar-project-header' + colClass + '" onclick="toggleProject(\\'' + escapeAttr(proj) + '\\')">'
+      + '<span class="sidebar-project-chevron">&#9660;</span>'
+      + '<span class="sidebar-project-name">' + escapeHtml(projName) + '</span>'
+      + '<span class="sidebar-project-count">' + groups[proj].length + '</span>'
       + '</div>';
-  }).join('');
+    html += '<div class="sidebar-project-teams' + colClass + '">';
+    groups[proj].forEach(id => {
+      const t = teams[id];
+      const phase = t.currentPhase;
+      const color = PHASE_COLORS[phase] || '#484f58';
+      const isActive = id === selectedTeamId;
+      html += '<div class="team-item' + (isActive ? ' active' : '') + '" onclick="selectTeam(\\'' + escapeAttr(id) + '\\')">'
+        + '<span class="team-item-name">' + escapeHtml(t.teamName || id) + '</span>'
+        + '<span class="team-item-phase" style="background:' + color + '22;color:' + color + '">' + (PHASE_LABELS[phase] || phase) + '</span>'
+        + '</div>';
+    });
+    html += '</div></div>';
+  });
+  list.innerHTML = html;
 }
 
 function selectTeam(teamId) {
@@ -747,7 +1046,9 @@ function renderTeamDetail() {
     complexityEl.style.display = 'none';
   }
 
+  renderProjectInfo();
   renderPhaseBar();
+  renderFeedbackBar();
   renderTaskSection();
   renderAgentPanels();
   renderControlsBar();
@@ -755,6 +1056,20 @@ function renderTeamDetail() {
   if (taskStartTimes[selectedTeamId]) {
     const elapsed = Date.now() - taskStartTimes[selectedTeamId];
     renderTiming(elapsed);
+  }
+}
+
+function renderProjectInfo() {
+  if (!selectedTeamId || !teams[selectedTeamId]) return;
+  const t = teams[selectedTeamId];
+  const el = document.getElementById('detailProject');
+  if (t.projectPath) {
+    const branch = t.gitBranch || '';
+    el.innerHTML = '<span class="project-label">Project</span>' + escapeHtml(t.projectPath)
+      + (branch ? '<span class="git-info">' + escapeHtml(branch) + '</span>' : '');
+    el.style.display = 'block';
+  } else {
+    el.style.display = 'none';
   }
 }
 
@@ -767,28 +1082,104 @@ function renderPhaseBar() {
 
   const bar = document.getElementById('phaseBar');
   bar.innerHTML = PHASES.map((p, i) => {
-    const color = PHASE_COLORS[p];
     let dotClass = '';
     if (isErrored || isCancelled) {
       dotClass = i <= Math.max(currentIdx, 0) ? (isErrored ? 'errored' : 'past') : '';
     } else if (i < currentIdx) {
       dotClass = 'past';
     } else if (i === currentIdx) {
-      dotClass = 'active';
+      dotClass = phase === 'done' ? 'past' : 'active';
     }
     const labelClass = dotClass === 'past' || dotClass === 'active' ? dotClass : '';
-    const check = dotClass === 'past' ? '&#10003;' : (i + 1);
+    const content = dotClass === 'past' ? '&#10003;' : (i + 1);
     const step = '<div class="phase-step">'
-      + '<div class="phase-dot ' + dotClass + '" style="--phase-color:' + color + '">' + check + '</div>'
+      + '<div class="phase-dot ' + dotClass + '">' + content + '</div>'
       + '<span class="phase-label ' + labelClass + '">' + PHASE_LABELS[p] + '</span>'
       + '</div>';
     if (i < PHASES.length - 1) {
       const connClass = i < currentIdx ? 'past' : '';
-      const connColor = i < currentIdx ? PHASE_COLORS[PHASES[i + 1]] : '#30363d';
-      return step + '<div class="phase-connector ' + connClass + '" style="--conn-color:' + connColor + '"></div>';
+      return step + '<div class="phase-connector ' + connClass + '"></div>';
     }
     return step;
   }).join('');
+}
+
+function renderFeedbackBar() {
+  const bar = document.getElementById('feedbackBar');
+  const items = feedbackItems[selectedTeamId] || [];
+  if (!items.length) {
+    bar.style.display = 'none';
+    return;
+  }
+  bar.style.display = 'flex';
+
+  const ICONS = { info: '\\u2139\\uFE0F', warning: '\\u26A0\\uFE0F', question: '\\u2753', decision: '\\uD83D\\uDD36' };
+
+  bar.innerHTML = items.map((item, idx) => {
+    const icon = ICONS[item.type] || '\\u2139\\uFE0F';
+    let actionsHtml = '';
+    if (item.actions && item.actions.length > 0) {
+      actionsHtml = '<div class="feedback-actions">'
+        + item.actions.map(a =>
+          '<button onclick="respondToFeedback(\\'' + escapeAttr(item.id) + '\\', \\'' + escapeAttr(a.value) + '\\')">'
+          + escapeHtml(a.label) + '</button>'
+        ).join('')
+        + '</div>';
+    }
+    const timeAgo = formatTimeAgo(item.timestamp);
+    return '<div class="feedback-item ' + (item.type || 'info') + '">'
+      + '<span class="feedback-icon">' + icon + '</span>'
+      + '<div class="feedback-content">'
+      + '<div class="feedback-title">' + escapeHtml(item.title) + '</div>'
+      + '<div class="feedback-message">' + escapeHtml(item.message) + '</div>'
+      + actionsHtml
+      + '<div class="feedback-time">' + timeAgo + '</div>'
+      + '</div>'
+      + '<button class="feedback-dismiss" onclick="dismissFeedback(' + idx + ')">&times;</button>'
+      + '</div>';
+  }).join('');
+
+  // Scroll to latest item
+  bar.scrollTop = bar.scrollHeight;
+}
+
+function dismissFeedback(idx) {
+  const items = feedbackItems[selectedTeamId];
+  if (items && idx >= 0 && idx < items.length) {
+    items.splice(idx, 1);
+    renderFeedbackBar();
+  }
+}
+
+async function respondToFeedback(feedbackId, value) {
+  if (!selectedTeamId) return;
+  try {
+    await fetch('/api/teams/' + encodeURIComponent(selectedTeamId) + '/feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ feedbackId, value }),
+    });
+    // Remove the item from the list
+    const items = feedbackItems[selectedTeamId];
+    if (items) {
+      const idx = items.findIndex(i => i.id === feedbackId);
+      if (idx !== -1) items.splice(idx, 1);
+    }
+    renderFeedbackBar();
+    showNotification('Response sent', 'success');
+  } catch (err) {
+    showNotification('Failed to send response: ' + err.message, 'error');
+  }
+}
+
+function formatTimeAgo(isoTimestamp) {
+  const diff = Date.now() - new Date(isoTimestamp).getTime();
+  const seconds = Math.floor(diff / 1000);
+  if (seconds < 5) return 'just now';
+  if (seconds < 60) return seconds + 's ago';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return minutes + 'm ago';
+  return Math.floor(minutes / 60) + 'h ago';
 }
 
 function renderTaskSection() {
@@ -817,7 +1208,7 @@ function renderAgentPanels() {
     const hasText = text.length > 0;
     const collapsed = agentPanelCollapsed[agent] && !hasText ? 'collapsed' : '';
     const dotClass = isDone && hasText ? 'done' : (hasText ? 'active' : '');
-    const statusText = isDone && hasText ? 'done' : (hasText ? 'streaming' : 'waiting');
+    const statusText = isDone && hasText ? 'done' : (hasText ? 'working' : 'idle');
     const statusClass = isDone && hasText ? 'done' : (hasText ? 'streaming' : '');
     return '<div class="agent-panel" id="agent-' + agent + '" style="--agent-color:' + color + '">'
       + '<div class="agent-header" onclick="toggleAgent(\\'' + agent + '\\')">'
@@ -848,7 +1239,7 @@ function updateAgentPanel(instance, text, streaming) {
   const statusEl = panel.querySelector('.agent-status');
   if (statusEl) {
     statusEl.className = 'agent-status ' + (streaming ? 'streaming' : 'done');
-    statusEl.textContent = streaming ? 'streaming...' : 'complete';
+    statusEl.textContent = streaming ? 'working...' : 'done';
   }
 
   if (streaming) {
@@ -856,6 +1247,11 @@ function updateAgentPanel(instance, text, streaming) {
   } else {
     panel.classList.remove('streaming');
   }
+}
+
+function toggleProject(proj) {
+  projectCollapsed[proj] = !projectCollapsed[proj];
+  renderSidebar();
 }
 
 function toggleAgent(agent) {
@@ -872,6 +1268,21 @@ function renderControlsBar() {
   const isRunning = !terminal.includes(phase);
   document.getElementById('stopBtn').style.display = isRunning ? '' : 'none';
   document.getElementById('relaunchBtn').disabled = isRunning;
+
+  // Push & Merge button — only visible when phase is done
+  const pushMergeBtn = document.getElementById('pushMergeBtn');
+  pushMergeBtn.style.display = phase === 'done' ? '' : 'none';
+  pushMergeBtn.disabled = false;
+  pushMergeBtn.textContent = 'Push & Merge to Main';
+
+  // Preview button — visible when phase is done
+  document.getElementById('previewBtn').style.display = phase === 'done' ? '' : 'none';
+
+  // Ask button — visible when pipeline is not running (terminal state)
+  const askBtn = document.getElementById('askBtn');
+  askBtn.style.display = !isRunning ? '' : 'none';
+  askBtn.disabled = false;
+  askBtn.textContent = 'Ask';
 }
 
 function renderTiming(ms) {
@@ -972,6 +1383,66 @@ async function relaunchCurrentTeam() {
   } catch (err) {
     showNotification('Network error: ' + err.message, 'error');
   }
+}
+
+async function askAgent() {
+  if (!selectedTeamId) return;
+  const msg = document.getElementById('relaunchText').value.trim();
+  if (!msg) { showNotification('Type a question first', 'error'); return; }
+
+  const btn = document.getElementById('askBtn');
+  btn.disabled = true;
+  btn.textContent = 'Asking...';
+
+  try {
+    const res = await fetch('/api/teams/' + encodeURIComponent(selectedTeamId) + '/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: msg }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      showNotification(data.error || 'Failed to ask', 'error');
+    } else {
+      document.getElementById('relaunchText').value = '';
+    }
+  } catch (err) {
+    showNotification('Network error: ' + err.message, 'error');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Ask';
+  }
+}
+
+async function pushAndMerge() {
+  if (!selectedTeamId) return;
+  if (!confirm('Push dev and merge to main for "' + selectedTeamId + '"?\\n\\nThis will push the dev branch, merge it into main, and push main.')) return;
+
+  const btn = document.getElementById('pushMergeBtn');
+  btn.disabled = true;
+  btn.textContent = 'Pushing...';
+
+  try {
+    const res = await fetch('/api/teams/' + encodeURIComponent(selectedTeamId) + '/push-merge', { method: 'POST' });
+    const data = await res.json();
+    if (data.success) {
+      showNotification('Push & Merge succeeded for ' + selectedTeamId, 'success');
+      btn.textContent = 'Merged';
+    } else {
+      showNotification('Push & Merge failed: ' + (data.output || data.error || 'Unknown error'), 'error');
+      btn.textContent = 'Push & Merge to Main';
+      btn.disabled = false;
+    }
+  } catch (err) {
+    showNotification('Network error: ' + err.message, 'error');
+    btn.textContent = 'Push & Merge to Main';
+    btn.disabled = false;
+  }
+}
+
+function previewProject() {
+  if (!selectedTeamId || !teams[selectedTeamId]) return;
+  window.open('/preview/' + encodeURIComponent(selectedTeamId) + '/index.html', '_blank');
 }
 
 // --- Helpers ---

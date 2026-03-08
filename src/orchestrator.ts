@@ -12,6 +12,7 @@ import { type AgentMessage, type CreateMessageParams, validateMessage } from './
 import { SupervisorToSecurityFlag, SupervisorToWorkerFlag, SupervisorToReviewerFlag, type MessageFlag } from './router/flag-enums.js';
 import { TeamState, TeamPhase, type TeamStateData, type LoopLimits, DEFAULT_LOOP_LIMITS } from './state/team-state.js';
 import { StatePersistence } from './state/persistence.js';
+import { Registry } from './registry.js';
 import { AgentSpawner } from './spawner/agent-spawner.js';
 import { AgentProcess, ProcessState } from './spawner/agent-process.js';
 import { PhaseController, type PhaseAction, type PhaseEvaluation } from './phases/phase-controller.js';
@@ -20,7 +21,7 @@ import { classifyComplexity } from './router/complexity-router.js';
 // --- Configuration ---
 
 export interface OrchestraConfig {
-  dataDirectory: string;
+  registryPath: string;
   logDirectory: string;
   rolesDir: string;
   tickIntervalMs: number;
@@ -42,8 +43,8 @@ export interface OrchestraConfig {
 }
 
 const DEFAULT_CONFIG: Required<Omit<OrchestraConfig, 'claudeBin' | 'spawnArgs' | 'models' | 'limits' | 'efforts' | 'disallowedTools' | 'maxTurns' | 'maxBudgetUsd'>> & Pick<OrchestraConfig, 'claudeBin' | 'spawnArgs' | 'models' | 'limits' | 'efforts' | 'disallowedTools' | 'maxTurns' | 'maxBudgetUsd'> = {
-  dataDirectory: './data',
-  logDirectory: './data/logs',
+  registryPath: './registry.json',
+  logDirectory: './logs',
   rolesDir: './roles',
   tickIntervalMs: 1000,
   maxConcurrentTeams: 5,
@@ -69,8 +70,20 @@ export interface OrchestratorEvents {
   'malformed-output': [teamId: string, instance: RoleInstance, raw: string];
   'deadlock-detected': [teamId: string];
   'error': [teamId: string, error: Error];
+  'feedback': [teamId: string, feedback: FeedbackPayload];
+  'feedback-response': [teamId: string, feedbackId: string, value: string];
   'tick': [teamId: string];
   'shutdown': [];
+}
+
+export interface FeedbackPayload {
+  id: string;
+  type: 'info' | 'warning' | 'question' | 'decision';
+  title: string;
+  message: string;
+  actions?: Array<{ label: string; value: string }>;
+  blocking?: boolean;
+  timestamp: string;
 }
 
 // --- Per-team runtime context ---
@@ -89,6 +102,7 @@ interface TeamContext {
 export class Orchestrator extends EventEmitter<OrchestratorEvents> {
   private readonly config: OrchestraConfig & typeof DEFAULT_CONFIG;
   private readonly persistence: StatePersistence;
+  private readonly registry: Registry;
   private readonly spawner: AgentSpawner;
   private readonly phaseController: PhaseController;
   private readonly teams: Map<string, TeamContext> = new Map();
@@ -100,9 +114,8 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     super();
     this.config = { ...DEFAULT_CONFIG, ...config } as OrchestraConfig & typeof DEFAULT_CONFIG;
 
-    const teamsDir = path.join(this.config.dataDirectory, 'teams');
-
-    this.persistence = new StatePersistence({ teamsDir });
+    this.persistence = new StatePersistence();
+    this.registry = new Registry(this.config.registryPath);
 
     this.spawner = new AgentSpawner({
       claudeBin: this.config.claudeBin,
@@ -151,8 +164,18 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
 
     const resolvedProjectPath = path.resolve(projectPath);
 
-    // Ensure the project directory exists
-    fs.mkdirSync(resolvedProjectPath, { recursive: true });
+    // Project directory must already exist — engine attaches to existing repos
+    if (!fs.existsSync(resolvedProjectPath)) {
+      throw new Error(`Project path does not exist: ${resolvedProjectPath}`);
+    }
+
+    // Create .claude-orchestra/teams/{teamId}/ in the target project
+    const orchDir = path.join(resolvedProjectPath, '.claude-orchestra');
+    const teamDir = path.join(orchDir, 'teams', teamId);
+    fs.mkdirSync(teamDir, { recursive: true });
+
+    // Add .claude-orchestra/ to the project's .gitignore if not present
+    this.ensureGitignore(resolvedProjectPath);
 
     const limits: LoopLimits = {
       ...DEFAULT_LOOP_LIMITS,
@@ -160,19 +183,28 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     };
 
     const state = TeamState.create(teamId, name, resolvedProjectPath, limits);
-    const teamDir = path.join(this.config.dataDirectory, 'teams', teamId);
+
+    // Register team directory with persistence and persist initial state
+    this.persistence.registerTeamDir(teamId, teamDir);
+    this.persistence.ensureTeamDir(teamId);
+    this.persistence.persistNow(state);
 
     // Initialize message bus
     const bus = new MessageBus({ teamDir });
     bus.init();
 
-    // Persist initial state
-    this.persistence.ensureTeamDir(teamId);
-    this.persistence.persistNow(state);
-
     // Create reports directories
     fs.mkdirSync(path.join(teamDir, 'reports', 'clearance'), { recursive: true });
     fs.mkdirSync(path.join(teamDir, 'reports', 'reviews'), { recursive: true });
+
+    // Add registry entry
+    this.registry.add({
+      teamId,
+      teamName: name,
+      projectPath: resolvedProjectPath,
+      createdAt: new Date().toISOString(),
+      lastActiveAt: new Date().toISOString(),
+    });
 
     const ctx: TeamContext = {
       state,
@@ -337,6 +369,9 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     // Persist final state
     this.persistence.persistNow(ctx.state);
 
+    // Remove from registry
+    this.registry.remove(teamId);
+
     // Terminate agents
     await this.spawner.terminateTeam(teamId);
 
@@ -393,10 +428,20 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
    */
   recover(): string[] {
     const recovered: string[] = [];
-    const teamIds = this.persistence.listTeams();
+    const entries = this.registry.load();
 
-    for (const teamId of teamIds) {
-      const data = this.persistence.load(teamId);
+    for (const entry of entries) {
+      if (this.teams.has(entry.teamId)) continue;
+
+      // Handle missing project path gracefully (project deleted or moved)
+      if (!fs.existsSync(entry.projectPath)) {
+        continue;
+      }
+
+      const teamDir = path.join(
+        entry.projectPath, '.claude-orchestra', 'teams', entry.teamId
+      );
+      const data = this.persistence.loadFromDir(teamDir);
       if (!data) continue;
 
       // Skip terminal teams
@@ -408,9 +453,11 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         continue;
       }
 
+      // Register team directory with persistence
+      this.persistence.registerTeamDir(entry.teamId, teamDir);
+
       const limits: LoopLimits = { ...DEFAULT_LOOP_LIMITS, ...this.config.limits };
       const state = TeamState.fromData(data, limits);
-      const teamDir = path.join(this.config.dataDirectory, 'teams', teamId);
       const bus = new MessageBus({ teamDir });
       bus.init();
 
@@ -421,16 +468,16 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         agentsReady: false,
       };
 
-      this.teams.set(teamId, ctx);
+      this.teams.set(entry.teamId, ctx);
 
       // Respawn agents
       if (data.currentTask) {
         try {
-          const agents = this.spawner.spawnTeam(teamId, data.projectPath);
+          const agents = this.spawner.spawnTeam(entry.teamId, data.projectPath);
           ctx.agentsReady = true;
 
           for (const agent of agents) {
-            this.wireAgentEvents(teamId, agent);
+            this.wireAgentEvents(entry.teamId, agent);
             ctx.state.setAgentPid(agent.instance, agent.pid);
 
             // Send recovery prompt
@@ -441,16 +488,42 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
           // If spawning fails, mark as errored
           const fromPhase = state.currentPhase;
           this.phaseController.forceError(state, 'Failed to respawn agents on recovery');
-          this.emit('phase-transition', teamId, fromPhase, TeamPhase.Errored, 'recovery-spawn-failure');
+          this.emit('phase-transition', entry.teamId, fromPhase, TeamPhase.Errored, 'recovery-spawn-failure');
           this.persistence.persistNow(state);
           continue;
         }
       }
 
-      recovered.push(teamId);
+      recovered.push(entry.teamId);
     }
 
     return recovered;
+  }
+
+  // --- Registry Access (for dashboard) ---
+
+  getRegistryEntries(): import('./registry.js').RegistryEntry[] {
+    return this.registry.load();
+  }
+
+  // --- Private: .gitignore Management ---
+
+  private ensureGitignore(projectPath: string): void {
+    const gitignorePath = path.join(projectPath, '.gitignore');
+    const entry = '.claude-orchestra/';
+
+    let content = '';
+    if (fs.existsSync(gitignorePath)) {
+      content = fs.readFileSync(gitignorePath, 'utf-8');
+      // Check if already present
+      if (content.split('\n').some(line => line.trim() === entry)) {
+        return;
+      }
+    }
+
+    // Append the entry
+    const separator = content.length > 0 && !content.endsWith('\n') ? '\n' : '';
+    fs.writeFileSync(gitignorePath, content + separator + entry + '\n', 'utf-8');
   }
 
   // --- Private: Agent Event Wiring ---

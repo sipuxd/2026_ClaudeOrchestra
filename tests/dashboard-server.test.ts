@@ -65,7 +65,7 @@ describe('DashboardServer', () => {
     fs.writeFileSync(path.join(rolesDir, 'reviewer.claude.md'), '# Reviewer');
 
     orchestrator = new PipelineOrchestrator({
-      dataDirectory: path.join(tmpDir, 'data'),
+      registryPath: path.join(tmpDir, 'registry.json'),
       rolesDir,
     });
 
@@ -134,6 +134,7 @@ describe('DashboardServer', () => {
   describe('POST /api/teams', () => {
     it('creates a team', async () => {
       const projectPath = path.join(tmpDir, 'new-project');
+      fs.mkdirSync(projectPath, { recursive: true });
       const res = await httpRequest(port, 'POST', '/api/teams', {
         name: 'http-team',
         projectPath,
@@ -162,6 +163,8 @@ describe('DashboardServer', () => {
 
     it('returns 400 for duplicate team name', async () => {
       const projectPath = path.join(tmpDir, 'dup-project');
+      fs.mkdirSync(projectPath, { recursive: true });
+      fs.mkdirSync(projectPath + '2', { recursive: true });
       await httpRequest(port, 'POST', '/api/teams', {
         name: 'dup-team',
         projectPath,
@@ -297,6 +300,98 @@ describe('DashboardServer', () => {
       orchestrator.createTeam('isolated', projectPath);
 
       expect(handler).toHaveBeenCalledWith('isolated');
+    });
+  });
+
+  // --- Ask endpoint ---
+
+  describe('POST /api/teams/:id/ask', () => {
+    it('returns 200 on valid ask request', async () => {
+      const projectPath = path.join(tmpDir, 'ask-project');
+      fs.mkdirSync(projectPath, { recursive: true });
+      orchestrator.createTeam('ask-team', projectPath);
+
+      const res = await httpRequest(port, 'POST', '/api/teams/ask-team/ask', {
+        message: 'What did you change?',
+      });
+      expect(res.status).toBe(200);
+      expect(JSON.parse(res.body).ok).toBe(true);
+    });
+
+    it('returns 400 when message is missing', async () => {
+      const projectPath = path.join(tmpDir, 'ask-missing');
+      fs.mkdirSync(projectPath, { recursive: true });
+      orchestrator.createTeam('ask-missing', projectPath);
+
+      const res = await httpRequest(port, 'POST', '/api/teams/ask-missing/ask', {});
+      expect(res.status).toBe(400);
+      expect(JSON.parse(res.body).error).toContain('required');
+    });
+  });
+
+  // --- Feedback endpoint ---
+
+  describe('POST /api/teams/:id/feedback', () => {
+    it('returns 200 on valid feedback response', async () => {
+      const projectPath = path.join(tmpDir, 'fb-project');
+      fs.mkdirSync(projectPath, { recursive: true });
+      orchestrator.createTeam('fb-team', projectPath);
+
+      const res = await httpRequest(port, 'POST', '/api/teams/fb-team/feedback', {
+        feedbackId: 'test-id-123',
+        value: 'approve',
+      });
+      expect(res.status).toBe(200);
+      expect(JSON.parse(res.body).ok).toBe(true);
+    });
+
+    it('returns 400 when feedbackId is missing', async () => {
+      const projectPath = path.join(tmpDir, 'fb-missing');
+      fs.mkdirSync(projectPath, { recursive: true });
+      orchestrator.createTeam('fb-missing', projectPath);
+
+      const res = await httpRequest(port, 'POST', '/api/teams/fb-missing/feedback', {
+        value: 'approve',
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it('broadcasts feedback events via SSE', async () => {
+      return new Promise<void>((resolve) => {
+        const req = http.get(`http://localhost:${port}/events`, (res) => {
+          let data = '';
+          let gotInit = false;
+          res.on('data', (chunk: Buffer) => {
+            data += chunk.toString();
+            if (!gotInit && data.includes('event: init')) {
+              gotInit = true;
+              // Emit a feedback event from the orchestrator
+              const projectPath = path.join(tmpDir, 'fb-sse-project');
+              fs.mkdirSync(projectPath, { recursive: true });
+              orchestrator.createTeam('fb-sse', projectPath);
+              orchestrator.emit('feedback', 'fb-sse', {
+                id: 'test-fb-1',
+                type: 'info' as const,
+                title: 'Test Feedback',
+                message: 'This is a test notification',
+                blocking: false,
+                timestamp: new Date().toISOString(),
+              });
+            }
+            if (gotInit && data.includes('event: feedback')) {
+              const lines = data.split('\n');
+              const fbIdx = lines.findIndex(l => l === 'event: feedback');
+              if (fbIdx >= 0 && lines[fbIdx + 1]) {
+                const eventData = JSON.parse(lines[fbIdx + 1].replace('data: ', ''));
+                expect(eventData.teamId).toBe('fb-sse');
+                expect(eventData.title).toBe('Test Feedback');
+                req.destroy();
+                resolve();
+              }
+            }
+          });
+        });
+      });
     });
   });
 });

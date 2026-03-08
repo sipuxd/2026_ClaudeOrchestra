@@ -5,7 +5,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { query, type SDKMessage, type SDKUserMessage, type Query } from '@anthropic-ai/claude-agent-sdk';
 import { Role, type RoleInstance } from '../roles/role-types.js';
 
@@ -239,7 +239,29 @@ export class AgentProcess extends EventEmitter<AgentProcessEvents> {
   // --- Path B: SDK spawn (production mode) ---
 
   private spawnSdk(): void {
-    const systemPrompt = readFileSync(this.spawnOptions.systemPromptPath, 'utf-8');
+    // Ensure cwd exists
+    if (!existsSync(this.spawnOptions.cwd)) {
+      try {
+        mkdirSync(this.spawnOptions.cwd, { recursive: true });
+      } catch (err: any) {
+        this._state = ProcessState.Crashed;
+        const msg = `Failed to create cwd directory ${this.spawnOptions.cwd}: ${err?.message}`;
+        this.emit('stderr', msg);
+        this.emit('exit', 1, null);
+        return;
+      }
+    }
+
+    let systemPrompt: string;
+    try {
+      systemPrompt = readFileSync(this.spawnOptions.systemPromptPath, 'utf-8');
+    } catch (err: any) {
+      this._state = ProcessState.Crashed;
+      const msg = `Failed to read system prompt at ${this.spawnOptions.systemPromptPath}: ${err?.message}`;
+      this.emit('stderr', msg);
+      this.emit('exit', 1, null);
+      return;
+    }
 
     this.abortController = new AbortController();
     this.promptChannel = new PromptChannel();
@@ -252,23 +274,35 @@ export class AgentProcess extends EventEmitter<AgentProcessEvents> {
       CLAUDECODE: undefined,
     };
 
-    this.sdkQuery = query({
-      prompt: this.promptChannel as AsyncIterable<SDKUserMessage>,
-      options: {
-        model: this.spawnOptions.model,
-        systemPrompt,
-        cwd: this.spawnOptions.cwd,
-        env,
-        permissionMode: 'bypassPermissions',
-        allowDangerouslySkipPermissions: true,
-        allowedTools: this.spawnOptions.allowedTools ?? [
-          'Read', 'Edit', 'Write', 'Bash', 'Grep', 'Glob',
-        ],
-        maxTurns: this.spawnOptions.maxTurns,
-        abortController: this.abortController,
-        persistSession: false,
-      },
-    });
+    try {
+      this.sdkQuery = query({
+        prompt: this.promptChannel as AsyncIterable<SDKUserMessage>,
+        options: {
+          model: this.spawnOptions.model,
+          systemPrompt,
+          cwd: this.spawnOptions.cwd,
+          env,
+          permissionMode: 'bypassPermissions',
+          allowDangerouslySkipPermissions: true,
+          allowedTools: this.spawnOptions.allowedTools ?? [
+            'Read', 'Edit', 'Write', 'Bash', 'Grep', 'Glob',
+          ],
+          maxTurns: this.spawnOptions.maxTurns,
+          abortController: this.abortController,
+          persistSession: false,
+          // Capture SDK stderr for error visibility
+          stderr: (data: string) => {
+            this.emit('stderr', `[SDK] ${data}`);
+          },
+        },
+      });
+    } catch (err: any) {
+      this._state = ProcessState.Crashed;
+      const msg = `SDK query() failed to initialize: ${err?.message ?? err}`;
+      this.emit('stderr', msg);
+      this.emit('exit', 1, null);
+      return;
+    }
 
     this._state = ProcessState.Running;
     this.sdkStreamActive = true;
@@ -304,7 +338,9 @@ export class AgentProcess extends EventEmitter<AgentProcessEvents> {
         // Expected abort during shutdown
       } else {
         this._state = ProcessState.Crashed;
-        this.emit('stderr', err?.message ?? 'SDK stream error');
+        // Surface full error details for debugging
+        const errorDetail = err?.stack ?? err?.message ?? String(err) ?? 'SDK stream error';
+        this.emit('stderr', `SDK stream crashed: ${errorDetail}`);
         this.emit('exit', 1, null);
         return;
       }

@@ -73,6 +73,27 @@ export function evaluateReview(
         trigger: 'review-rejected',
         actions: [
           {
+            type: 'set-agent-states',
+            details: {
+              targets: ['Worker-1', 'Worker-2'],
+              state: AgentState.Active,
+            },
+          },
+          {
+            type: 'set-agent-states',
+            details: {
+              targets: ['Security-1'],
+              state: AgentState.Active,
+            },
+          },
+          {
+            type: 'set-agent-states',
+            details: {
+              targets: ['Reviewer-1'],
+              state: AgentState.Idle,
+            },
+          },
+          {
             type: 'replan-task',
             details: {
               reason: message.content,

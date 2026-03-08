@@ -285,7 +285,30 @@ export class Logger {
     });
 
     orchestrator.on('agent-message', (teamId, instance, message) => {
-      this.debug('message_received', `${instance} -> [${message.flag}] -> ${message.roleTargetInstance ?? message.roleTarget}`, {
+      // Decision flags get promoted to info level with content preview
+      const decisionFlags = [
+        'review-approved', 'review-revise', 'review-rejected',
+        'handoff-clearance', 'clearance-report',
+        'task-complete', 'task-accepted', 'blocked',
+      ];
+      const isDecision = decisionFlags.includes(message.flag);
+      const level = isDecision ? LogLevel.Info : LogLevel.Debug;
+
+      let logMessage = `${instance} -> [${message.flag}] -> ${message.roleTargetInstance ?? message.roleTarget}`;
+
+      // For decision messages, append a content preview
+      if (isDecision && message.content) {
+        // Extract first meaningful line (skip empty lines and the verdict word itself)
+        const lines = message.content.split('\n').filter((l: string) => l.trim().length > 0);
+        const preview = lines.length > 0
+          ? (lines[0].length > 120 ? lines[0].substring(0, 120) + '...' : lines[0])
+          : '';
+        if (preview) {
+          logMessage += `\n         ${preview}`;
+        }
+      }
+
+      this.log(level, 'message_received', logMessage, {
         teamId,
         phase: message.phase,
         roleSource: message.roleSource,
@@ -302,6 +325,14 @@ export class Logger {
         teamId,
         roleSourceInstance: instance,
         data: { length: data.length },
+      });
+    });
+
+    orchestrator.on('agent-stderr', (teamId, instance, data) => {
+      this.error('agent_errored', `${instance} stderr: ${data}`, {
+        teamId,
+        roleSourceInstance: instance,
+        data: { stderr: data },
       });
     });
 

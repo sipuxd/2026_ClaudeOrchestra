@@ -52,6 +52,7 @@ export interface OrchestratorEvents {
   'agent-output': [teamId: string, instance: RoleInstance, data: string];
   'agent-message': [teamId: string, instance: RoleInstance, message: AgentMessage];
   'agent-crashed': [teamId: string, instance: RoleInstance, code: number | null];
+  'agent-stderr': [teamId: string, instance: RoleInstance, data: string];
   'agent-respawned': [teamId: string, instance: RoleInstance];
   'malformed-output': [teamId: string, instance: RoleInstance, raw: string];
   'deadlock-detected': [teamId: string];
@@ -133,6 +134,10 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     }
 
     const resolvedProjectPath = path.resolve(projectPath);
+
+    // Ensure the project directory exists
+    fs.mkdirSync(resolvedProjectPath, { recursive: true });
+
     const limits: LoopLimits = {
       ...DEFAULT_LOOP_LIMITS,
       ...this.config.limits,
@@ -434,6 +439,11 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       this.emit('agent-output', teamId, agent.instance, data);
     });
 
+    // Handle stderr (error messages from SDK or process)
+    agent.on('stderr', (data: string) => {
+      this.emit('agent-stderr', teamId, agent.instance, data);
+    });
+
     // Handle crashes
     agent.on('exit', (code: number | null, _signal: NodeJS.Signals | null) => {
       if (agent.state === ProcessState.Crashed) {
@@ -638,12 +648,18 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
 
       case 'replan-task': {
         const replanReason = action.details.reason as string;
+        const originalTask = ctx.state.snapshot.currentTask ?? 'unknown task';
         const supervisor = this.spawner.getAgent(teamId, 'Supervisor-1' as RoleInstance);
         if (supervisor?.isAlive) {
           supervisor.send(
-            `The reviewer has rejected the work. Reason: ${replanReason}\n` +
-            'Please re-plan the task and begin pre-work again. ' +
-            'Request a new security scan and then reassign tasks to workers.'
+            `REVISION CYCLE — The Reviewer has rejected the work and sent it back for re-planning.\n\n` +
+            `Original task: ${originalTask}\n\n` +
+            `Reviewer feedback:\n${replanReason}\n\n` +
+            `You must now re-plan and restart the pre-work phase:\n` +
+            `1. Send a new scan-request to Security-1 for a fresh security sweep.\n` +
+            `2. Once you receive the clearance-report, send new task-assignment messages to Worker-1 and Worker-2 addressing the Reviewer's feedback.\n` +
+            `3. Wait for task-accepted from both Workers before work begins.\n\n` +
+            `All agents have been reset and are ready for new assignments.`
           );
         }
         break;

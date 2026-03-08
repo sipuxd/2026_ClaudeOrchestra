@@ -65,7 +65,7 @@ describe('DashboardServer', () => {
     fs.writeFileSync(path.join(rolesDir, 'reviewer.claude.md'), '# Reviewer');
 
     orchestrator = new PipelineOrchestrator({
-      dataDirectory: path.join(tmpDir, 'data'),
+      registryPath: path.join(tmpDir, 'registry.json'),
       rolesDir,
     });
 
@@ -134,6 +134,7 @@ describe('DashboardServer', () => {
   describe('POST /api/teams', () => {
     it('creates a team', async () => {
       const projectPath = path.join(tmpDir, 'new-project');
+      fs.mkdirSync(projectPath, { recursive: true });
       const res = await httpRequest(port, 'POST', '/api/teams', {
         name: 'http-team',
         projectPath,
@@ -162,6 +163,8 @@ describe('DashboardServer', () => {
 
     it('returns 400 for duplicate team name', async () => {
       const projectPath = path.join(tmpDir, 'dup-project');
+      fs.mkdirSync(projectPath, { recursive: true });
+      fs.mkdirSync(projectPath + '2', { recursive: true });
       await httpRequest(port, 'POST', '/api/teams', {
         name: 'dup-team',
         projectPath,

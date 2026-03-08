@@ -44,7 +44,7 @@ describe('SubagentOrchestrator', () => {
     vi.mocked(sdkQuery).mockImplementation(mockQueryFn as any);
 
     orchestrator = new SubagentOrchestrator({
-      dataDirectory: path.join(tmpDir, 'data'),
+      registryPath: path.join(tmpDir, 'registry.json'),
       rolesDir,
       maxConcurrentTeams: 3,
     });
@@ -80,10 +80,13 @@ describe('SubagentOrchestrator', () => {
     });
 
     it('respects maxConcurrentTeams', () => {
+      const p2 = path.join(tmpDir, 'p2'); fs.mkdirSync(p2, { recursive: true });
+      const p3 = path.join(tmpDir, 'p3'); fs.mkdirSync(p3, { recursive: true });
+      const p4 = path.join(tmpDir, 'p4'); fs.mkdirSync(p4, { recursive: true });
       orchestrator.createTeam('t1', projectDir);
-      orchestrator.createTeam('t2', path.join(tmpDir, 'p2'));
-      orchestrator.createTeam('t3', path.join(tmpDir, 'p3'));
-      expect(() => orchestrator.createTeam('t4', path.join(tmpDir, 'p4'))).toThrow('Maximum concurrent teams');
+      orchestrator.createTeam('t2', p2);
+      orchestrator.createTeam('t3', p3);
+      expect(() => orchestrator.createTeam('t4', p4)).toThrow('Maximum concurrent teams');
     });
 
     it('throws during shutdown', async () => {
@@ -263,7 +266,7 @@ describe('SubagentOrchestrator', () => {
   describe('model overrides', () => {
     it('respects custom model configuration', () => {
       const customOrchestrator = new SubagentOrchestrator({
-        dataDirectory: path.join(tmpDir, 'data2'),
+        registryPath: path.join(tmpDir, 'registry2.json'),
         rolesDir,
         models: {
           [Role.Worker]: 'claude-opus-4-6',
@@ -439,8 +442,9 @@ describe('SubagentOrchestrator', () => {
     });
 
     it('lists all teams', () => {
+      const p2 = path.join(tmpDir, 'p2'); fs.mkdirSync(p2, { recursive: true });
       orchestrator.createTeam('t1', projectDir);
-      orchestrator.createTeam('t2', path.join(tmpDir, 'p2'));
+      orchestrator.createTeam('t2', p2);
       const teams = orchestrator.getAllTeams();
       expect(teams).toHaveLength(2);
     });
@@ -525,9 +529,9 @@ describe('SubagentOrchestrator', () => {
       const status = orchestrator.getTeamStatus('recov-team');
       expect(status).toBeDefined();
 
-      // Create a new orchestrator pointing at same data directory
+      // Create a new orchestrator pointing at same registry
       const orchestrator2 = new SubagentOrchestrator({
-        dataDirectory: path.join(tmpDir, 'data'),
+        registryPath: path.join(tmpDir, 'registry.json'),
         rolesDir,
         maxConcurrentTeams: 3,
       });
@@ -552,9 +556,9 @@ describe('SubagentOrchestrator', () => {
       mockControls.complete();
       await new Promise(resolve => setTimeout(resolve, 50));
 
-      // Create a new orchestrator
+      // Create a new orchestrator pointing at same registry
       const orchestrator2 = new SubagentOrchestrator({
-        dataDirectory: path.join(tmpDir, 'data'),
+        registryPath: path.join(tmpDir, 'registry.json'),
         rolesDir,
         maxConcurrentTeams: 3,
       });
@@ -575,12 +579,12 @@ describe('SubagentOrchestrator', () => {
 
   describe('config defaults', () => {
     it('handles undefined config values without crashing', () => {
-      // Simulates what happens when index.ts passes undefined dataDirectory
+      // Simulates what happens when index.ts passes undefined registryPath
       const orch = new SubagentOrchestrator({
-        dataDirectory: undefined as any,
+        registryPath: undefined as any,
         rolesDir,
       });
-      // Should use default './data' and not crash
+      // Should use default registryPath and not crash
       expect(() => orch.getAllTeams()).not.toThrow();
       orch.forceKillAll();
     });

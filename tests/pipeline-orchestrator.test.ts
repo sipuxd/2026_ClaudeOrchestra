@@ -164,7 +164,7 @@ describe('PipelineOrchestrator', () => {
     vi.mocked(sdkQuery).mockImplementation(mock.mockQueryFn);
 
     orchestrator = new PipelineOrchestrator({
-      dataDirectory: path.join(tmpDir, 'data'),
+      registryPath: path.join(tmpDir, 'registry.json'),
       rolesDir,
       maxConcurrentTeams: 3,
     });
@@ -196,10 +196,14 @@ describe('PipelineOrchestrator', () => {
     });
 
     it('enforces max concurrent teams', () => {
-      orchestrator.createTeam('t1', path.join(tmpDir, 'p1'));
-      orchestrator.createTeam('t2', path.join(tmpDir, 'p2'));
-      orchestrator.createTeam('t3', path.join(tmpDir, 'p3'));
-      expect(() => orchestrator.createTeam('t4', path.join(tmpDir, 'p4')))
+      const p1 = path.join(tmpDir, 'p1'); fs.mkdirSync(p1, { recursive: true });
+      const p2 = path.join(tmpDir, 'p2'); fs.mkdirSync(p2, { recursive: true });
+      const p3 = path.join(tmpDir, 'p3'); fs.mkdirSync(p3, { recursive: true });
+      const p4 = path.join(tmpDir, 'p4'); fs.mkdirSync(p4, { recursive: true });
+      orchestrator.createTeam('t1', p1);
+      orchestrator.createTeam('t2', p2);
+      orchestrator.createTeam('t3', p3);
+      expect(() => orchestrator.createTeam('t4', p4))
         .toThrow('Maximum concurrent teams');
     });
 
@@ -221,7 +225,7 @@ describe('PipelineOrchestrator', () => {
 
       // Create a new orchestrator instance (simulating new process)
       const orchestrator2 = new PipelineOrchestrator({
-        dataDirectory: path.join(tmpDir, 'data'),
+        registryPath: path.join(tmpDir, 'registry.json'),
         rolesDir,
       });
 
@@ -523,7 +527,7 @@ describe('PipelineOrchestrator', () => {
 
       // Re-create orchestrator to test
       const orch2 = new PipelineOrchestrator({
-        dataDirectory: path.join(tmpDir, 'data'),
+        registryPath: path.join(tmpDir, 'registry2.json'),
         rolesDir,
       });
       await orch2.shutdown();
@@ -537,7 +541,7 @@ describe('PipelineOrchestrator', () => {
   describe('configuration', () => {
     it('uses default config when none provided', () => {
       const orch = new PipelineOrchestrator({
-        dataDirectory: path.join(tmpDir, 'data2'),
+        registryPath: path.join(tmpDir, 'registry-default.json'),
         rolesDir,
       });
       // Should not throw
@@ -547,7 +551,7 @@ describe('PipelineOrchestrator', () => {
 
     it('respects model overrides', async () => {
       const orch = new PipelineOrchestrator({
-        dataDirectory: path.join(tmpDir, 'data3'),
+        registryPath: path.join(tmpDir, 'registry-model.json'),
         rolesDir,
         models: { [Role.Worker]: 'claude-sonnet-4-6' },
       });
@@ -564,7 +568,7 @@ describe('PipelineOrchestrator', () => {
 
     it('respects effort override', async () => {
       const orch = new PipelineOrchestrator({
-        dataDirectory: path.join(tmpDir, 'data4'),
+        registryPath: path.join(tmpDir, 'registry-effort.json'),
         rolesDir,
         effort: 'high',
       });
@@ -582,10 +586,10 @@ describe('PipelineOrchestrator', () => {
     it('filters undefined config values', () => {
       // Passing undefined values should not override defaults
       const orch = new PipelineOrchestrator({
-        dataDirectory: undefined as any,
+        registryPath: undefined as any,
         rolesDir,
       });
-      // Should use default dataDirectory, not crash
+      // Should use default registryPath, not crash
       expect(orch).toBeDefined();
     });
   });
@@ -598,8 +602,10 @@ describe('PipelineOrchestrator', () => {
     });
 
     it('lists all teams', () => {
-      orchestrator.createTeam('a', path.join(tmpDir, 'pa'));
-      orchestrator.createTeam('b', path.join(tmpDir, 'pb'));
+      const pa = path.join(tmpDir, 'pa'); fs.mkdirSync(pa, { recursive: true });
+      const pb = path.join(tmpDir, 'pb'); fs.mkdirSync(pb, { recursive: true });
+      orchestrator.createTeam('a', pa);
+      orchestrator.createTeam('b', pb);
       const all = orchestrator.getAllTeams();
       expect(all.length).toBe(2);
       expect(all.map(t => t.teamId).sort()).toEqual(['a', 'b']);

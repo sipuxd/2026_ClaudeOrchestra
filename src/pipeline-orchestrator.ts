@@ -16,6 +16,8 @@ import { Role } from './roles/role-types.js';
 import { AgentState } from './types/index.js';
 import { TeamState, TeamPhase, type TeamStateData, type LoopLimits, DEFAULT_LOOP_LIMITS } from './state/team-state.js';
 import { StatePersistence } from './state/persistence.js';
+import { Registry } from './registry.js';
+import { GitOps } from './git.js';
 import { classifyComplexity } from './router/complexity-router.js';
 import type { OrchestratorEvents } from './orchestrator.js';
 import {
@@ -234,7 +236,7 @@ class AgentSession {
 type EffortLevel = 'low' | 'medium' | 'high' | 'max';
 
 export interface PipelineOrchestraConfig {
-  dataDirectory: string;
+  registryPath: string;
   logDirectory: string;
   /** Directory containing role prompt files (reuses subagent prompts) */
   rolesDir: string;
@@ -271,8 +273,8 @@ const DEFAULT_PIPELINE_MAX_TURNS: Record<Role, number> = {
 };
 
 const DEFAULT_PIPELINE_CONFIG = {
-  dataDirectory: './data',
-  logDirectory: './data/logs',
+  registryPath: './registry.json',
+  logDirectory: './logs',
   rolesDir: './roles/subagent',
   maxConcurrentTeams: 5,
 };
@@ -292,6 +294,7 @@ interface PipelineTeamContext {
 export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   private readonly config: PipelineOrchestraConfig & typeof DEFAULT_PIPELINE_CONFIG;
   private readonly persistence: StatePersistence;
+  private readonly registry: Registry;
   private readonly models: Record<Role, string>;
   private readonly efforts: Record<Role, EffortLevel>;
   private readonly disallowedTools: Record<Role, string[]>;
@@ -308,8 +311,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     );
     this.config = { ...DEFAULT_PIPELINE_CONFIG, ...cleanConfig } as PipelineOrchestraConfig & typeof DEFAULT_PIPELINE_CONFIG;
 
-    const teamsDir = path.join(this.config.dataDirectory, 'teams');
-    this.persistence = new StatePersistence({ teamsDir });
+    this.persistence = new StatePersistence();
+    this.registry = new Registry(this.config.registryPath);
 
     this.models = { ...DEFAULT_MODELS, ...config.models };
     this.efforts = { ...DEFAULT_PIPELINE_EFFORTS, ...config.efforts };
@@ -335,7 +338,19 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     }
 
     const resolvedProjectPath = path.resolve(projectPath);
-    fs.mkdirSync(resolvedProjectPath, { recursive: true });
+
+    // Project directory must already exist — engine attaches to existing repos
+    if (!fs.existsSync(resolvedProjectPath)) {
+      throw new Error(`Project path does not exist: ${resolvedProjectPath}`);
+    }
+
+    // Create .claude-orchestra/teams/{teamId}/ in the target project
+    const orchDir = path.join(resolvedProjectPath, '.claude-orchestra');
+    const teamDir = path.join(orchDir, 'teams', teamId);
+    fs.mkdirSync(teamDir, { recursive: true });
+
+    // Add .claude-orchestra/ to the project's .gitignore if not present
+    this.ensureGitignore(resolvedProjectPath);
 
     const limits: LoopLimits = {
       ...DEFAULT_LOOP_LIMITS,
@@ -344,9 +359,19 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
     const state = TeamState.create(teamId, name, resolvedProjectPath, limits);
 
-    // Persist initial state
+    // Register team directory with persistence and persist initial state
+    this.persistence.registerTeamDir(teamId, teamDir);
     this.persistence.ensureTeamDir(teamId);
     this.persistence.persistNow(state);
+
+    // Add registry entry
+    this.registry.add({
+      teamId,
+      teamName: name,
+      projectPath: resolvedProjectPath,
+      createdAt: new Date().toISOString(),
+      lastActiveAt: new Date().toISOString(),
+    });
 
     const ctx: PipelineTeamContext = {
       state,
@@ -364,12 +389,20 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
   recover(): string[] {
     const recovered: string[] = [];
-    const teamIds = this.persistence.listTeams();
+    const entries = this.registry.load();
 
-    for (const teamId of teamIds) {
-      if (this.teams.has(teamId)) continue;
+    for (const entry of entries) {
+      if (this.teams.has(entry.teamId)) continue;
 
-      const data = this.persistence.load(teamId);
+      // Handle missing project path gracefully (project deleted or moved)
+      if (!fs.existsSync(entry.projectPath)) {
+        continue;
+      }
+
+      const teamDir = path.join(
+        entry.projectPath, '.claude-orchestra', 'teams', entry.teamId
+      );
+      const data = this.persistence.loadFromDir(teamDir);
       if (!data) continue;
 
       if (
@@ -380,6 +413,9 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
         continue;
       }
 
+      // Register team directory with persistence
+      this.persistence.registerTeamDir(entry.teamId, teamDir);
+
       const limits: LoopLimits = { ...DEFAULT_LOOP_LIMITS, ...this.config.limits };
       const state = TeamState.fromData(data, limits);
 
@@ -389,8 +425,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
         pipelineRunning: false,
       };
 
-      this.teams.set(teamId, ctx);
-      recovered.push(teamId);
+      this.teams.set(entry.teamId, ctx);
+      recovered.push(entry.teamId);
     }
 
     return recovered;
@@ -480,6 +516,10 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     }
 
     this.persistence.persistNow(ctx.state);
+
+    // Remove from registry
+    this.registry.remove(teamId);
+
     this.teams.delete(teamId);
   }
 
@@ -514,6 +554,46 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     }
     this.teams.clear();
     this.persistence.dispose();
+  }
+
+  // --- Registry Access (for dashboard) ---
+
+  getRegistryEntries(): import('./registry.js').RegistryEntry[] {
+    return this.registry.load();
+  }
+
+  // --- Git Operations (user-initiated) ---
+
+  /**
+   * Push current branch and merge to main. User-initiated only.
+   * Returns git result with combined output.
+   */
+  pushAndMerge(teamId: string): import('./git.js').GitResult {
+    const ctx = this.teams.get(teamId);
+    if (!ctx) {
+      return { success: false, output: `Team "${teamId}" not found` };
+    }
+    return GitOps.pushAndMerge(ctx.state.snapshot.projectPath);
+  }
+
+  // --- Private: .gitignore Management ---
+
+  private ensureGitignore(projectPath: string): void {
+    const gitignorePath = path.join(projectPath, '.gitignore');
+    const entry = '.claude-orchestra/';
+
+    let content = '';
+    if (fs.existsSync(gitignorePath)) {
+      content = fs.readFileSync(gitignorePath, 'utf-8');
+      // Check if already present
+      if (content.split('\n').some(line => line.trim() === entry)) {
+        return;
+      }
+    }
+
+    // Append the entry
+    const separator = content.length > 0 && !content.endsWith('\n') ? '\n' : '';
+    fs.writeFileSync(gitignorePath, content + separator + entry + '\n', 'utf-8');
   }
 
   // --- Private: Session Management ---
@@ -663,6 +743,9 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
             this.emit('agent-output', teamId, 'Worker-2' as any, w2Result);
           }
 
+          // Auto-commit after work phase (safety checkpoint)
+          GitOps.commit(cwd, 'WIP: work phase complete');
+
           // --- Step 3: Security Sweep ---
           {
             const fromPhase = ctx.state.currentPhase;
@@ -697,6 +780,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
             }
 
             // APPROVED or FLAGGED — proceed to review
+            // Auto-commit after security sweep passes (safety checkpoint)
+            GitOps.commit(cwd, 'WIP: security sweep passed');
           }
 
           // --- Step 4: Review ---
@@ -755,6 +840,9 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       }
 
       // All loops exited normally — pipeline succeeded
+      // Final auto-commit with the task description
+      GitOps.commit(cwd, task.substring(0, 72));
+
       this.closeSessions(ctx);
       this.completePipeline(teamId, ctx, startTime);
     } catch (err: any) {
@@ -766,6 +854,11 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   // --- Private: Pipeline Completion ---
 
   private completePipeline(teamId: string, ctx: PipelineTeamContext, startTime: number): void {
+    // Auto-commit any remaining changes before marking done
+    const cwd = ctx.state.snapshot.projectPath;
+    const task = ctx.state.snapshot.currentTask?.description ?? teamId;
+    GitOps.commit(cwd, task.substring(0, 72));
+
     const fromPhase = ctx.state.currentPhase;
     this.tryTransitionPhase(ctx.state, teamId, fromPhase, TeamPhase.Done, 'pipeline completed');
     ctx.pipelineRunning = false;

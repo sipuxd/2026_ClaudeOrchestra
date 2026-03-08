@@ -141,5 +141,5 @@ vite.config.ts.timestamp-*
 # macOS
 .DS_Store
 
-# Runtime data from orchestrator (team state, messages)
-data/
+# Engine registry (team pointers, not committed)
+registry.json

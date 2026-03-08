@@ -5,6 +5,8 @@
 // (no Express or WebSocket dependencies).
 
 import * as http from 'node:http';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { PipelineOrchestrator } from '../pipeline-orchestrator.js';
 import type { RoleInstance } from '../roles/role-types.js';
 import { buildDashboardHTML } from './dashboard-ui.js';
@@ -160,6 +162,7 @@ export class DashboardServer {
     if (method === 'GET' && pathname === '/') return this.serveHTML(res);
     if (method === 'GET' && pathname === '/events') return this.serveSSE(req, res);
     if (method === 'GET' && pathname === '/api/teams') return this.handleGetTeams(res);
+    if (method === 'GET' && pathname === '/api/registry') return this.handleGetRegistry(res);
 
     // /api/teams/:id patterns
     const teamMatch = pathname.match(/^\/api\/teams\/([^/]+)$/);
@@ -177,8 +180,21 @@ export class DashboardServer {
       return;
     }
 
+    const pushMergeMatch = pathname.match(/^\/api\/teams\/([^/]+)\/push-merge$/);
+    if (pushMergeMatch && method === 'POST') {
+      this.handlePushMerge(pushMergeMatch[1], res);
+      return;
+    }
+
     if (method === 'POST' && pathname === '/api/teams') {
       this.handleCreateTeam(req, res);
+      return;
+    }
+
+    // Preview: serve files from team's project directory
+    const previewMatch = pathname.match(/^\/preview\/([^/]+)\/(.+)$/);
+    if (previewMatch && method === 'GET') {
+      this.handlePreview(decodeURIComponent(previewMatch[1]), previewMatch[2], res);
       return;
     }
 
@@ -279,6 +295,79 @@ export class DashboardServer {
       this.sendJSON(res, { ok: true });
     } catch (err: any) {
       this.sendJSON(res, { error: err.message }, 400);
+    }
+  }
+
+  private handleGetRegistry(res: http.ServerResponse): void {
+    const entries = this.orchestrator.getRegistryEntries();
+    this.sendJSON(res, entries);
+  }
+
+  private handlePushMerge(
+    teamId: string,
+    res: http.ServerResponse
+  ): void {
+    try {
+      const status = this.orchestrator.getTeamStatus(teamId);
+      if (!status) {
+        this.sendJSON(res, { error: `Team "${teamId}" not found` }, 404);
+        return;
+      }
+
+      const result = this.orchestrator.pushAndMerge(teamId);
+      this.sendJSON(res, result, result.success ? 200 : 500);
+    } catch (err: any) {
+      this.sendJSON(res, { error: err.message }, 500);
+    }
+  }
+
+  private handlePreview(
+    teamId: string,
+    filePath: string,
+    res: http.ServerResponse
+  ): void {
+    const status = this.orchestrator.getTeamStatus(teamId);
+    if (!status) {
+      this.sendJSON(res, { error: `Team "${teamId}" not found` }, 404);
+      return;
+    }
+
+    const projectPath = status.projectPath;
+    if (!projectPath) {
+      this.sendJSON(res, { error: 'No project path for team' }, 400);
+      return;
+    }
+
+    // Resolve and validate the file path stays within the project
+    const resolved = path.resolve(projectPath, filePath);
+    if (!resolved.startsWith(path.resolve(projectPath))) {
+      this.sendJSON(res, { error: 'Invalid path' }, 403);
+      return;
+    }
+
+    try {
+      const content = fs.readFileSync(resolved);
+      const ext = path.extname(resolved).toLowerCase();
+      const mimeTypes: Record<string, string> = {
+        '.html': 'text/html',
+        '.css': 'text/css',
+        '.js': 'application/javascript',
+        '.json': 'application/json',
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.gif': 'image/gif',
+        '.svg': 'image/svg+xml',
+        '.ico': 'image/x-icon',
+        '.woff': 'font/woff',
+        '.woff2': 'font/woff2',
+        '.ttf': 'font/ttf',
+      };
+      const contentType = mimeTypes[ext] ?? 'application/octet-stream';
+      res.writeHead(200, { 'Content-Type': contentType });
+      res.end(content);
+    } catch {
+      this.send404(res);
     }
   }
 

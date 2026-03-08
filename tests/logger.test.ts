@@ -222,15 +222,17 @@ describe('Logger', () => {
         terminal: false,
       });
 
+      const projDir = path.join(tmpDir, 'proj');
+      fs.mkdirSync(projDir, { recursive: true });
       const orchestrator = new Orchestrator({
-        dataDirectory: path.join(tmpDir, 'data'),
+        registryPath: path.join(tmpDir, 'registry.json'),
         rolesDir: path.join(tmpDir, 'roles'),
         claudeBin: 'echo',
         spawnArgs: ['mock'],
       });
 
       logger.attach(orchestrator);
-      orchestrator.createTeam('int-test', '/tmp/proj');
+      orchestrator.createTeam('int-test', projDir);
 
       logger.dispose();
 
@@ -249,15 +251,17 @@ describe('Logger', () => {
         terminal: false,
       });
 
+      const projDir = path.join(tmpDir, 'proj2');
+      fs.mkdirSync(projDir, { recursive: true });
       const orchestrator = new Orchestrator({
-        dataDirectory: path.join(tmpDir, 'data'),
+        registryPath: path.join(tmpDir, 'registry2.json'),
         rolesDir: path.join(tmpDir, 'roles'),
         claudeBin: 'echo',
         spawnArgs: ['mock'],
       });
 
       logger.attach(orchestrator);
-      orchestrator.createTeam('term-test', '/tmp/proj');
+      orchestrator.createTeam('term-test', projDir);
       await orchestrator.terminateTeam('term-test');
 
       logger.dispose();
@@ -277,7 +281,7 @@ describe('Logger', () => {
       });
 
       const orchestrator = new Orchestrator({
-        dataDirectory: path.join(tmpDir, 'data'),
+        registryPath: path.join(tmpDir, 'registry3.json'),
         rolesDir: path.join(tmpDir, 'roles'),
         claudeBin: 'echo',
         spawnArgs: ['mock'],

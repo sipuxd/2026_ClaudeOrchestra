@@ -1,6 +1,10 @@
 // Filesystem persistence layer for TeamState.
 // Debounced writes, forced writes on phase transitions,
 // atomic writes via temp-file + rename.
+//
+// Supports per-project paths: each team's data lives in its
+// target project's .claude-orchestra/teams/{teamId}/ directory,
+// not in a single global data/ directory.
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -8,30 +12,54 @@ import { randomUUID } from 'node:crypto';
 import { TeamState, type TeamStateData } from './team-state.js';
 
 export interface PersistenceOptions {
-  /** Root data directory (e.g., data/teams) */
-  teamsDir: string;
   /** Debounce interval in ms (default: 1000) */
   debounceMs?: number;
 }
 
 export class StatePersistence {
-  private readonly teamsDir: string;
   private readonly debounceMs: number;
   private debounceTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 
-  constructor(options: PersistenceOptions) {
-    this.teamsDir = options.teamsDir;
+  /**
+   * Maps teamId → absolute directory path for that team's data.
+   * e.g., teamId "auth-team" → "/Users/me/Projects/pcoi/.claude-orchestra/teams/auth-team"
+   */
+  private teamDirs: Map<string, string> = new Map();
+
+  constructor(options: PersistenceOptions = {}) {
     this.debounceMs = options.debounceMs ?? 1000;
+  }
+
+  /**
+   * Register a team's data directory. Must be called before
+   * persist/load for that team. The orchestrator calls this
+   * in createTeam() after computing the path from projectPath.
+   */
+  registerTeamDir(teamId: string, teamDir: string): void {
+    this.teamDirs.set(teamId, teamDir);
+  }
+
+  /** Get the registered directory for a team. */
+  getTeamDir(teamId: string): string | undefined {
+    return this.teamDirs.get(teamId);
   }
 
   /** Get the state.json path for a team. */
   private statePath(teamId: string): string {
-    return path.join(this.teamsDir, teamId, 'state.json');
+    const dir = this.teamDirs.get(teamId);
+    if (!dir) {
+      throw new Error(`No directory registered for team "${teamId}". Call registerTeamDir() first.`);
+    }
+    return path.join(dir, 'state.json');
   }
 
   /** Ensure the team directory exists. */
   ensureTeamDir(teamId: string): void {
-    fs.mkdirSync(path.join(this.teamsDir, teamId), { recursive: true });
+    const dir = this.teamDirs.get(teamId);
+    if (!dir) {
+      throw new Error(`No directory registered for team "${teamId}". Call registerTeamDir() first.`);
+    }
+    fs.mkdirSync(dir, { recursive: true });
   }
 
   /**
@@ -83,14 +111,18 @@ export class StatePersistence {
   }
 
   /**
-   * List all team IDs that have persisted state.
+   * Load state from a specific directory path (used by recover()
+   * when reading from registry entries before the team is registered).
    */
-  listTeams(): string[] {
-    if (!fs.existsSync(this.teamsDir)) return [];
-    return fs.readdirSync(this.teamsDir).filter((dir) => {
-      const statePath = path.join(this.teamsDir, dir, 'state.json');
-      return fs.existsSync(statePath);
-    });
+  loadFromDir(teamDir: string): TeamStateData | null {
+    const filePath = path.join(teamDir, 'state.json');
+    if (!fs.existsSync(filePath)) return null;
+    try {
+      const content = fs.readFileSync(filePath, 'utf-8');
+      return JSON.parse(content) as TeamStateData;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -112,11 +144,14 @@ export class StatePersistence {
   // --- Private ---
 
   private writeState(state: TeamState): void {
-    const teamDir = path.join(this.teamsDir, state.teamId);
-    fs.mkdirSync(teamDir, { recursive: true });
+    const dir = this.teamDirs.get(state.teamId);
+    if (!dir) {
+      throw new Error(`No directory registered for team "${state.teamId}". Call registerTeamDir() first.`);
+    }
+    fs.mkdirSync(dir, { recursive: true });
 
-    const finalPath = this.statePath(state.teamId);
-    const tmpPath = path.join(teamDir, `.tmp-state-${randomUUID()}.json`);
+    const finalPath = path.join(dir, 'state.json');
+    const tmpPath = path.join(dir, `.tmp-state-${randomUUID()}.json`);
 
     const json = JSON.stringify(state.snapshot, null, 2);
     fs.writeFileSync(tmpPath, json, 'utf-8');

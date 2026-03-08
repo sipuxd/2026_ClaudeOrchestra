@@ -7,11 +7,12 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Orchestrator, type OrchestraConfig } from './orchestrator.js';
 import { SubagentOrchestrator, type SubagentOrchestraConfig } from './subagent-orchestrator.js';
+import { PipelineOrchestrator, type PipelineOrchestraConfig } from './pipeline-orchestrator.js';
 import { TeamPhase } from './state/team-state.js';
 import { Role } from './roles/role-types.js';
 import { Logger } from './logger/logger.js';
 
-type AnyOrchestrator = Orchestrator | SubagentOrchestrator;
+type AnyOrchestrator = Orchestrator | SubagentOrchestrator | PipelineOrchestrator;
 
 // --- Config Loading ---
 
@@ -156,7 +157,7 @@ ${colors.bold}Commands:${colors.reset}
   recover                              Recover teams from persisted state
 
 ${colors.bold}Flags:${colors.reset}
-  --mode <legacy|subagent>   Orchestration mode (default: legacy)
+  --mode <legacy|subagent|pipeline>  Orchestration mode (default: legacy)
   --data-dir <path>          Data directory (default: ./data)
   --tick-interval <ms>       Main loop interval (default: 1000)
   --max-teams <n>            Max concurrent teams (default: 5)
@@ -217,6 +218,19 @@ function showList(orchestrator: AnyOrchestrator): void {
   console.log();
 }
 
+// --- Helper: recover teams across all orchestrator types ---
+
+function recoverTeams(orchestrator: AnyOrchestrator): string[] {
+  if (orchestrator instanceof Orchestrator) {
+    return orchestrator.recover();
+  } else if (orchestrator instanceof SubagentOrchestrator) {
+    return orchestrator.recover();
+  } else if (orchestrator instanceof PipelineOrchestrator) {
+    return orchestrator.recover();
+  }
+  return [];
+}
+
 // --- Main ---
 
 async function main(): Promise<void> {
@@ -264,7 +278,19 @@ async function main(): Promise<void> {
   const mode = parsed.flags['--mode'] ?? 'legacy';
   let orchestrator: AnyOrchestrator;
 
-  if (mode === 'subagent') {
+  if (mode === 'pipeline') {
+    const pipelineConfig: Partial<PipelineOrchestraConfig> = {
+      dataDirectory: config.dataDirectory,
+      rolesDir: path.resolve('roles/subagent'),
+      maxConcurrentTeams: config.maxConcurrentTeams,
+      models: config.models,
+      disallowedTools: config.disallowedTools,
+      maxTurns: config.maxTurns,
+      limits: config.limits,
+    };
+    orchestrator = new PipelineOrchestrator(pipelineConfig);
+    log(`${colors.green}Mode: pipeline${colors.reset} (deterministic code-driven orchestration)`);
+  } else if (mode === 'subagent') {
     const subagentConfig: Partial<SubagentOrchestraConfig> = {
       dataDirectory: config.dataDirectory,
       rolesDir: path.resolve('roles/subagent'),
@@ -337,11 +363,7 @@ async function main(): Promise<void> {
       }
 
       // Recover existing teams from persisted state
-      if (orchestrator instanceof Orchestrator) {
-        orchestrator.recover();
-      } else if (orchestrator instanceof SubagentOrchestrator) {
-        orchestrator.recover();
-      }
+      recoverTeams(orchestrator);
 
       if (!orchestrator.getTeamStatus(teamId)) {
         logError(`Team "${teamId}" not found. Create it first with create-team.`);
@@ -350,9 +372,11 @@ async function main(): Promise<void> {
 
       orchestrator.assignTask(teamId, description);
 
-      // Start the main loop (no-op for subagent mode)
+      // Start the main loop (no-op for subagent/pipeline modes)
       if (orchestrator instanceof Orchestrator) {
         log(`${colors.bold}Main loop started${colors.reset} (tick every ${config.tickIntervalMs ?? 1000}ms). Press Ctrl+C to stop.`);
+      } else if (orchestrator instanceof PipelineOrchestrator) {
+        log(`${colors.bold}Pipeline started${colors.reset}. Press Ctrl+C to stop.`);
       } else {
         log(`${colors.bold}Subagent query started${colors.reset}. Press Ctrl+C to stop.`);
       }
@@ -372,6 +396,7 @@ async function main(): Promise<void> {
       await new Promise<void>(() => {
         // Legacy: process stays alive via tick interval timer.
         // Subagent: process stays alive via SDK query async generator.
+        // Pipeline: process stays alive via SDK query async generators.
         // Exit is handled by task-complete or signal handlers.
       });
       break;
@@ -383,35 +408,19 @@ async function main(): Promise<void> {
         logError('Usage: status <team-id>');
         process.exit(1);
       }
-      if (orchestrator instanceof Orchestrator) {
-        orchestrator.recover();
-      } else if (orchestrator instanceof SubagentOrchestrator) {
-        orchestrator.recover();
-      }
+      recoverTeams(orchestrator);
       showStatus(orchestrator, teamId);
       break;
     }
 
     case 'list': {
-      if (orchestrator instanceof Orchestrator) {
-        orchestrator.recover();
-      } else if (orchestrator instanceof SubagentOrchestrator) {
-        orchestrator.recover();
-      }
+      recoverTeams(orchestrator);
       showList(orchestrator);
       break;
     }
 
     case 'recover': {
-      let recovered: string[];
-      if (orchestrator instanceof Orchestrator) {
-        recovered = orchestrator.recover();
-      } else if (orchestrator instanceof SubagentOrchestrator) {
-        recovered = orchestrator.recover();
-      } else {
-        logError('Recovery is not available');
-        process.exit(1);
-      }
+      const recovered = recoverTeams(orchestrator);
       if (recovered.length === 0) {
         console.log('No teams to recover.');
       } else {

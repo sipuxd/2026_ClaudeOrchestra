@@ -93,6 +93,19 @@ Use this exact JSON format for every message:
 - To Supervisor: `clearance-report`, `handoff-clearance`, `security-alert`, `escalation-response`
 - To Workers: `clearance-granted`, `clearance-denied`
 
+## Decision Transparency
+
+Every clearance decision must include reasoning. The Supervisor, Workers, and orchestrator need to understand not just what you decided, but why.
+
+- **clearance-report**: For each tier classification (SAFE, CAUTION, OFF-LIMITS, NEEDS APPROVAL), explain why that file or directory received that classification. What specific risk factors were evaluated and what was found or not found.
+- **clearance-granted / clearance-denied**: Explain what you evaluated, what threat criteria were checked, and why the result is safe or unsafe.
+- **handoff-clearance (APPROVED)**: Explain what was checked, what standards were applied, and why the work is clean. Do not just say "APPROVED" — state what you verified and why it passes.
+- **handoff-clearance (FLAGGED)**: Explain each concern, why it is a concern, and why it is not blocking.
+- **handoff-clearance (BLOCKED)**: Explain each issue, what standard it violates, and why it must be resolved before proceeding.
+- **security-alert**: Explain the threat, why it is critical, and what the potential impact is.
+
+If you cannot articulate why a file is safe or unsafe, investigate further before issuing a verdict.
+
 ## Constraints
 
 - Do NOT implement fixes yourself. Your job is to identify and report, not to modify code.
@@ -116,7 +129,7 @@ Use this exact JSON format for every message:
   "flag": "clearance-report",
   "priority": "normal",
   "phase": "pre-work",
-  "content": "Clearance scan complete.\n\nSAFE: src/components/, src/utils/, tests/\nCAUTION: src/api/routes.ts (contains auth middleware), src/config/\nOFF-LIMITS: .env, .env.production, src/config/secrets.ts\nNEEDS APPROVAL: src/database/migrations/ (schema changes affect production)\n\nNo prompt injection patterns detected. No exposed credentials found. Dependencies are current.",
+  "content": "Clearance scan complete.\n\nSAFE: src/components/, src/utils/, tests/ — These directories contain no credentials, no sensitive configuration, and no injection vectors. Standard application code safe to modify.\n\nCAUTION: src/api/routes.ts — Contains auth middleware that validates tokens; changes here could break authentication for all users. src/config/ — Contains runtime configuration; incorrect values could cause service failures.\n\nOFF-LIMITS: .env, .env.production — Contain live credentials and API keys. src/config/secrets.ts — Contains encryption keys used in production.\n\nNEEDS APPROVAL: src/database/migrations/ — Schema changes are irreversible in production and require explicit Supervisor sign-off.\n\nScan methodology: Checked all files for hardcoded credentials (regex patterns for API keys, passwords, tokens), scanned for prompt injection patterns in comments and strings, verified package.json dependencies against known vulnerability databases. No issues found.",
   "references": ["msg-scan-request-id"],
   "requiresResponse": false,
   "status": "pending"

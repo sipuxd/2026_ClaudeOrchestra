@@ -5,7 +5,7 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { query, type SDKMessage, type SDKUserMessage, type Query } from '@anthropic-ai/claude-agent-sdk';
 import { Role, type RoleInstance } from '../roles/role-types.js';
 
@@ -13,6 +13,23 @@ import { Role, type RoleInstance } from '../roles/role-types.js';
 
 const MESSAGE_START = '---ORCHESTRA-MESSAGE-START---';
 const MESSAGE_END = '---ORCHESTRA-MESSAGE-END---';
+
+// --- Decision categories for "last message wins" ---
+// Messages are contradictory (same category) only when they represent
+// competing verdicts about the same decision. Two task-assignments to
+// different workers are NOT contradictory — they're independent.
+const REVIEW_VERDICT_FLAGS = new Set([
+  'review-approved', 'review-revise', 'review-rejected',
+]);
+
+function getDecisionCategory(flag: string, targetInstance: string | null): string {
+  // Review verdicts are always contradictory with each other
+  // (different flags, same decision: approve vs reject vs revise)
+  if (REVIEW_VERDICT_FLAGS.has(flag)) return 'review-verdict';
+  // Everything else: same flag + same target = contradictory,
+  // same flag + different target = independent
+  return `${flag}:${targetInstance ?? 'broadcast'}`;
+}
 
 // --- Agent process events ---
 
@@ -111,6 +128,10 @@ class PromptChannel {
 // --- Extract text from SDK assistant message content blocks ---
 
 function extractText(msg: SDKMessage): string | null {
+  // Only extract from 'assistant' messages.
+  // The SDK also emits a 'result' message with the same text —
+  // we use 'result' only as a turn-complete signal (see consumeSdkStream),
+  // not for text extraction, to avoid processing every message twice.
   if (msg.type === 'assistant') {
     const blocks = msg.message?.content;
     if (!Array.isArray(blocks)) return null;
@@ -121,9 +142,6 @@ function extractText(msg: SDKMessage): string | null {
       }
     }
     return texts.length > 0 ? texts.join('') : null;
-  }
-  if (msg.type === 'result' && 'result' in msg && typeof msg.result === 'string') {
-    return msg.result;
   }
   return null;
 }
@@ -141,6 +159,12 @@ export class AgentProcess extends EventEmitter<AgentProcessEvents> {
   private promptChannel: PromptChannel | null = null;
   private abortController: AbortController | null = null;
   private sdkStreamActive = false;
+
+  // "Last message wins" — in SDK mode, buffer messages within a turn
+  // so the agent can deliberate and change its mind. Only the final
+  // message in a turn is treated as the authoritative decision.
+  private turnMessageBuffer: string[] = [];
+  private isSDKMode = false;
 
   private _state: ProcessState = ProcessState.Starting;
   private _pid: number | null = null;
@@ -239,7 +263,29 @@ export class AgentProcess extends EventEmitter<AgentProcessEvents> {
   // --- Path B: SDK spawn (production mode) ---
 
   private spawnSdk(): void {
-    const systemPrompt = readFileSync(this.spawnOptions.systemPromptPath, 'utf-8');
+    // Ensure cwd exists
+    if (!existsSync(this.spawnOptions.cwd)) {
+      try {
+        mkdirSync(this.spawnOptions.cwd, { recursive: true });
+      } catch (err: any) {
+        this._state = ProcessState.Crashed;
+        const msg = `Failed to create cwd directory ${this.spawnOptions.cwd}: ${err?.message}`;
+        this.emit('stderr', msg);
+        this.emit('exit', 1, null);
+        return;
+      }
+    }
+
+    let systemPrompt: string;
+    try {
+      systemPrompt = readFileSync(this.spawnOptions.systemPromptPath, 'utf-8');
+    } catch (err: any) {
+      this._state = ProcessState.Crashed;
+      const msg = `Failed to read system prompt at ${this.spawnOptions.systemPromptPath}: ${err?.message}`;
+      this.emit('stderr', msg);
+      this.emit('exit', 1, null);
+      return;
+    }
 
     this.abortController = new AbortController();
     this.promptChannel = new PromptChannel();
@@ -252,26 +298,39 @@ export class AgentProcess extends EventEmitter<AgentProcessEvents> {
       CLAUDECODE: undefined,
     };
 
-    this.sdkQuery = query({
-      prompt: this.promptChannel as AsyncIterable<SDKUserMessage>,
-      options: {
-        model: this.spawnOptions.model,
-        systemPrompt,
-        cwd: this.spawnOptions.cwd,
-        env,
-        permissionMode: 'bypassPermissions',
-        allowDangerouslySkipPermissions: true,
-        allowedTools: this.spawnOptions.allowedTools ?? [
-          'Read', 'Edit', 'Write', 'Bash', 'Grep', 'Glob',
-        ],
-        maxTurns: this.spawnOptions.maxTurns,
-        abortController: this.abortController,
-        persistSession: false,
-      },
-    });
+    try {
+      this.sdkQuery = query({
+        prompt: this.promptChannel as AsyncIterable<SDKUserMessage>,
+        options: {
+          model: this.spawnOptions.model,
+          systemPrompt,
+          cwd: this.spawnOptions.cwd,
+          env,
+          permissionMode: 'bypassPermissions',
+          allowDangerouslySkipPermissions: true,
+          allowedTools: this.spawnOptions.allowedTools ?? [
+            'Read', 'Edit', 'Write', 'Bash', 'Grep', 'Glob',
+          ],
+          maxTurns: this.spawnOptions.maxTurns,
+          abortController: this.abortController,
+          persistSession: false,
+          // Capture SDK stderr for error visibility
+          stderr: (data: string) => {
+            this.emit('stderr', `[SDK] ${data}`);
+          },
+        },
+      });
+    } catch (err: any) {
+      this._state = ProcessState.Crashed;
+      const msg = `SDK query() failed to initialize: ${err?.message ?? err}`;
+      this.emit('stderr', msg);
+      this.emit('exit', 1, null);
+      return;
+    }
 
     this._state = ProcessState.Running;
     this.sdkStreamActive = true;
+    this.isSDKMode = true;
 
     // Consume the SDK stream in the background
     this.consumeSdkStream();
@@ -292,11 +351,13 @@ export class AgentProcess extends EventEmitter<AgentProcessEvents> {
 
         // On result message, the turn is complete
         if (msg.type === 'result') {
-          // Flush remaining buffer as output
+          // Flush remaining stdout buffer as output
           if (this.stdoutBuffer.trim()) {
             this.emit('output', this.stdoutBuffer.trim());
             this.stdoutBuffer = '';
           }
+          // Flush the turn message buffer — "last message wins"
+          this.flushTurnMessages();
         }
       }
     } catch (err: any) {
@@ -304,7 +365,9 @@ export class AgentProcess extends EventEmitter<AgentProcessEvents> {
         // Expected abort during shutdown
       } else {
         this._state = ProcessState.Crashed;
-        this.emit('stderr', err?.message ?? 'SDK stream error');
+        // Surface full error details for debugging
+        const errorDetail = err?.stack ?? err?.message ?? String(err) ?? 'SDK stream error';
+        this.emit('stderr', `SDK stream crashed: ${errorDetail}`);
         this.emit('exit', 1, null);
         return;
       }
@@ -450,7 +513,13 @@ export class AgentProcess extends EventEmitter<AgentProcessEvents> {
       const msgStart = startIdx + MESSAGE_START.length;
       const msgJson = this.stdoutBuffer.substring(msgStart, endIdx).trim();
       if (msgJson) {
-        this.emit('message', msgJson);
+        if (this.isSDKMode) {
+          // Buffer messages during the turn — flush on turn completion
+          this.turnMessageBuffer.push(msgJson);
+        } else {
+          // child_process mode (tests) — emit immediately
+          this.emit('message', msgJson);
+        }
       }
 
       this.stdoutBuffer = this.stdoutBuffer.substring(endIdx + MESSAGE_END.length);
@@ -461,6 +530,56 @@ export class AgentProcess extends EventEmitter<AgentProcessEvents> {
       if (remaining) this.emit('output', remaining);
       this.stdoutBuffer = '';
     }
+  }
+
+  /**
+   * Flush the turn message buffer.
+   *
+   * "Last message wins" applies ONLY within a decision category.
+   * Review verdicts (review-approved/revise/rejected) are one category —
+   * if an agent sends review-rejected then review-approved in the same turn,
+   * only the approval (last) is emitted as a real message.
+   *
+   * Messages in different categories (e.g., task-assignment to Worker-1 and
+   * scan-request to Security-1) are NOT contradictory — they all pass through.
+   */
+  private flushTurnMessages(): void {
+    if (this.turnMessageBuffer.length === 0) return;
+
+    // Parse flags and group by decision category
+    const entries: Array<{ json: string; category: string }> = [];
+    for (const raw of this.turnMessageBuffer) {
+      let category = 'unknown';
+      try {
+        const parsed = JSON.parse(raw);
+        const flag = parsed.flag ?? '';
+        const target = parsed.roleTargetInstance ?? null;
+        category = getDecisionCategory(flag, target);
+      } catch {
+        // If we can't parse, treat as unique category
+        category = `unparseable-${entries.length}`;
+      }
+      entries.push({ json: raw, category });
+    }
+
+    // For each category, find the LAST entry — that's the authoritative one.
+    // Track which indices are authoritative.
+    const lastByCategory = new Map<string, number>();
+    for (let i = 0; i < entries.length; i++) {
+      lastByCategory.set(entries[i].category, i);
+    }
+
+    // Emit in original order: authoritative as 'message', superseded as 'output'
+    for (let i = 0; i < entries.length; i++) {
+      const isAuthoritative = lastByCategory.get(entries[i].category) === i;
+      if (isAuthoritative) {
+        this.emit('message', entries[i].json);
+      } else {
+        this.emit('output', `[deliberation] ${entries[i].json}`);
+      }
+    }
+
+    this.turnMessageBuffer = [];
   }
 
   private killProcess(signal: NodeJS.Signals): void {

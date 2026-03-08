@@ -52,6 +52,7 @@ export interface OrchestratorEvents {
   'agent-output': [teamId: string, instance: RoleInstance, data: string];
   'agent-message': [teamId: string, instance: RoleInstance, message: AgentMessage];
   'agent-crashed': [teamId: string, instance: RoleInstance, code: number | null];
+  'agent-stderr': [teamId: string, instance: RoleInstance, data: string];
   'agent-respawned': [teamId: string, instance: RoleInstance];
   'malformed-output': [teamId: string, instance: RoleInstance, raw: string];
   'deadlock-detected': [teamId: string];
@@ -133,6 +134,10 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     }
 
     const resolvedProjectPath = path.resolve(projectPath);
+
+    // Ensure the project directory exists
+    fs.mkdirSync(resolvedProjectPath, { recursive: true });
+
     const limits: LoopLimits = {
       ...DEFAULT_LOOP_LIMITS,
       ...this.config.limits,
@@ -434,6 +439,11 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       this.emit('agent-output', teamId, agent.instance, data);
     });
 
+    // Handle stderr (error messages from SDK or process)
+    agent.on('stderr', (data: string) => {
+      this.emit('agent-stderr', teamId, agent.instance, data);
+    });
+
     // Handle crashes
     agent.on('exit', (code: number | null, _signal: NodeJS.Signals | null) => {
       if (agent.state === ProcessState.Crashed) {
@@ -462,7 +472,8 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     // Validate the message
     const errors = validateMessage(parsed);
     if (errors.length > 0) {
-      this.handleMalformedOutput(teamId, instance, raw, ctx);
+      const errorSummary = errors.map(e => `${e.field}: ${e.message}`).join('; ');
+      this.handleMalformedOutput(teamId, instance, `[Validation: ${errorSummary}] ${raw}`, ctx);
       return;
     }
 
@@ -576,6 +587,9 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       }
 
       case 'send-sweep-request': {
+        const sweepTaskDesc = ctx.state.snapshot.currentTask?.description ?? 'unknown task';
+        const sweepProjectPath = ctx.state.snapshot.projectPath;
+
         const sweepMsg = ctx.bus.createMessage({
           threadId: triggerMessage.threadId,
           roleSource: Role.Supervisor,
@@ -585,7 +599,12 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
           flag: SupervisorToSecurityFlag.SweepRequest as unknown as MessageFlag,
           priority: Priority.High,
           phase: Phase.Handoff,
-          content: 'All workers have completed their tasks. Please perform a security sweep of the completed work.',
+          content:
+            `POST-WORK SECURITY SWEEP\n\n` +
+            `Task: ${sweepTaskDesc}\n` +
+            `Project directory: ${sweepProjectPath}\n\n` +
+            `All workers have completed their tasks. Please perform a security sweep of the completed work ` +
+            `in the project directory above.`,
           requiresResponse: true,
         });
         ctx.bus.send(sweepMsg);
@@ -595,6 +614,32 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
 
       case 'send-review-request': {
         const cautionNotes = action.details.cautionNotes as string | null;
+
+        // Build rich review context so the Reviewer can evaluate the work
+        const taskDesc = ctx.state.snapshot.currentTask?.description ?? 'unknown task';
+        const projectPath = ctx.state.snapshot.projectPath;
+
+        // Gather worker completion summaries from the thread
+        const threadMessages = ctx.bus.getThread(triggerMessage.threadId);
+        const workerSummaries = threadMessages
+          .filter(m => m.roleSource === Role.Worker && m.flag === 'task-complete')
+          .map(m => `  - ${m.roleSourceInstance}: ${m.content.substring(0, 500)}`)
+          .join('\n');
+
+        let reviewContent =
+          `REVIEW REQUEST\n\n` +
+          `Task: ${taskDesc}\n` +
+          `Project directory: ${projectPath}\n\n` +
+          `Worker completion reports:\n${workerSummaries || '  (no completion reports found)'}\n\n` +
+          `Security clearance: PASSED${cautionNotes ? ` (with notes: ${cautionNotes})` : ''}\n\n` +
+          `Please evaluate the completed work against the task requirements. ` +
+          `You have access to the project directory at ${projectPath} — read the files to verify the work.`;
+
+        // Truncate to max content length
+        if (reviewContent.length > 7900) {
+          reviewContent = reviewContent.substring(0, 7900) + '\n...(truncated)';
+        }
+
         const reviewMsg = ctx.bus.createMessage({
           threadId: triggerMessage.threadId,
           roleSource: Role.Supervisor,
@@ -604,9 +649,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
           flag: SupervisorToReviewerFlag.ReviewRequest as unknown as MessageFlag,
           priority: Priority.High,
           phase: Phase.Review,
-          content: cautionNotes
-            ? `Please review the completed work. Security notes: ${cautionNotes}`
-            : 'Please review the completed work.',
+          content: reviewContent,
           requiresResponse: true,
         });
         ctx.bus.send(reviewMsg);
@@ -638,12 +681,18 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
 
       case 'replan-task': {
         const replanReason = action.details.reason as string;
+        const originalTask = ctx.state.snapshot.currentTask ?? 'unknown task';
         const supervisor = this.spawner.getAgent(teamId, 'Supervisor-1' as RoleInstance);
         if (supervisor?.isAlive) {
           supervisor.send(
-            `The reviewer has rejected the work. Reason: ${replanReason}\n` +
-            'Please re-plan the task and begin pre-work again. ' +
-            'Request a new security scan and then reassign tasks to workers.'
+            `REVISION CYCLE — The Reviewer has rejected the work and sent it back for re-planning.\n\n` +
+            `Original task: ${originalTask}\n\n` +
+            `Reviewer feedback:\n${replanReason}\n\n` +
+            `You must now re-plan and restart the pre-work phase:\n` +
+            `1. Send a new scan-request to Security-1 for a fresh security sweep.\n` +
+            `2. Once you receive the clearance-report, send new task-assignment messages to Worker-1 and Worker-2 addressing the Reviewer's feedback.\n` +
+            `3. Wait for task-accepted from both Workers before work begins.\n\n` +
+            `All agents have been reset and are ready for new assignments.`
           );
         }
         break;

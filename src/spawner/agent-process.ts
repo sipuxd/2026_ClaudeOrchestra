@@ -15,17 +15,20 @@ const MESSAGE_START = '---ORCHESTRA-MESSAGE-START---';
 const MESSAGE_END = '---ORCHESTRA-MESSAGE-END---';
 
 // --- Decision categories for "last message wins" ---
-// Flags in the same category are contradictory within a turn —
-// if an agent sends multiple, only the last one counts.
-// Flags in DIFFERENT categories are independent and all pass through.
+// Messages are contradictory (same category) only when they represent
+// competing verdicts about the same decision. Two task-assignments to
+// different workers are NOT contradictory — they're independent.
 const REVIEW_VERDICT_FLAGS = new Set([
   'review-approved', 'review-revise', 'review-rejected',
 ]);
 
-function getDecisionCategory(flag: string): string {
+function getDecisionCategory(flag: string, targetInstance: string | null): string {
+  // Review verdicts are always contradictory with each other
+  // (different flags, same decision: approve vs reject vs revise)
   if (REVIEW_VERDICT_FLAGS.has(flag)) return 'review-verdict';
-  // Every other flag is its own category — no deduplication
-  return flag;
+  // Everything else: same flag + same target = contradictory,
+  // same flag + different target = independent
+  return `${flag}:${targetInstance ?? 'broadcast'}`;
 }
 
 // --- Agent process events ---
@@ -550,7 +553,8 @@ export class AgentProcess extends EventEmitter<AgentProcessEvents> {
       try {
         const parsed = JSON.parse(raw);
         const flag = parsed.flag ?? '';
-        category = getDecisionCategory(flag);
+        const target = parsed.roleTargetInstance ?? null;
+        category = getDecisionCategory(flag, target);
       } catch {
         // If we can't parse, treat as unique category
         category = `unparseable-${entries.length}`;

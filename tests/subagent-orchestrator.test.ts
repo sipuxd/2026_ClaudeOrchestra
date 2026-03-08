@@ -249,7 +249,7 @@ describe('SubagentOrchestrator', () => {
 
       const opts = mockControls.options;
       expect(opts.agent).toBe('Supervisor');
-      expect(opts.effort).toBe('high');
+      expect(opts.effort).toBe('medium');
       expect(opts.permissionMode).toBe('bypassPermissions');
       expect(opts.allowDangerouslySkipPermissions).toBe(true);
       expect(opts.persistSession).toBe(false);

@@ -65,7 +65,7 @@ const DEFAULT_SUBAGENT_CONFIG = {
   logDirectory: './data/logs',
   rolesDir: './roles/subagent',
   maxConcurrentTeams: 5,
-  effort: 'high' as const,
+  effort: 'medium' as const,
 };
 
 // --- Per-team runtime context ---

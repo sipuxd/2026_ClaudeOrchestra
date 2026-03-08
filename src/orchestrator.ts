@@ -587,6 +587,9 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       }
 
       case 'send-sweep-request': {
+        const sweepTaskDesc = ctx.state.snapshot.currentTask?.description ?? 'unknown task';
+        const sweepProjectPath = ctx.state.snapshot.projectPath;
+
         const sweepMsg = ctx.bus.createMessage({
           threadId: triggerMessage.threadId,
           roleSource: Role.Supervisor,
@@ -596,7 +599,12 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
           flag: SupervisorToSecurityFlag.SweepRequest as unknown as MessageFlag,
           priority: Priority.High,
           phase: Phase.Handoff,
-          content: 'All workers have completed their tasks. Please perform a security sweep of the completed work.',
+          content:
+            `POST-WORK SECURITY SWEEP\n\n` +
+            `Task: ${sweepTaskDesc}\n` +
+            `Project directory: ${sweepProjectPath}\n\n` +
+            `All workers have completed their tasks. Please perform a security sweep of the completed work ` +
+            `in the project directory above.`,
           requiresResponse: true,
         });
         ctx.bus.send(sweepMsg);
@@ -606,6 +614,32 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
 
       case 'send-review-request': {
         const cautionNotes = action.details.cautionNotes as string | null;
+
+        // Build rich review context so the Reviewer can evaluate the work
+        const taskDesc = ctx.state.snapshot.currentTask?.description ?? 'unknown task';
+        const projectPath = ctx.state.snapshot.projectPath;
+
+        // Gather worker completion summaries from the thread
+        const threadMessages = ctx.bus.getThread(triggerMessage.threadId);
+        const workerSummaries = threadMessages
+          .filter(m => m.roleSource === Role.Worker && m.flag === 'task-complete')
+          .map(m => `  - ${m.roleSourceInstance}: ${m.content.substring(0, 500)}`)
+          .join('\n');
+
+        let reviewContent =
+          `REVIEW REQUEST\n\n` +
+          `Task: ${taskDesc}\n` +
+          `Project directory: ${projectPath}\n\n` +
+          `Worker completion reports:\n${workerSummaries || '  (no completion reports found)'}\n\n` +
+          `Security clearance: PASSED${cautionNotes ? ` (with notes: ${cautionNotes})` : ''}\n\n` +
+          `Please evaluate the completed work against the task requirements. ` +
+          `You have access to the project directory at ${projectPath} — read the files to verify the work.`;
+
+        // Truncate to max content length
+        if (reviewContent.length > 7900) {
+          reviewContent = reviewContent.substring(0, 7900) + '\n...(truncated)';
+        }
+
         const reviewMsg = ctx.bus.createMessage({
           threadId: triggerMessage.threadId,
           roleSource: Role.Supervisor,
@@ -615,9 +649,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
           flag: SupervisorToReviewerFlag.ReviewRequest as unknown as MessageFlag,
           priority: Priority.High,
           phase: Phase.Review,
-          content: cautionNotes
-            ? `Please review the completed work. Security notes: ${cautionNotes}`
-            : 'Please review the completed work.',
+          content: reviewContent,
           requiresResponse: true,
         });
         ctx.bus.send(reviewMsg);

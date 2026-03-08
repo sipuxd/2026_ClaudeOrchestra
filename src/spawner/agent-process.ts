@@ -111,6 +111,10 @@ class PromptChannel {
 // --- Extract text from SDK assistant message content blocks ---
 
 function extractText(msg: SDKMessage): string | null {
+  // Only extract from 'assistant' messages.
+  // The SDK also emits a 'result' message with the same text —
+  // we use 'result' only as a turn-complete signal (see consumeSdkStream),
+  // not for text extraction, to avoid processing every message twice.
   if (msg.type === 'assistant') {
     const blocks = msg.message?.content;
     if (!Array.isArray(blocks)) return null;
@@ -121,9 +125,6 @@ function extractText(msg: SDKMessage): string | null {
       }
     }
     return texts.length > 0 ? texts.join('') : null;
-  }
-  if (msg.type === 'result' && 'result' in msg && typeof msg.result === 'string') {
-    return msg.result;
   }
   return null;
 }

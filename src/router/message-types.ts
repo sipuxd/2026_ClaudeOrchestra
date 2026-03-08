@@ -81,8 +81,10 @@ export function messageFileName(message: AgentMessage): string {
 
 // --- Validation helpers ---
 
-const MSG_ID_PATTERN = /^msg-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const THREAD_ID_PATTERN = /^thread-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+// Relaxed patterns: agents are LLMs and may generate descriptive IDs
+// instead of strict UUIDs. Accept any non-empty string with the correct prefix.
+const MSG_ID_PATTERN = /^msg-.+$/;
+const THREAD_ID_PATTERN = /^thread-.+$/;
 
 export interface ValidationError {
   field: string;

@@ -472,7 +472,8 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
     // Validate the message
     const errors = validateMessage(parsed);
     if (errors.length > 0) {
-      this.handleMalformedOutput(teamId, instance, raw, ctx);
+      const errorSummary = errors.map(e => `${e.field}: ${e.message}`).join('; ');
+      this.handleMalformedOutput(teamId, instance, `[Validation: ${errorSummary}] ${raw}`, ctx);
       return;
     }
 

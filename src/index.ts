@@ -6,9 +6,12 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Orchestrator, type OrchestraConfig } from './orchestrator.js';
+import { SubagentOrchestrator, type SubagentOrchestraConfig } from './subagent-orchestrator.js';
 import { TeamPhase } from './state/team-state.js';
 import { Role } from './roles/role-types.js';
 import { Logger } from './logger/logger.js';
+
+type AnyOrchestrator = Orchestrator | SubagentOrchestrator;
 
 // --- Config Loading ---
 
@@ -153,6 +156,7 @@ ${colors.bold}Commands:${colors.reset}
   recover                              Recover teams from persisted state
 
 ${colors.bold}Flags:${colors.reset}
+  --mode <legacy|subagent>   Orchestration mode (default: legacy)
   --data-dir <path>          Data directory (default: ./data)
   --tick-interval <ms>       Main loop interval (default: 1000)
   --max-teams <n>            Max concurrent teams (default: 5)
@@ -160,7 +164,7 @@ ${colors.bold}Flags:${colors.reset}
 `);
 }
 
-function showStatus(orchestrator: Orchestrator, teamId: string): void {
+function showStatus(orchestrator: AnyOrchestrator, teamId: string): void {
   const status = orchestrator.getTeamStatus(teamId);
   if (!status) {
     logError(`Team "${teamId}" not found`);
@@ -195,7 +199,7 @@ ${colors.bold}Agents:${colors.reset}`);
   console.log();
 }
 
-function showList(orchestrator: Orchestrator): void {
+function showList(orchestrator: AnyOrchestrator): void {
   const teams = orchestrator.getAllTeams();
   if (teams.length === 0) {
     console.log('No active teams.');
@@ -256,7 +260,27 @@ async function main(): Promise<void> {
     config.rolesDir = path.resolve('roles');
   }
 
-  const orchestrator = new Orchestrator(config);
+  // Select orchestration mode
+  const mode = parsed.flags['--mode'] ?? 'legacy';
+  let orchestrator: AnyOrchestrator;
+
+  if (mode === 'subagent') {
+    const subagentConfig: Partial<SubagentOrchestraConfig> = {
+      dataDirectory: config.dataDirectory,
+      rolesDir: path.resolve('roles/subagent'),
+      maxConcurrentTeams: config.maxConcurrentTeams,
+      models: config.models,
+      disallowedTools: config.disallowedTools,
+      maxTurns: config.maxTurns,
+      maxBudgetUsd: config.maxBudgetUsd,
+      limits: config.limits,
+    };
+    orchestrator = new SubagentOrchestrator(subagentConfig);
+    log(`${colors.purple}Mode: subagent${colors.reset} (SDK-native subagent orchestration)`);
+  } else {
+    orchestrator = new Orchestrator(config);
+    log(`${colors.dim}Mode: legacy${colors.reset} (multi-process orchestration)`);
+  }
 
   // Create and attach structured logger
   const logDir = config.logDirectory ??
@@ -269,7 +293,8 @@ async function main(): Promise<void> {
     logDirectory: logDir,
     teamsDirectory: teamsDir,
   });
-  logger.attach(orchestrator);
+  // Logger.attach() expects Orchestrator but both emit compatible events
+  logger.attach(orchestrator as Orchestrator);
 
   // Signal handling
   let shutdownRequested = false;
@@ -311,8 +336,10 @@ async function main(): Promise<void> {
         process.exit(1);
       }
 
-      // Recover existing teams first
-      orchestrator.recover();
+      // Recover existing teams first (legacy mode only)
+      if (orchestrator instanceof Orchestrator) {
+        orchestrator.recover();
+      }
 
       if (!orchestrator.getTeamStatus(teamId)) {
         logError(`Team "${teamId}" not found. Create it first with create-team.`);
@@ -321,8 +348,12 @@ async function main(): Promise<void> {
 
       orchestrator.assignTask(teamId, description);
 
-      // Start the main loop
-      log(`${colors.bold}Main loop started${colors.reset} (tick every ${config.tickIntervalMs ?? 1000}ms). Press Ctrl+C to stop.`);
+      // Start the main loop (no-op for subagent mode)
+      if (orchestrator instanceof Orchestrator) {
+        log(`${colors.bold}Main loop started${colors.reset} (tick every ${config.tickIntervalMs ?? 1000}ms). Press Ctrl+C to stop.`);
+      } else {
+        log(`${colors.bold}Subagent query started${colors.reset}. Press Ctrl+C to stop.`);
+      }
       orchestrator.start();
 
       // Auto-exit when task reaches terminal state
@@ -337,7 +368,8 @@ async function main(): Promise<void> {
 
       // Keep process alive until task completes or Ctrl+C
       await new Promise<void>(() => {
-        // The process stays alive via the tick interval timer.
+        // Legacy: process stays alive via tick interval timer.
+        // Subagent: process stays alive via SDK query async generator.
         // Exit is handled by task-complete or signal handlers.
       });
       break;
@@ -349,18 +381,26 @@ async function main(): Promise<void> {
         logError('Usage: status <team-id>');
         process.exit(1);
       }
-      orchestrator.recover();
+      if (orchestrator instanceof Orchestrator) {
+        orchestrator.recover();
+      }
       showStatus(orchestrator, teamId);
       break;
     }
 
     case 'list': {
-      orchestrator.recover();
+      if (orchestrator instanceof Orchestrator) {
+        orchestrator.recover();
+      }
       showList(orchestrator);
       break;
     }
 
     case 'recover': {
+      if (!(orchestrator instanceof Orchestrator)) {
+        logError('Recovery is only available in legacy mode');
+        process.exit(1);
+      }
       const recovered = orchestrator.recover();
       if (recovered.length === 0) {
         console.log('No teams to recover.');

@@ -1,8 +1,11 @@
 // Work phase evaluation.
 //
-// Transition to Handoff requires ALL:
-// 1. All Workers sent task-complete to Supervisor
-// 2. No Workers in blocked state
+// Standard mode: Transition to Handoff requires ALL:
+//   1. All Workers sent task-complete to Supervisor
+//   2. No Workers in blocked state
+//
+// Simple mode: Transition directly to Done (skip Handoff + Review):
+//   1. Worker-1 sends task-complete → Done
 
 import { TeamState } from '../state/team-state.js';
 import { type AgentMessage } from '../router/message-types.js';
@@ -33,6 +36,28 @@ export function evaluateWork(
       return { shouldTransition: false, actions };
     }
 
+    // Route based on task complexity
+    const complexity = team.snapshot.currentTask?.complexity ?? 'standard';
+
+    if (complexity === 'simple') {
+      // Simple: skip Handoff + Review → go straight to Done
+      return {
+        shouldTransition: true,
+        targetPhase: TeamPhase.Done,
+        trigger: `${message.roleSourceInstance} task-complete (simple)`,
+        actions: [
+          {
+            type: 'set-agent-states',
+            details: {
+              targets: workerInstances,
+              state: AgentState.Done,
+            },
+          },
+        ],
+      };
+    }
+
+    // Standard: full pipeline → Handoff for Security sweep
     return {
       shouldTransition: true,
       targetPhase: TeamPhase.Handoff,

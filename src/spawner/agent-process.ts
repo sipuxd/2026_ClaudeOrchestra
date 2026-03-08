@@ -60,10 +60,18 @@ export interface AgentSpawnOptions {
   instance: RoleInstance;
   /** Team ID */
   teamId: string;
-  /** Tools the agent is allowed to use (SDK mode) */
+  /** Tools the agent is allowed to use (SDK mode — auto-allowed without permission prompt) */
   allowedTools?: string[];
+  /** Tools to remove from the agent's context entirely (SDK mode — reduces token usage) */
+  disallowedTools?: string[];
   /** Max agentic turns before stopping (SDK mode) */
   maxTurns?: number;
+  /** Effort level controlling reasoning depth (SDK mode) */
+  effort?: 'low' | 'medium' | 'high' | 'max';
+  /** Thinking/reasoning configuration (SDK mode) */
+  thinking?: { type: 'adaptive' } | { type: 'enabled'; budgetTokens?: number } | { type: 'disabled' };
+  /** Maximum budget in USD for this agent's query (SDK mode) */
+  maxBudgetUsd?: number;
 }
 
 // --- Agent process state ---
@@ -299,26 +307,49 @@ export class AgentProcess extends EventEmitter<AgentProcessEvents> {
     };
 
     try {
+      // Build SDK options with role-appropriate performance settings
+      const sdkOptions: Record<string, unknown> = {
+        model: this.spawnOptions.model,
+        systemPrompt,
+        cwd: this.spawnOptions.cwd,
+        env,
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+        allowedTools: this.spawnOptions.allowedTools ?? [
+          'Read', 'Edit', 'Write', 'Bash', 'Grep', 'Glob',
+        ],
+        maxTurns: this.spawnOptions.maxTurns,
+        abortController: this.abortController,
+        persistSession: false,
+        // Capture SDK stderr for error visibility
+        stderr: (data: string) => {
+          this.emit('stderr', `[SDK] ${data}`);
+        },
+      };
+
+      // Add effort level if specified (controls reasoning depth)
+      if (this.spawnOptions.effort) {
+        sdkOptions.effort = this.spawnOptions.effort;
+      }
+
+      // Add thinking configuration if specified
+      if (this.spawnOptions.thinking) {
+        sdkOptions.thinking = this.spawnOptions.thinking;
+      }
+
+      // Add budget cap if specified
+      if (this.spawnOptions.maxBudgetUsd !== undefined) {
+        sdkOptions.maxBudgetUsd = this.spawnOptions.maxBudgetUsd;
+      }
+
+      // Add disallowed tools if specified (removes from context entirely)
+      if (this.spawnOptions.disallowedTools && this.spawnOptions.disallowedTools.length > 0) {
+        sdkOptions.disallowedTools = this.spawnOptions.disallowedTools;
+      }
+
       this.sdkQuery = query({
         prompt: this.promptChannel as AsyncIterable<SDKUserMessage>,
-        options: {
-          model: this.spawnOptions.model,
-          systemPrompt,
-          cwd: this.spawnOptions.cwd,
-          env,
-          permissionMode: 'bypassPermissions',
-          allowDangerouslySkipPermissions: true,
-          allowedTools: this.spawnOptions.allowedTools ?? [
-            'Read', 'Edit', 'Write', 'Bash', 'Grep', 'Glob',
-          ],
-          maxTurns: this.spawnOptions.maxTurns,
-          abortController: this.abortController,
-          persistSession: false,
-          // Capture SDK stderr for error visibility
-          stderr: (data: string) => {
-            this.emit('stderr', `[SDK] ${data}`);
-          },
-        },
+        options: sdkOptions as any,
       });
     } catch (err: any) {
       this._state = ProcessState.Crashed;

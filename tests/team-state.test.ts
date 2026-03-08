@@ -76,6 +76,13 @@ describe('phase transitions', () => {
     expect(team.currentPhase).toBe(TeamPhase.Handoff);
   });
 
+  it('allows work → done (simple routing)', () => {
+    team.transitionPhase(TeamPhase.Work);
+    team.transitionPhase(TeamPhase.Done);
+    expect(team.currentPhase).toBe(TeamPhase.Done);
+    expect(team.isTerminal).toBe(true);
+  });
+
   it('allows handoff → review', () => {
     team.transitionPhase(TeamPhase.Work);
     team.transitionPhase(TeamPhase.Handoff);
@@ -406,6 +413,25 @@ describe('task management', () => {
     expect(team.counters.revisions).toBe(0);
     expect(team.counters.rejections).toBe(0);
     expect(team.counters.totalBackwardTransitions).toBe(0);
+  });
+
+  it('sets task complexity', () => {
+    const team = TeamState.create('team-1', 'test', '/path');
+    team.assignTask('Create hello.txt');
+    team.setTaskComplexity('simple');
+    expect(team.snapshot.currentTask?.complexity).toBe('simple');
+  });
+
+  it('sets task complexity to standard', () => {
+    const team = TeamState.create('team-1', 'test', '/path');
+    team.assignTask('Build an HTTP server with tests');
+    team.setTaskComplexity('standard');
+    expect(team.snapshot.currentTask?.complexity).toBe('standard');
+  });
+
+  it('throws when setting complexity without a task', () => {
+    const team = TeamState.create('team-1', 'test', '/path');
+    expect(() => team.setTaskComplexity('simple')).toThrow('Cannot set complexity');
   });
 });
 

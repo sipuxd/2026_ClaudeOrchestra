@@ -28,9 +28,12 @@ export interface AgentStatus {
 
 // --- Task info ---
 
+export type TaskComplexity = 'simple' | 'standard';
+
 export interface TaskInfo {
   description: string;
   assignedAt: string;
+  complexity?: TaskComplexity;
 }
 
 // --- Loop counters ---
@@ -82,7 +85,7 @@ export class TransitionError extends Error {
 
 const VALID_PHASE_TRANSITIONS: Record<TeamPhase, readonly TeamPhase[]> = {
   [TeamPhase.PreWork]: [TeamPhase.Work, TeamPhase.Errored, TeamPhase.Cancelled],
-  [TeamPhase.Work]: [TeamPhase.Handoff, TeamPhase.Errored, TeamPhase.Cancelled],
+  [TeamPhase.Work]: [TeamPhase.Handoff, TeamPhase.Done, TeamPhase.Errored, TeamPhase.Cancelled],
   [TeamPhase.Handoff]: [TeamPhase.Review, TeamPhase.Work, TeamPhase.Errored, TeamPhase.Cancelled],
   [TeamPhase.Review]: [TeamPhase.Done, TeamPhase.Work, TeamPhase.PreWork, TeamPhase.Errored, TeamPhase.Cancelled],
   [TeamPhase.Done]: [],
@@ -313,6 +316,14 @@ export class TeamState {
       assignedAt: new Date().toISOString(),
     };
     this.data.counters = { revisions: 0, rejections: 0, totalBackwardTransitions: 0 };
+    this.touch();
+  }
+
+  setTaskComplexity(complexity: TaskComplexity): void {
+    if (!this.data.currentTask) {
+      throw new TransitionError('Cannot set complexity: no task assigned');
+    }
+    this.data.currentTask.complexity = complexity;
     this.touch();
   }
 

@@ -1,14 +1,19 @@
 #!/usr/bin/env node
 
 // CLI entry point for ClaudeOrchestra.
-// Commands: create-team, assign-task, status, list
+// Commands: create-team, assign-task, status, list, dashboard
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Orchestrator, type OrchestraConfig } from './orchestrator.js';
+import { SubagentOrchestrator, type SubagentOrchestraConfig } from './subagent-orchestrator.js';
+import { PipelineOrchestrator, type PipelineOrchestraConfig } from './pipeline-orchestrator.js';
+import { DashboardServer } from './dashboard/index.js';
 import { TeamPhase } from './state/team-state.js';
 import { Role } from './roles/role-types.js';
 import { Logger } from './logger/logger.js';
+
+type AnyOrchestrator = Orchestrator | SubagentOrchestrator | PipelineOrchestrator;
 
 // --- Config Loading ---
 
@@ -38,6 +43,27 @@ function loadConfig(configPath: string): Partial<OrchestraConfig> {
         config.models[role as Role] = model as string;
       }
     }
+
+    // Performance tuning
+    if (parsed.efforts) {
+      config.efforts = {};
+      for (const [role, effort] of Object.entries(parsed.efforts)) {
+        config.efforts[role as Role] = effort as 'low' | 'medium' | 'high' | 'max';
+      }
+    }
+    if (parsed.disallowedTools) {
+      config.disallowedTools = {};
+      for (const [role, tools] of Object.entries(parsed.disallowedTools)) {
+        config.disallowedTools[role as Role] = tools as string[];
+      }
+    }
+    if (parsed.maxTurns) {
+      config.maxTurns = {};
+      for (const [role, turns] of Object.entries(parsed.maxTurns)) {
+        config.maxTurns[role as Role] = turns as number;
+      }
+    }
+    if (parsed.maxBudgetUsd) config.maxBudgetUsd = parsed.maxBudgetUsd;
 
     return config;
   } catch {
@@ -125,6 +151,7 @@ ${colors.bold}Usage:${colors.reset}
   claude-orchestra <command> [args] [flags]
 
 ${colors.bold}Commands:${colors.reset}
+  dashboard                            Start live dashboard (pipeline mode)
   create-team <name> <project-path>   Create a new agent team
   assign-task <team-id> <description>  Assign a task to a team
   status <team-id>                     Show team status
@@ -132,6 +159,8 @@ ${colors.bold}Commands:${colors.reset}
   recover                              Recover teams from persisted state
 
 ${colors.bold}Flags:${colors.reset}
+  --mode <legacy|subagent|pipeline>  Orchestration mode (default: legacy)
+  --port <n>                 Dashboard port (default: 3460)
   --data-dir <path>          Data directory (default: ./data)
   --tick-interval <ms>       Main loop interval (default: 1000)
   --max-teams <n>            Max concurrent teams (default: 5)
@@ -139,7 +168,7 @@ ${colors.bold}Flags:${colors.reset}
 `);
 }
 
-function showStatus(orchestrator: Orchestrator, teamId: string): void {
+function showStatus(orchestrator: AnyOrchestrator, teamId: string): void {
   const status = orchestrator.getTeamStatus(teamId);
   if (!status) {
     logError(`Team "${teamId}" not found`);
@@ -174,7 +203,7 @@ ${colors.bold}Agents:${colors.reset}`);
   console.log();
 }
 
-function showList(orchestrator: Orchestrator): void {
+function showList(orchestrator: AnyOrchestrator): void {
   const teams = orchestrator.getAllTeams();
   if (teams.length === 0) {
     console.log('No active teams.');
@@ -190,6 +219,19 @@ function showList(orchestrator: Orchestrator): void {
     );
   }
   console.log();
+}
+
+// --- Helper: recover teams across all orchestrator types ---
+
+function recoverTeams(orchestrator: AnyOrchestrator): string[] {
+  if (orchestrator instanceof Orchestrator) {
+    return orchestrator.recover();
+  } else if (orchestrator instanceof SubagentOrchestrator) {
+    return orchestrator.recover();
+  } else if (orchestrator instanceof PipelineOrchestrator) {
+    return orchestrator.recover();
+  }
+  return [];
 }
 
 // --- Main ---
@@ -235,7 +277,39 @@ async function main(): Promise<void> {
     config.rolesDir = path.resolve('roles');
   }
 
-  const orchestrator = new Orchestrator(config);
+  // Select orchestration mode
+  const mode = parsed.flags['--mode'] ?? 'legacy';
+  let orchestrator: AnyOrchestrator;
+
+  if (mode === 'pipeline') {
+    const pipelineConfig: Partial<PipelineOrchestraConfig> = {
+      dataDirectory: config.dataDirectory,
+      rolesDir: path.resolve('roles/subagent'),
+      maxConcurrentTeams: config.maxConcurrentTeams,
+      models: config.models,
+      disallowedTools: config.disallowedTools,
+      maxTurns: config.maxTurns,
+      limits: config.limits,
+    };
+    orchestrator = new PipelineOrchestrator(pipelineConfig);
+    log(`${colors.green}Mode: pipeline${colors.reset} (deterministic code-driven orchestration)`);
+  } else if (mode === 'subagent') {
+    const subagentConfig: Partial<SubagentOrchestraConfig> = {
+      dataDirectory: config.dataDirectory,
+      rolesDir: path.resolve('roles/subagent'),
+      maxConcurrentTeams: config.maxConcurrentTeams,
+      models: config.models,
+      disallowedTools: config.disallowedTools,
+      maxTurns: config.maxTurns,
+      maxBudgetUsd: config.maxBudgetUsd,
+      limits: config.limits,
+    };
+    orchestrator = new SubagentOrchestrator(subagentConfig);
+    log(`${colors.purple}Mode: subagent${colors.reset} (SDK-native subagent orchestration)`);
+  } else {
+    orchestrator = new Orchestrator(config);
+    log(`${colors.dim}Mode: legacy${colors.reset} (multi-process orchestration)`);
+  }
 
   // Create and attach structured logger
   const logDir = config.logDirectory ??
@@ -248,7 +322,8 @@ async function main(): Promise<void> {
     logDirectory: logDir,
     teamsDirectory: teamsDir,
   });
-  logger.attach(orchestrator);
+  // Logger.attach() expects Orchestrator but both emit compatible events
+  logger.attach(orchestrator as Orchestrator);
 
   // Signal handling
   let shutdownRequested = false;
@@ -290,8 +365,8 @@ async function main(): Promise<void> {
         process.exit(1);
       }
 
-      // Recover existing teams first
-      orchestrator.recover();
+      // Recover existing teams from persisted state
+      recoverTeams(orchestrator);
 
       if (!orchestrator.getTeamStatus(teamId)) {
         logError(`Team "${teamId}" not found. Create it first with create-team.`);
@@ -300,14 +375,32 @@ async function main(): Promise<void> {
 
       orchestrator.assignTask(teamId, description);
 
-      // Start the main loop
-      log(`${colors.bold}Main loop started${colors.reset} (tick every ${config.tickIntervalMs ?? 1000}ms). Press Ctrl+C to stop.`);
+      // Start the main loop (no-op for subagent/pipeline modes)
+      if (orchestrator instanceof Orchestrator) {
+        log(`${colors.bold}Main loop started${colors.reset} (tick every ${config.tickIntervalMs ?? 1000}ms). Press Ctrl+C to stop.`);
+      } else if (orchestrator instanceof PipelineOrchestrator) {
+        log(`${colors.bold}Pipeline started${colors.reset}. Press Ctrl+C to stop.`);
+      } else {
+        log(`${colors.bold}Subagent query started${colors.reset}. Press Ctrl+C to stop.`);
+      }
       orchestrator.start();
 
-      // Keep process alive
+      // Auto-exit when task reaches terminal state
+      orchestrator.on('task-complete', async (_completedTeamId, _phase, _durationMs) => {
+        // Give a moment for final log output to flush
+        setTimeout(async () => {
+          await orchestrator.shutdown();
+          logger.dispose();
+          process.exit(0);
+        }, 2000);
+      });
+
+      // Keep process alive until task completes or Ctrl+C
       await new Promise<void>(() => {
-        // The process stays alive via the tick interval timer.
-        // Shutdown is handled by signal handlers.
+        // Legacy: process stays alive via tick interval timer.
+        // Subagent: process stays alive via SDK query async generator.
+        // Pipeline: process stays alive via SDK query async generators.
+        // Exit is handled by task-complete or signal handlers.
       });
       break;
     }
@@ -318,19 +411,19 @@ async function main(): Promise<void> {
         logError('Usage: status <team-id>');
         process.exit(1);
       }
-      orchestrator.recover();
+      recoverTeams(orchestrator);
       showStatus(orchestrator, teamId);
       break;
     }
 
     case 'list': {
-      orchestrator.recover();
+      recoverTeams(orchestrator);
       showList(orchestrator);
       break;
     }
 
     case 'recover': {
-      const recovered = orchestrator.recover();
+      const recovered = recoverTeams(orchestrator);
       if (recovered.length === 0) {
         console.log('No teams to recover.');
       } else {
@@ -338,6 +431,63 @@ async function main(): Promise<void> {
         orchestrator.start();
         await new Promise<void>(() => {});
       }
+      break;
+    }
+
+    case 'dashboard': {
+      // Dashboard mode requires pipeline orchestrator
+      if (mode !== 'pipeline') {
+        logError('Dashboard requires --mode pipeline');
+        process.exit(1);
+      }
+
+      const port = parseInt(parsed.flags['--port'] ?? '3460', 10);
+
+      // Recover existing teams
+      recoverTeams(orchestrator);
+
+      // Start dashboard server
+      const dashboard = new DashboardServer({
+        orchestrator: orchestrator as PipelineOrchestrator,
+        port,
+      });
+
+      await dashboard.start();
+      log(`${colors.green}Dashboard running at${colors.reset} ${colors.bold}http://localhost:${port}${colors.reset}`);
+      log(`${colors.dim}Create teams and launch tasks from the browser. Press Ctrl+C to stop.${colors.reset}`);
+
+      // Auto-open browser (best effort, macOS/Linux/Windows)
+      try {
+        const { exec } = await import('node:child_process');
+        const openCmd = process.platform === 'darwin' ? 'open' :
+                        process.platform === 'win32' ? 'start' : 'xdg-open';
+        exec(`${openCmd} http://localhost:${port}`);
+      } catch {
+        // Silent fail — user can open manually
+      }
+
+      // Override shutdown to close dashboard first
+      process.removeListener('SIGTERM', handleShutdown);
+      process.removeListener('SIGINT', handleShutdown);
+
+      const dashboardShutdown = async () => {
+        if (shutdownRequested) {
+          orchestrator.forceKillAll();
+          process.exit(1);
+        }
+        shutdownRequested = true;
+        log(`${colors.yellow}Shutting down dashboard + orchestrator...${colors.reset}`);
+        await dashboard.close();
+        await orchestrator.shutdown();
+        logger.dispose();
+        process.exit(0);
+      };
+
+      process.on('SIGTERM', dashboardShutdown);
+      process.on('SIGINT', dashboardShutdown);
+
+      // Keep process alive
+      await new Promise<void>(() => {});
       break;
     }
 

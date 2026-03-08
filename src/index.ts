@@ -336,8 +336,10 @@ async function main(): Promise<void> {
         process.exit(1);
       }
 
-      // Recover existing teams first (legacy mode only)
+      // Recover existing teams from persisted state
       if (orchestrator instanceof Orchestrator) {
+        orchestrator.recover();
+      } else if (orchestrator instanceof SubagentOrchestrator) {
         orchestrator.recover();
       }
 
@@ -383,6 +385,8 @@ async function main(): Promise<void> {
       }
       if (orchestrator instanceof Orchestrator) {
         orchestrator.recover();
+      } else if (orchestrator instanceof SubagentOrchestrator) {
+        orchestrator.recover();
       }
       showStatus(orchestrator, teamId);
       break;
@@ -391,17 +395,23 @@ async function main(): Promise<void> {
     case 'list': {
       if (orchestrator instanceof Orchestrator) {
         orchestrator.recover();
+      } else if (orchestrator instanceof SubagentOrchestrator) {
+        orchestrator.recover();
       }
       showList(orchestrator);
       break;
     }
 
     case 'recover': {
-      if (!(orchestrator instanceof Orchestrator)) {
-        logError('Recovery is only available in legacy mode');
+      let recovered: string[];
+      if (orchestrator instanceof Orchestrator) {
+        recovered = orchestrator.recover();
+      } else if (orchestrator instanceof SubagentOrchestrator) {
+        recovered = orchestrator.recover();
+      } else {
+        logError('Recovery is not available');
         process.exit(1);
       }
-      const recovered = orchestrator.recover();
       if (recovered.length === 0) {
         console.log('No teams to recover.');
       } else {

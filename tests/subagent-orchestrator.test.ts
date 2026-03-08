@@ -516,6 +516,76 @@ describe('SubagentOrchestrator', () => {
     });
   });
 
+  // --- Recovery ---
+
+  describe('recover', () => {
+    it('recovers teams from persisted state', () => {
+      // Create a team and persist it
+      orchestrator.createTeam('recov-team', projectDir);
+      const status = orchestrator.getTeamStatus('recov-team');
+      expect(status).toBeDefined();
+
+      // Create a new orchestrator pointing at same data directory
+      const orchestrator2 = new SubagentOrchestrator({
+        dataDirectory: path.join(tmpDir, 'data'),
+        rolesDir,
+        maxConcurrentTeams: 3,
+      });
+
+      // Team not in memory yet
+      expect(orchestrator2.getTeamStatus('recov-team')).toBeUndefined();
+
+      // Recover
+      const recovered = orchestrator2.recover();
+      expect(recovered).toEqual(['recov-team']);
+      expect(orchestrator2.getTeamStatus('recov-team')).toBeDefined();
+      expect(orchestrator2.getTeamStatus('recov-team')!.teamName).toBe('recov-team');
+
+      orchestrator2.forceKillAll();
+    });
+
+    it('skips terminal teams during recovery', async () => {
+      orchestrator.createTeam('done-team', projectDir);
+      orchestrator.assignTask('done-team', 'Create hello.txt');
+
+      // Complete the query to move team to Done
+      mockControls.complete();
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      // Create a new orchestrator
+      const orchestrator2 = new SubagentOrchestrator({
+        dataDirectory: path.join(tmpDir, 'data'),
+        rolesDir,
+        maxConcurrentTeams: 3,
+      });
+
+      const recovered = orchestrator2.recover();
+      expect(recovered).toEqual([]); // Done teams are skipped
+
+      orchestrator2.forceKillAll();
+    });
+
+    it('returns empty array when no teams exist', () => {
+      const recovered = orchestrator.recover();
+      expect(recovered).toEqual([]);
+    });
+  });
+
+  // --- Config defaults ---
+
+  describe('config defaults', () => {
+    it('handles undefined config values without crashing', () => {
+      // Simulates what happens when index.ts passes undefined dataDirectory
+      const orch = new SubagentOrchestrator({
+        dataDirectory: undefined as any,
+        rolesDir,
+      });
+      // Should use default './data' and not crash
+      expect(() => orch.getAllTeams()).not.toThrow();
+      orch.forceKillAll();
+    });
+  });
+
   // --- Start / Stop compatibility ---
 
   describe('start / stop (no-ops)', () => {

@@ -93,7 +93,12 @@ export class SubagentOrchestrator extends EventEmitter<OrchestratorEvents> {
 
   constructor(config: Partial<SubagentOrchestraConfig> = {}) {
     super();
-    this.config = { ...DEFAULT_SUBAGENT_CONFIG, ...config } as SubagentOrchestraConfig & typeof DEFAULT_SUBAGENT_CONFIG;
+
+    // Filter out undefined values so they don't overwrite defaults
+    const cleanConfig = Object.fromEntries(
+      Object.entries(config).filter(([, v]) => v !== undefined)
+    );
+    this.config = { ...DEFAULT_SUBAGENT_CONFIG, ...cleanConfig } as SubagentOrchestraConfig & typeof DEFAULT_SUBAGENT_CONFIG;
 
     const teamsDir = path.join(this.config.dataDirectory, 'teams');
     this.persistence = new StatePersistence({ teamsDir });
@@ -145,6 +150,50 @@ export class SubagentOrchestrator extends EventEmitter<OrchestratorEvents> {
     this.emit('team-created', teamId);
 
     return state;
+  }
+
+  // --- Recovery ---
+
+  /**
+   * Recover teams from persisted state on disk.
+   * This allows assign-task to find teams created in a previous process.
+   * Returns the list of recovered team IDs.
+   */
+  recover(): string[] {
+    const recovered: string[] = [];
+    const teamIds = this.persistence.listTeams();
+
+    for (const teamId of teamIds) {
+      // Skip teams already in memory
+      if (this.teams.has(teamId)) continue;
+
+      const data = this.persistence.load(teamId);
+      if (!data) continue;
+
+      // Skip terminal teams
+      if (
+        data.currentPhase === TeamPhase.Done ||
+        data.currentPhase === TeamPhase.Cancelled ||
+        data.currentPhase === TeamPhase.Errored
+      ) {
+        continue;
+      }
+
+      const limits: LoopLimits = { ...DEFAULT_LOOP_LIMITS, ...this.config.limits };
+      const state = TeamState.fromData(data, limits);
+
+      const ctx: SubagentTeamContext = {
+        state,
+        activeQuery: null,
+        subagentHistory: [],
+        securityScanDone: false,
+      };
+
+      this.teams.set(teamId, ctx);
+      recovered.push(teamId);
+    }
+
+    return recovered;
   }
 
   // --- Task Assignment ---

@@ -27,12 +27,20 @@ export interface OrchestraConfig {
   claudeBin?: string;
   spawnArgs?: string[];
   models?: Partial<Record<Role, string>>;
+  /** Effort level overrides per role (controls reasoning depth) */
+  efforts?: Partial<Record<Role, 'low' | 'medium' | 'high' | 'max'>>;
+  /** Disallowed tools overrides per role (removes tools from agent context) */
+  disallowedTools?: Partial<Record<Role, string[]>>;
+  /** Max turns overrides per role (safety net against runaway agents) */
+  maxTurns?: Partial<Record<Role, number>>;
+  /** Global max budget per agent query (USD) */
+  maxBudgetUsd?: number;
   limits?: Partial<LoopLimits>;
   maxRespawns?: number;
   maxMalformedRetries?: number;
 }
 
-const DEFAULT_CONFIG: Required<Omit<OrchestraConfig, 'claudeBin' | 'spawnArgs' | 'models' | 'limits'>> & Pick<OrchestraConfig, 'claudeBin' | 'spawnArgs' | 'models' | 'limits'> = {
+const DEFAULT_CONFIG: Required<Omit<OrchestraConfig, 'claudeBin' | 'spawnArgs' | 'models' | 'limits' | 'efforts' | 'disallowedTools' | 'maxTurns' | 'maxBudgetUsd'>> & Pick<OrchestraConfig, 'claudeBin' | 'spawnArgs' | 'models' | 'limits' | 'efforts' | 'disallowedTools' | 'maxTurns' | 'maxBudgetUsd'> = {
   dataDirectory: './data',
   logDirectory: './data/logs',
   rolesDir: './roles',
@@ -48,6 +56,7 @@ export interface OrchestratorEvents {
   'team-created': [teamId: string];
   'task-assigned': [teamId: string, description: string];
   'phase-transition': [teamId: string, from: TeamPhase, to: TeamPhase, trigger: string];
+  'task-complete': [teamId: string, phase: TeamPhase, durationMs: number];
   'message-routed': [teamId: string, message: AgentMessage];
   'agent-output': [teamId: string, instance: RoleInstance, data: string];
   'agent-message': [teamId: string, instance: RoleInstance, message: AgentMessage];
@@ -97,6 +106,10 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       spawnArgs: this.config.spawnArgs,
       rolesDir: this.config.rolesDir,
       models: this.config.models,
+      efforts: this.config.efforts,
+      disallowedTools: this.config.disallowedTools,
+      maxTurns: this.config.maxTurns,
+      maxBudgetUsd: this.config.maxBudgetUsd,
       maxRespawns: this.config.maxRespawns,
     });
 
@@ -498,6 +511,11 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       if (ctx.state.currentPhase !== from) {
         this.emit('phase-transition', teamId, from, ctx.state.currentPhase, evaluation.trigger ?? 'message');
         this.persistence.persistNow(ctx.state);
+
+        // If we reached a terminal state, emit task-complete and clean up
+        if (ctx.state.isTerminal) {
+          this.handleTaskTerminal(teamId, ctx);
+        }
       }
     }
 
@@ -786,6 +804,27 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
         this.persistence.persistNow(ctx.state);
       }
     }
+  }
+
+  // --- Private: Terminal State Handling ---
+
+  /**
+   * Handle a team reaching a terminal state (done, errored, cancelled).
+   * Emits task-complete, terminates agents, and persists final state.
+   */
+  private handleTaskTerminal(teamId: string, ctx: TeamContext): void {
+    const phase = ctx.state.currentPhase;
+    const task = ctx.state.snapshot.currentTask;
+    const startTime = task?.assignedAt ? new Date(task.assignedAt).getTime() : 0;
+    const durationMs = startTime > 0 ? Date.now() - startTime : 0;
+
+    this.emit('task-complete', teamId, phase, durationMs);
+    this.persistence.persistNow(ctx.state);
+
+    // Terminate all agents in the background — they're no longer needed
+    this.spawner.terminateTeam(teamId).catch(() => {
+      // Best effort — agents may already be stopped
+    });
   }
 
   // --- Private: Prompt Builders ---

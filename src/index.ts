@@ -39,6 +39,27 @@ function loadConfig(configPath: string): Partial<OrchestraConfig> {
       }
     }
 
+    // Performance tuning
+    if (parsed.efforts) {
+      config.efforts = {};
+      for (const [role, effort] of Object.entries(parsed.efforts)) {
+        config.efforts[role as Role] = effort as 'low' | 'medium' | 'high' | 'max';
+      }
+    }
+    if (parsed.disallowedTools) {
+      config.disallowedTools = {};
+      for (const [role, tools] of Object.entries(parsed.disallowedTools)) {
+        config.disallowedTools[role as Role] = tools as string[];
+      }
+    }
+    if (parsed.maxTurns) {
+      config.maxTurns = {};
+      for (const [role, turns] of Object.entries(parsed.maxTurns)) {
+        config.maxTurns[role as Role] = turns as number;
+      }
+    }
+    if (parsed.maxBudgetUsd) config.maxBudgetUsd = parsed.maxBudgetUsd;
+
     return config;
   } catch {
     return {};
@@ -304,10 +325,20 @@ async function main(): Promise<void> {
       log(`${colors.bold}Main loop started${colors.reset} (tick every ${config.tickIntervalMs ?? 1000}ms). Press Ctrl+C to stop.`);
       orchestrator.start();
 
-      // Keep process alive
+      // Auto-exit when task reaches terminal state
+      orchestrator.on('task-complete', async (_completedTeamId, _phase, _durationMs) => {
+        // Give a moment for final log output to flush
+        setTimeout(async () => {
+          await orchestrator.shutdown();
+          logger.dispose();
+          process.exit(0);
+        }, 2000);
+      });
+
+      // Keep process alive until task completes or Ctrl+C
       await new Promise<void>(() => {
         // The process stays alive via the tick interval timer.
-        // Shutdown is handled by signal handlers.
+        // Exit is handled by task-complete or signal handlers.
       });
       break;
     }

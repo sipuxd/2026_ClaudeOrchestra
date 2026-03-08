@@ -14,6 +14,42 @@ export const DEFAULT_MODELS: Record<Role, string> = {
   [Role.Reviewer]: 'claude-sonnet-4-6',
 };
 
+// --- Default effort levels per role ---
+// Supervisor: medium — reads project, delegates, doesn't write code
+// Worker: high — writes code, needs quality reasoning
+// Security: medium — pattern-matching analysis, guided by checklist
+// Reviewer: medium — evaluation guided by Decision Transparency framework
+
+export const DEFAULT_EFFORTS: Record<Role, 'low' | 'medium' | 'high' | 'max'> = {
+  [Role.Supervisor]: 'medium',
+  [Role.Worker]: 'high',
+  [Role.Security]: 'medium',
+  [Role.Reviewer]: 'medium',
+};
+
+// --- Tools to disallow per role ---
+// Workers get full access. Supervisor, Security, and Reviewer only need
+// read-only tools — removing Write/Edit/Bash from their context saves
+// tokens and prevents unintended modifications.
+
+export const DEFAULT_DISALLOWED_TOOLS: Record<Role, string[]> = {
+  [Role.Supervisor]: ['Write', 'Edit', 'Bash'],
+  [Role.Worker]: [],                              // Full access
+  [Role.Security]: ['Write', 'Edit', 'Bash'],
+  [Role.Reviewer]: ['Write', 'Edit', 'Bash'],
+};
+
+// --- Default max turns per role ---
+// Safety net to prevent runaway agent loops.
+// Workers get more turns because they do real coding work.
+
+export const DEFAULT_MAX_TURNS: Record<Role, number> = {
+  [Role.Supervisor]: 30,
+  [Role.Worker]: 50,
+  [Role.Security]: 20,
+  [Role.Reviewer]: 20,
+};
+
 // --- Spawner options ---
 
 export interface SpawnerOptions {
@@ -25,6 +61,14 @@ export interface SpawnerOptions {
   rolesDir: string;
   /** Model overrides per role */
   models?: Partial<Record<Role, string>>;
+  /** Effort level overrides per role */
+  efforts?: Partial<Record<Role, 'low' | 'medium' | 'high' | 'max'>>;
+  /** Disallowed tools overrides per role (removes tools from agent context) */
+  disallowedTools?: Partial<Record<Role, string[]>>;
+  /** Max turns overrides per role */
+  maxTurns?: Partial<Record<Role, number>>;
+  /** Global max budget per agent query (USD) */
+  maxBudgetUsd?: number;
   /** Max respawn attempts per agent per task */
   maxRespawns?: number;
 }
@@ -41,6 +85,10 @@ const ROLE_FILE_MAP: Record<Role, string> = {
 export class AgentSpawner {
   private readonly options: SpawnerOptions;
   private readonly models: Record<Role, string>;
+  private readonly efforts: Record<Role, 'low' | 'medium' | 'high' | 'max'>;
+  private readonly disallowedTools: Record<Role, string[]>;
+  private readonly maxTurnsPerRole: Record<Role, number>;
+  private readonly maxBudgetUsd: number | undefined;
   private readonly maxRespawns: number;
 
   // teamId → (instance → AgentProcess)
@@ -51,6 +99,10 @@ export class AgentSpawner {
   constructor(options: SpawnerOptions) {
     this.options = options;
     this.models = { ...DEFAULT_MODELS, ...options.models };
+    this.efforts = { ...DEFAULT_EFFORTS, ...options.efforts };
+    this.disallowedTools = { ...DEFAULT_DISALLOWED_TOOLS, ...options.disallowedTools };
+    this.maxTurnsPerRole = { ...DEFAULT_MAX_TURNS, ...options.maxTurns };
+    this.maxBudgetUsd = options.maxBudgetUsd;
     this.maxRespawns = options.maxRespawns ?? 3;
   }
 
@@ -234,6 +286,8 @@ export class AgentSpawner {
     instance: RoleInstance,
     projectPath: string
   ): AgentProcess {
+    const disallowed = this.disallowedTools[role];
+
     const opts: AgentSpawnOptions = {
       claudeBin: this.options.claudeBin,
       spawnArgs: this.options.spawnArgs,
@@ -243,6 +297,10 @@ export class AgentSpawner {
       role,
       instance,
       teamId,
+      effort: this.efforts[role],
+      maxTurns: this.maxTurnsPerRole[role],
+      maxBudgetUsd: this.maxBudgetUsd,
+      disallowedTools: disallowed.length > 0 ? disallowed : undefined,
     };
     return new AgentProcess(opts);
   }

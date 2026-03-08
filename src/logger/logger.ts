@@ -40,6 +40,7 @@ function parseLogLevel(value: string | undefined): LogLevel {
 export type LogEvent =
   | 'team_created'
   | 'task_assigned'
+  | 'task_complete'
   | 'agent_spawned'
   | 'agent_errored'
   | 'agent_respawned'
@@ -272,6 +273,17 @@ export class Logger {
       });
     });
 
+    orchestrator.on('task-complete', (teamId, phase, durationMs) => {
+      const seconds = (durationMs / 1000).toFixed(1);
+      const outcome = phase === TeamPhase.Done ? 'SUCCESS' :
+        phase === TeamPhase.Errored ? 'ERRORED' : 'CANCELLED';
+      this.info('task_complete', `Task ${outcome} in ${seconds}s`, {
+        teamId,
+        phase,
+        data: { outcome, durationMs, durationSeconds: parseFloat(seconds) },
+      });
+    });
+
     orchestrator.on('message-routed', (teamId, message) => {
       this.debug('message_sent', `${message.roleSourceInstance} -> [${message.flag}] -> ${message.roleTargetInstance ?? message.roleTarget}`, {
         teamId,
@@ -470,6 +482,18 @@ export class Logger {
         const desc = entry.data.description as string;
         const truncated = desc.length > 80 ? desc.substring(0, 80) + '...' : desc;
         line += `${ANSI.bold}Task:${ANSI.reset} ${truncated}`;
+        break;
+      }
+
+      case 'task_complete': {
+        const outcome = entry.data.outcome as string;
+        const secs = entry.data.durationSeconds as number;
+        const outcomeColor = outcome === 'SUCCESS' ? ANSI.green :
+          outcome === 'ERRORED' ? ANSI.brightRed : ANSI.yellow;
+        line += `\n` +
+          `${outcomeColor}${ANSI.bold}════════════════════════════════════════${ANSI.reset}\n` +
+          `${outcomeColor}${ANSI.bold}  TASK ${outcome}${ANSI.reset}  ⏱  ${secs}s\n` +
+          `${outcomeColor}${ANSI.bold}════════════════════════════════════════${ANSI.reset}`;
         break;
       }
 

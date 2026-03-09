@@ -1,7 +1,11 @@
 // PipelineOrchestrator — Deterministic code-driven orchestration.
 //
 // Eliminates the Supervisor LLM entirely. Code drives the pipeline:
-//   Security scan → Workers (parallel) → Security sweep → Review
+//   Security scan → Worker-1 implements → Worker-2 verifies → Security sweep → Review
+//
+// Worker-2 acts as a completeness verifier: it checks Worker-1's output
+// against the original task and reports gaps. Worker-1 fixes gaps, Worker-2
+// re-checks (max 2 loops). Worker-2 never modifies code — report only.
 //
 // Each agent gets its own SDK query() call with streaming input
 // (PromptChannel) for warm sessions. First message pays ~12s cold start;
@@ -81,6 +85,7 @@ class PromptChannel {
 
 export type SecurityVerdict = 'APPROVED' | 'FLAGGED' | 'BLOCKED';
 export type ReviewVerdict = 'APPROVED' | 'REVISION_NEEDED' | 'REJECTED';
+export type VerifyVerdict = 'COMPLETE' | 'GAPS_FOUND';
 
 export interface ParsedVerdict<V extends string> {
   verdict: V;
@@ -104,6 +109,16 @@ export function parseReviewVerdict(text: string): ParsedVerdict<ReviewVerdict> {
   // Default to APPROVED if no clear verdict
   return { verdict: 'APPROVED', details: trimmed };
 }
+
+export function parseVerifyVerdict(text: string): ParsedVerdict<VerifyVerdict> {
+  const trimmed = text.trimStart();
+  if (trimmed.toUpperCase().startsWith('GAPS_FOUND')) return { verdict: 'GAPS_FOUND', details: trimmed };
+  if (trimmed.toUpperCase().startsWith('COMPLETE')) return { verdict: 'COMPLETE', details: trimmed };
+  // Default to COMPLETE if no clear verdict (benefit of the doubt)
+  return { verdict: 'COMPLETE', details: trimmed };
+}
+
+const MAX_VERIFY_PASSES = 2;
 
 // --- AgentSession: wraps a warm SDK query() session ---
 
@@ -731,14 +746,11 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
         // Inner loop: handles REVISION_NEEDED and BLOCKED verdicts
         let workerResults: { w1: string; w2: string } = { w1: '', w2: '' };
         innerLoop: while (true) {
-          // --- Step 2: Workers (parallel) ---
+          // --- Step 2: Worker-1 implements, Worker-2 verifies ---
           {
             const fromPhase = ctx.state.currentPhase;
             this.tryTransitionPhase(ctx.state, teamId, fromPhase, TeamPhase.Work, 'workers start');
             this.persistence.persist(ctx.state);
-
-            this.emit('agent-output', teamId, 'Worker-1' as any,
-              `[Pipeline] Workers starting in parallel...`);
 
             const revisionCount = ctx.state.counters.revisions;
             const workerInstruction =
@@ -747,19 +759,74 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
               (revisionCount > 0 ? `REVISION ATTEMPT ${revisionCount + 1}:\nPrevious work needs revision. Address any feedback and fix issues.\n\n` : '') +
               `Implement the assigned work within the cleared scope.`;
 
-            const [w1Result, w2Result] = await Promise.all([
-              worker1.send(
-                `You are Worker-1. ${workerInstruction}\n\nFocus on the primary implementation.`
-              ),
-              worker2.send(
-                `You are Worker-2. ${workerInstruction}\n\nFocus on supporting work (tests, docs, edge cases).`
-              ),
-            ]);
+            // --- Worker-1: Implement ---
+            this.emit('agent-task', teamId, 'Worker-1' as any, 'Implementing full task');
+            this.emit('agent-output', teamId, 'Worker-1' as any,
+              `[Pipeline] Worker-1 implementing...`);
 
-            workerResults = { w1: w1Result, w2: w2Result };
-
+            const w1Result = await worker1.send(
+              `You are Worker-1. ${workerInstruction}`
+            );
             this.emit('agent-output', teamId, 'Worker-1' as any, w1Result);
-            this.emit('agent-output', teamId, 'Worker-2' as any, w2Result);
+
+            // --- Worker-2: Verify completeness (loop up to MAX_VERIFY_PASSES) ---
+            let w2Result = '';
+            let verifyPass = 0;
+            let currentW1Result = w1Result;
+
+            while (verifyPass < MAX_VERIFY_PASSES) {
+              verifyPass++;
+              const verifyLabel = verifyPass === 1
+                ? 'Verifying completeness'
+                : `Re-verifying completeness (pass ${verifyPass})`;
+
+              this.emit('agent-task', teamId, 'Worker-2' as any, verifyLabel);
+              this.emit('agent-output', teamId, 'Worker-2' as any,
+                `[Pipeline] Worker-2 ${verifyLabel.toLowerCase()}...`);
+
+              w2Result = await worker2.send(
+                `COMPLETENESS VERIFICATION\n\n` +
+                `You are Worker-2. Your job is to verify that Worker-1's implementation ` +
+                `is complete against the original task requirements. Do NOT modify any code.\n\n` +
+                `ORIGINAL TASK: ${task}\n\n` +
+                `SECURITY CLEARANCE:\n${scanResult.substring(0, 1000)}\n\n` +
+                `WORKER-1 OUTPUT:\n${currentW1Result.substring(0, 3000)}\n\n` +
+                `Check for:\n` +
+                `- Missing requirements from the task description\n` +
+                `- Unhandled edge cases\n` +
+                `- Missing error handling\n` +
+                `- Incomplete implementations (TODOs, placeholder code)\n` +
+                `- Missing files that should have been created\n\n` +
+                `Begin your response with COMPLETE or GAPS_FOUND.\n` +
+                `If GAPS_FOUND, list each gap clearly so Worker-1 can fix them.`
+              );
+              this.emit('agent-output', teamId, 'Worker-2' as any, w2Result);
+
+              const verifyVerdict = parseVerifyVerdict(w2Result);
+
+              if (verifyVerdict.verdict === 'COMPLETE') {
+                this.emit('agent-task', teamId, 'Worker-2' as any, 'Verified complete');
+                break;
+              }
+
+              // GAPS_FOUND — send Worker-1 back to fix
+              this.notifyUser(teamId, 'info', 'Gaps Found',
+                `Worker-2 found gaps (pass ${verifyPass}) — Worker-1 is fixing them.`);
+
+              this.emit('agent-task', teamId, 'Worker-1' as any, `Fixing gaps (attempt ${verifyPass})`);
+              this.emit('agent-output', teamId, 'Worker-1' as any,
+                `[Pipeline] Worker-1 fixing gaps (attempt ${verifyPass})...`);
+
+              currentW1Result = await worker1.send(
+                `COMPLETENESS GAPS — FIX REQUIRED (attempt ${verifyPass})\n\n` +
+                `Worker-2 found the following gaps in your implementation:\n\n` +
+                `${w2Result.substring(0, 3000)}\n\n` +
+                `Fix all reported gaps. Do not re-implement what already works.`
+              );
+              this.emit('agent-output', teamId, 'Worker-1' as any, currentW1Result);
+            }
+
+            workerResults = { w1: currentW1Result, w2: w2Result };
           }
 
           // Auto-commit after work phase (safety checkpoint)

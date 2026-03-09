@@ -139,7 +139,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => {
 });
 
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
-import { PipelineOrchestrator, parseSecurityVerdict, parseReviewVerdict } from '../src/pipeline-orchestrator.js';
+import { PipelineOrchestrator, parseSecurityVerdict, parseReviewVerdict, parseVerifyVerdict } from '../src/pipeline-orchestrator.js';
 
 describe('PipelineOrchestrator', () => {
   let tmpDir: string;
@@ -380,7 +380,7 @@ describe('PipelineOrchestrator', () => {
       expect(handler).toHaveBeenCalledWith('standard', 'standard', 4);
     });
 
-    it('runs full pipeline: scan → workers → sweep → review → done', async () => {
+    it('runs full pipeline: scan → worker1 → worker2 verify → sweep → review → done', async () => {
       const phases: string[] = [];
       orchestrator.on('phase-transition', (_teamId, _from, to) => {
         phases.push(to);
@@ -407,12 +407,17 @@ describe('PipelineOrchestrator', () => {
       // Step 1: Security scan responds
       security.respond('SAFE: all files\nNo issues found.');
 
-      // Wait for workers to receive messages
+      // Wait for Worker-1 to receive message (sequential now, not parallel)
       await new Promise(resolve => setTimeout(resolve, 100));
 
-      // Step 2: Workers respond (parallel)
+      // Step 2a: Worker-1 implements
       worker1.respond('Implemented JWT auth module.');
-      worker2.respond('Added unit tests for auth.');
+
+      // Wait for Worker-2 to receive verification prompt
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      // Step 2b: Worker-2 verifies completeness
+      worker2.respond('COMPLETE — all requirements implemented.');
 
       // Wait for security sweep
       await new Promise(resolve => setTimeout(resolve, 100));
@@ -437,9 +442,6 @@ describe('PipelineOrchestrator', () => {
       const status = orchestrator.getTeamStatus('standard');
       expect(status?.currentPhase).toBe(TeamPhase.Done);
 
-      // Verify phase transitions happened
-      // Note: PreWork is the initial state from createTeam(), so no PreWork transition
-      // is emitted (tryTransitionPhase silently skips same-phase transitions)
       expect(phases).toContain(TeamPhase.Work);
       expect(phases).toContain(TeamPhase.Handoff);
       expect(phases).toContain(TeamPhase.Review);
@@ -768,6 +770,101 @@ describe('PipelineOrchestrator', () => {
         expect(fb.timestamp).toBeDefined();
         expect(typeof fb.blocking).toBe('boolean');
       }
+    });
+  });
+
+  // --- Completeness verification ---
+
+  describe('completeness verification', () => {
+    it('Worker-2 receives verification prompt with Worker-1 output', async () => {
+      orchestrator.createTeam('verify', projectDir);
+      orchestrator.assignTask('verify', 'implement user authentication with JWT tokens and database integration');
+
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      const security = mock.getSession(0);
+      const worker1 = mock.getSession(1);
+      const worker2 = mock.getSession(2);
+
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      // Security scan
+      security.respond('APPROVED — no issues.');
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      // Worker-1 implements
+      worker1.respond('Implemented JWT auth module.');
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      // Worker-2 should receive a COMPLETENESS VERIFICATION prompt
+      expect(worker2.receivedMessages.length).toBeGreaterThanOrEqual(1);
+      const verifyMsg = worker2.receivedMessages[worker2.receivedMessages.length - 1];
+      expect(verifyMsg).toContain('COMPLETENESS VERIFICATION');
+      expect(verifyMsg).toContain('Implemented JWT auth module.');
+    });
+
+    it('emits agent-task events for both workers', async () => {
+      const agentTasks: Array<{ instance: string; subtask: string }> = [];
+      orchestrator.on('agent-task', (_teamId, instance, subtask) => {
+        agentTasks.push({ instance, subtask });
+      });
+
+      orchestrator.createTeam('tasks', projectDir);
+      orchestrator.assignTask('tasks', 'implement user authentication with JWT tokens and database integration');
+
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      const security = mock.getSession(0);
+      const worker1 = mock.getSession(1);
+      const worker2 = mock.getSession(2);
+      const reviewer = mock.getSession(3);
+
+      await new Promise(resolve => setTimeout(resolve, 100));
+      security.respond('APPROVED — no issues.');
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      // Worker-1 should have emitted agent-task
+      expect(agentTasks.some(t => t.instance === 'Worker-1')).toBe(true);
+
+      worker1.respond('Implemented auth.');
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      // Worker-2 should have emitted agent-task
+      expect(agentTasks.some(t => t.instance === 'Worker-2')).toBe(true);
+    });
+
+    it('simple pipeline skips completeness verification', async () => {
+      orchestrator.createTeam('simple-no-verify', projectDir);
+      orchestrator.assignTask('simple-no-verify', 'fix a typo');
+
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      // Only 1 session (Worker-1), no Worker-2
+      expect(mock.sessions.length).toBe(1);
+    });
+  });
+
+  // --- parseVerifyVerdict ---
+
+  describe('parseVerifyVerdict', () => {
+    it('parses COMPLETE', () => {
+      const result = parseVerifyVerdict('COMPLETE — all requirements implemented.');
+      expect(result.verdict).toBe('COMPLETE');
+    });
+
+    it('parses GAPS_FOUND', () => {
+      const result = parseVerifyVerdict('GAPS_FOUND — missing error handling');
+      expect(result.verdict).toBe('GAPS_FOUND');
+    });
+
+    it('defaults to COMPLETE for unclear text', () => {
+      const result = parseVerifyVerdict('Everything looks good.');
+      expect(result.verdict).toBe('COMPLETE');
+    });
+
+    it('handles case insensitivity', () => {
+      const result = parseVerifyVerdict('gaps_found — missing tests');
+      expect(result.verdict).toBe('GAPS_FOUND');
     });
   });
 });

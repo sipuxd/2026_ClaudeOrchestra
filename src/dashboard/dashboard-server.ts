@@ -109,6 +109,10 @@ export class DashboardServer {
       this.broadcast('agent-progress', { teamId, instance, text });
     });
 
+    this.orchestrator.on('agent-task', (teamId, instance, subtask) => {
+      this.broadcast('agent-task', { teamId, instance, subtask });
+    });
+
     this.orchestrator.on('task-complete', (teamId, phase, durationMs) => {
       this.broadcast('task-complete', { teamId, phase, durationMs });
     });
@@ -207,7 +211,13 @@ export class DashboardServer {
       return;
     }
 
-    // Preview: serve files from team's project directory
+    // Preview: auto-open newest HTML file, or file browser with ?browse
+    const previewBrowseMatch = pathname.match(/^\/preview\/([^/]+)\/?$/);
+    if (previewBrowseMatch && method === 'GET') {
+      const browse = url.searchParams.has('browse');
+      this.handlePreviewBrowser(decodeURIComponent(previewBrowseMatch[1]), res, browse);
+      return;
+    }
     const previewMatch = pathname.match(/^\/preview\/([^/]+)\/(.+)$/);
     if (previewMatch && method === 'GET') {
       this.handlePreview(decodeURIComponent(previewMatch[1]), previewMatch[2], res);
@@ -380,6 +390,88 @@ export class DashboardServer {
     } catch (err: any) {
       this.sendJSON(res, { error: err.message }, 400);
     }
+  }
+
+  private handlePreviewBrowser(
+    teamId: string,
+    res: http.ServerResponse,
+    forceBrowse: boolean = false
+  ): void {
+    const status = this.orchestrator.getTeamStatus(teamId);
+    if (!status) {
+      this.sendJSON(res, { error: `Team "${teamId}" not found` }, 404);
+      return;
+    }
+
+    const projectPath = status.projectPath;
+    if (!projectPath) {
+      this.sendJSON(res, { error: 'No project path for team' }, 400);
+      return;
+    }
+
+    // Collect HTML files with modification times
+    const htmlFiles: { name: string; mtime: number }[] = [];
+    try {
+      const entries = fs.readdirSync(projectPath, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isFile() && entry.name.endsWith('.html')) {
+          const stat = fs.statSync(path.join(projectPath, entry.name));
+          htmlFiles.push({ name: entry.name, mtime: stat.mtimeMs });
+        }
+      }
+    } catch {
+      this.sendJSON(res, { error: 'Cannot read project directory' }, 500);
+      return;
+    }
+
+    // Auto-redirect to the most recently modified HTML file (unless ?browse)
+    if (!forceBrowse && htmlFiles.length > 0) {
+      htmlFiles.sort((a, b) => b.mtime - a.mtime);
+      const newest = htmlFiles[0].name;
+      res.writeHead(302, { Location: `/preview/${encodeURIComponent(teamId)}/${encodeURIComponent(newest)}` });
+      res.end();
+      return;
+    }
+
+    // File browser (fallback or explicit ?browse)
+    htmlFiles.sort((a, b) => a.name.localeCompare(b.name));
+    const fileListHtml = htmlFiles.length > 0
+      ? htmlFiles.map(f =>
+          `<a href="/preview/${encodeURIComponent(teamId)}/${encodeURIComponent(f.name)}" class="file-link">`
+          + `<span class="file-icon">&#128196;</span> ${this.escapeHTML(f.name)}</a>`
+        ).join('\n')
+      : '<p class="empty">No HTML files found in project root.</p>';
+
+    const html = `<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Preview — ${this.escapeHTML(teamId)}</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0d1117;color:#c9d1d9;padding:40px;min-height:100vh}
+h1{font-size:1.4rem;color:#f0f6fc;margin-bottom:6px}
+.project-path{font-size:.8rem;color:#484f58;font-family:'SF Mono','Fira Code',monospace;margin-bottom:24px}
+.file-list{display:flex;flex-direction:column;gap:8px;max-width:600px}
+.file-link{display:flex;align-items:center;gap:10px;padding:12px 16px;background:#161b22;border:1px solid #30363d;border-radius:8px;color:#58a6ff;text-decoration:none;font-size:.95rem;transition:background .15s,border-color .15s}
+.file-link:hover{background:#1c2128;border-color:#58a6ff}
+.file-icon{font-size:1.1rem}
+.empty{color:#484f58;font-size:.9rem}
+</style>
+</head><body>
+<h1>Preview — ${this.escapeHTML(teamId)}</h1>
+<div class="project-path">${this.escapeHTML(projectPath)}</div>
+<div class="file-list">
+${fileListHtml}
+</div>
+</body></html>`;
+
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(html);
+  }
+
+  private escapeHTML(str: string): string {
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
   private handlePreview(

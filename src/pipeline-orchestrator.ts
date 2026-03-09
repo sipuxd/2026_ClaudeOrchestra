@@ -138,6 +138,7 @@ class AgentSession {
   private pendingResolve: ((text: string) => void) | null = null;
   private pendingReject: ((err: Error) => void) | null = null;
   private accumulated = '';
+  private activityLog = '';
   private onProgress?: (accumulated: string) => void;
   private consuming: Promise<void>;
   private _closed = false;
@@ -184,6 +185,7 @@ class AgentSession {
       this.pendingResolve = resolve;
       this.pendingReject = reject;
       this.accumulated = '';
+      this.activityLog = '';
       this.channel.push(message);
     });
   }
@@ -212,6 +214,30 @@ class AgentSession {
   private async consume(): Promise<void> {
     try {
       for await (const msg of this.queryGen) {
+        // Extract tool use activity for dashboard streaming (separate from accumulated result)
+        if ((msg as any).type === 'assistant' && this.onProgress) {
+          const content = (msg as any).message?.content;
+          if (Array.isArray(content)) {
+            for (const block of content) {
+              if (block.type === 'tool_use') {
+                const tool = block.name || 'unknown';
+                const input = block.input || {};
+                let detail = '';
+                if (input.file_path) detail = input.file_path;
+                else if (input.command) detail = input.command.substring(0, 120);
+                else if (input.pattern) detail = input.pattern;
+                const line = detail ? `${tool}: ${detail}` : tool;
+                this.activityLog += (this.activityLog ? '\n' : '') + line;
+                this.onProgress(this.activityLog);
+              }
+              if (block.type === 'thinking' && block.thinking) {
+                const preview = block.thinking.substring(0, 200);
+                this.activityLog += (this.activityLog ? '\n' : '') + '💭 ' + preview;
+                this.onProgress(this.activityLog);
+              }
+            }
+          }
+        }
         // Extract text from assistant messages
         const text = extractSdkText(msg);
         if (text) {

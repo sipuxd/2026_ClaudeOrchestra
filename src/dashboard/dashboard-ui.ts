@@ -521,6 +521,50 @@ body {
 
 .agent-output.collapsed { display: none; }
 
+.agent-stream {
+  padding: 8px 14px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 0.72rem;
+  line-height: 1.5;
+  color: #7d8590;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 180px;
+  overflow-y: auto;
+  background: #010409;
+  border-top: 1px solid #21262d;
+  display: none;
+}
+
+.agent-stream.visible { display: block; }
+
+.typing-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.typing-dots span {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--agent-color, #58a6ff);
+  opacity: 0.4;
+  animation: typing-bounce 1.4s ease-in-out infinite;
+}
+
+.typing-dots span:nth-child(1) { animation-delay: 0s; }
+.typing-dots span:nth-child(2) { animation-delay: 0.2s; }
+.typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes typing-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30% { transform: translateY(-4px); opacity: 1; }
+}
+
 /* --- Controls Bar --- */
 .controls-bar {
   display: flex;
@@ -861,6 +905,7 @@ let taskStartTimes = {};
 let timingIntervals = {};
 let feedbackItems = {};
 let agentSubtasks = {};
+let agentStreaming = {};
 
 // --- Phase config ---
 const PHASES = ['pre_work', 'work', 'handoff', 'review', 'done'];
@@ -876,7 +921,8 @@ evtSource.addEventListener('init', (e) => {
   const data = JSON.parse(e.data);
   data.teams.forEach(t => {
     teams[t.teamId] = t;
-    agentOutputs[t.teamId] = {};
+    agentOutputs[t.teamId] = agentOutputs[t.teamId] || {};
+    agentStreaming[t.teamId] = agentStreaming[t.teamId] || {};
   });
   renderSidebar();
 });
@@ -898,6 +944,7 @@ evtSource.addEventListener('task-assigned', (e) => {
     taskStartTimes[teamId] = Date.now();
     agentOutputs[teamId] = {};
     agentSubtasks[teamId] = {};
+    agentStreaming[teamId] = {};
     feedbackItems[teamId] = [];
     startTimingInterval(teamId);
   }
@@ -930,14 +977,31 @@ evtSource.addEventListener('agent-output', (e) => {
   agentOutputs[teamId][instance] = text;
   // [Pipeline] and [Q&A] prefixes are status messages — agent is still working
   const isStatus = text.startsWith('[Pipeline]') || text.startsWith('[Q&A]');
+  // Clear streaming text when final output arrives (not status messages)
+  if (!isStatus) {
+    if (agentStreaming[teamId]) agentStreaming[teamId][instance] = '';
+    if (teamId === selectedTeamId) updateAgentStream(instance, '');
+  }
   if (teamId === selectedTeamId) updateAgentPanel(instance, text, isStatus);
 });
 
 evtSource.addEventListener('agent-progress', (e) => {
   const { teamId, instance, text } = JSON.parse(e.data);
-  if (!agentOutputs[teamId]) agentOutputs[teamId] = {};
-  agentOutputs[teamId][instance] = text;
-  if (teamId === selectedTeamId) updateAgentPanel(instance, text, true);
+  // Store streaming text separately — don't overwrite agent output (status messages)
+  if (!agentStreaming[teamId]) agentStreaming[teamId] = {};
+  agentStreaming[teamId][instance] = text;
+  if (teamId === selectedTeamId) {
+    updateAgentStream(instance, text);
+    // Also update the dot/status to show "working" if not already
+    const panel = document.getElementById('agent-' + instance);
+    if (panel) {
+      const dot = panel.querySelector('.agent-dot');
+      if (dot) dot.className = 'agent-dot active';
+      const st = panel.querySelector('.agent-status');
+      if (st) { st.className = 'agent-status streaming'; st.textContent = 'working...'; }
+      panel.classList.add('streaming');
+    }
+  }
 });
 
 evtSource.addEventListener('agent-task', (e) => {
@@ -1225,16 +1289,22 @@ function renderAgentPanels() {
   const terminal = ['done', 'errored', 'cancelled'];
   const isDone = terminal.includes(phase);
 
+  const streams = agentStreaming[selectedTeamId] || {};
   container.innerHTML = AGENTS.map(agent => {
     const color = AGENT_COLORS[agent] || '#8b949e';
     const text = outputs[agent] || '';
+    const streamText = streams[agent] || '';
     const hasText = text.length > 0;
-    const collapsed = agentPanelCollapsed[agent] && !hasText ? 'collapsed' : '';
-    const dotClass = isDone && hasText ? 'done' : (hasText ? 'active' : '');
-    const statusText = isDone && hasText ? 'done' : (hasText ? 'working' : 'idle');
-    const statusClass = isDone && hasText ? 'done' : (hasText ? 'streaming' : '');
+    const isActive = hasText || streamText.length > 0;
+    const collapsed = agentPanelCollapsed[agent] && !isActive ? 'collapsed' : '';
+    const dotClass = isDone && hasText ? 'done' : (isActive ? 'active' : '');
+    const statusText = isDone && hasText ? 'done' : (isActive ? 'working' : 'idle');
+    const statusClass = isDone && hasText ? 'done' : (isActive ? 'streaming' : '');
     const subtasks = agentSubtasks[selectedTeamId] || {};
     const subtask = subtasks[agent] || '';
+    const streams = agentStreaming[selectedTeamId] || {};
+    const streamText = streams[agent] || '';
+    const streamVisible = streamText.length > 0 ? 'visible' : '';
     return '<div class="agent-panel" id="agent-' + agent + '" style="--agent-color:' + color + '">'
       + '<div class="agent-header" onclick="toggleAgent(\\'' + agent + '\\')">'
       + '<span class="agent-name"><span class="agent-dot ' + dotClass + '" style="--agent-color:' + color + '"></span>' + agent + '</span>'
@@ -1242,6 +1312,10 @@ function renderAgentPanels() {
       + '</div>'
       + (subtask ? '<div class="agent-subtask" title="' + escapeHtml(subtask) + '">' + escapeHtml(subtask) + '</div>' : '')
       + '<div class="agent-output ' + collapsed + '" id="output-' + agent + '">' + escapeHtml(truncateOutput(text)) + '</div>'
+      + '<div class="agent-stream ' + streamVisible + '" id="stream-' + agent + '">'
+      + escapeHtml(truncateOutput(streamText))
+      + (streamVisible ? '<span class="typing-dots"><span></span><span></span><span></span></span>' : '')
+      + '</div>'
       + '</div>';
   }).join('');
 }
@@ -1287,6 +1361,24 @@ function updateAgentPanel(instance, text, streaming) {
   } else {
     panel.classList.remove('streaming');
   }
+}
+
+function updateAgentStream(instance, text) {
+  const streamEl = document.getElementById('stream-' + instance);
+  if (!streamEl) return;
+
+  if (!text || text.length === 0) {
+    streamEl.classList.remove('visible');
+    streamEl.innerHTML = '';
+    return;
+  }
+
+  streamEl.classList.add('visible');
+  // Show last ~3000 chars of streaming text for readability
+  const display = text.length > 3000 ? '...' + text.slice(-3000) : text;
+  streamEl.innerHTML = escapeHtml(display) + '<span class="typing-dots"><span></span><span></span><span></span></span>';
+  // Auto-scroll to bottom
+  streamEl.scrollTop = streamEl.scrollHeight;
 }
 
 function toggleProject(proj) {

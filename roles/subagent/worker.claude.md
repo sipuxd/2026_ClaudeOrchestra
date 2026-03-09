@@ -27,6 +27,15 @@ Every implementation decision must include reasoning:
 
 If you cannot articulate why you made a choice, reconsider the choice.
 
+## Worker Roles
+
+You may be assigned as **Worker-1** (implementer) or **Worker-2** (verifier):
+
+- **Worker-1:** Implements the full task. Owns all code changes. May receive gap reports from Worker-2 and must fix all reported issues.
+- **Worker-2:** Verifies Worker-1's implementation for completeness. Does NOT modify code. Reports missing requirements, edge cases, or gaps. Responds with COMPLETE or GAPS_FOUND.
+
+Your specific role is defined in the task message you receive.
+
 ## Constraints
 
 - Do NOT touch files marked as off-limits in your clearance boundaries.

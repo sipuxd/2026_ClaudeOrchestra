@@ -495,6 +495,17 @@ body {
 .agent-status.streaming { color: var(--agent-color); }
 .agent-status.done { color: #7ee787; }
 
+.agent-subtask {
+  font-size: 0.72rem;
+  color: #8b949e;
+  padding: 4px 14px 0;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-style: italic;
+}
+
 .agent-output {
   padding: 10px 14px;
   font-family: 'SF Mono', 'Fira Code', monospace;
@@ -849,6 +860,7 @@ let projectCollapsed = {};
 let taskStartTimes = {};
 let timingIntervals = {};
 let feedbackItems = {};
+let agentSubtasks = {};
 
 // --- Phase config ---
 const PHASES = ['pre_work', 'work', 'handoff', 'review', 'done'];
@@ -885,6 +897,7 @@ evtSource.addEventListener('task-assigned', (e) => {
     teams[teamId].currentTask = { description, assignedAt: timestamp };
     taskStartTimes[teamId] = Date.now();
     agentOutputs[teamId] = {};
+    agentSubtasks[teamId] = {};
     feedbackItems[teamId] = [];
     startTimingInterval(teamId);
   }
@@ -915,7 +928,9 @@ evtSource.addEventListener('agent-output', (e) => {
   const { teamId, instance, text } = JSON.parse(e.data);
   if (!agentOutputs[teamId]) agentOutputs[teamId] = {};
   agentOutputs[teamId][instance] = text;
-  if (teamId === selectedTeamId) updateAgentPanel(instance, text, false);
+  // [Pipeline] and [Q&A] prefixes are status messages — agent is still working
+  const isStatus = text.startsWith('[Pipeline]') || text.startsWith('[Q&A]');
+  if (teamId === selectedTeamId) updateAgentPanel(instance, text, isStatus);
 });
 
 evtSource.addEventListener('agent-progress', (e) => {
@@ -923,6 +938,13 @@ evtSource.addEventListener('agent-progress', (e) => {
   if (!agentOutputs[teamId]) agentOutputs[teamId] = {};
   agentOutputs[teamId][instance] = text;
   if (teamId === selectedTeamId) updateAgentPanel(instance, text, true);
+});
+
+evtSource.addEventListener('agent-task', (e) => {
+  const { teamId, instance, subtask } = JSON.parse(e.data);
+  if (!agentSubtasks[teamId]) agentSubtasks[teamId] = {};
+  agentSubtasks[teamId][instance] = subtask;
+  if (teamId === selectedTeamId) updateAgentSubtask(instance, subtask);
 });
 
 evtSource.addEventListener('task-complete', (e) => {
@@ -1075,10 +1097,12 @@ function renderProjectInfo() {
 
 function renderPhaseBar() {
   if (!selectedTeamId || !teams[selectedTeamId]) return;
-  const phase = teams[selectedTeamId].currentPhase;
+  const t = teams[selectedTeamId];
+  const phase = t.currentPhase;
   const currentIdx = PHASES.indexOf(phase);
   const isErrored = phase === 'errored';
   const isCancelled = phase === 'cancelled';
+  const hasTask = !!t.currentTask;
 
   const bar = document.getElementById('phaseBar');
   bar.innerHTML = PHASES.map((p, i) => {
@@ -1088,7 +1112,7 @@ function renderPhaseBar() {
     } else if (i < currentIdx) {
       dotClass = 'past';
     } else if (i === currentIdx) {
-      dotClass = phase === 'done' ? 'past' : 'active';
+      dotClass = phase === 'done' ? 'past' : (hasTask ? 'active' : '');
     }
     const labelClass = dotClass === 'past' || dotClass === 'active' ? dotClass : '';
     const content = dotClass === 'past' ? '&#10003;' : (i + 1);
@@ -1189,7 +1213,6 @@ function renderTaskSection() {
   if (t.currentTask) {
     el.textContent = t.currentTask.description;
     el.style.display = '';
-    document.getElementById('relaunchText').value = t.currentTask.description;
   } else {
     el.style.display = 'none';
   }
@@ -1210,14 +1233,31 @@ function renderAgentPanels() {
     const dotClass = isDone && hasText ? 'done' : (hasText ? 'active' : '');
     const statusText = isDone && hasText ? 'done' : (hasText ? 'working' : 'idle');
     const statusClass = isDone && hasText ? 'done' : (hasText ? 'streaming' : '');
+    const subtasks = agentSubtasks[selectedTeamId] || {};
+    const subtask = subtasks[agent] || '';
     return '<div class="agent-panel" id="agent-' + agent + '" style="--agent-color:' + color + '">'
       + '<div class="agent-header" onclick="toggleAgent(\\'' + agent + '\\')">'
       + '<span class="agent-name"><span class="agent-dot ' + dotClass + '" style="--agent-color:' + color + '"></span>' + agent + '</span>'
       + '<span class="agent-status ' + statusClass + '" style="--agent-color:' + color + '">' + statusText + '</span>'
       + '</div>'
+      + (subtask ? '<div class="agent-subtask" title="' + escapeHtml(subtask) + '">' + escapeHtml(subtask) + '</div>' : '')
       + '<div class="agent-output ' + collapsed + '" id="output-' + agent + '">' + escapeHtml(truncateOutput(text)) + '</div>'
       + '</div>';
   }).join('');
+}
+
+function updateAgentSubtask(instance, subtask) {
+  const panel = document.getElementById('agent-' + instance);
+  if (!panel) return;
+  let el = panel.querySelector('.agent-subtask');
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'agent-subtask';
+    const header = panel.querySelector('.agent-header');
+    if (header) header.after(el);
+  }
+  el.textContent = subtask;
+  el.title = subtask;
 }
 
 function updateAgentPanel(instance, text, streaming) {
@@ -1379,6 +1419,8 @@ async function relaunchCurrentTeam() {
     const data = await res.json();
     if (!res.ok) {
       showNotification(data.error || 'Failed to re-launch', 'error');
+    } else {
+      document.getElementById('relaunchText').value = '';
     }
   } catch (err) {
     showNotification('Network error: ' + err.message, 'error');
@@ -1442,7 +1484,7 @@ async function pushAndMerge() {
 
 function previewProject() {
   if (!selectedTeamId || !teams[selectedTeamId]) return;
-  window.open('/preview/' + encodeURIComponent(selectedTeamId) + '/index.html', '_blank');
+  window.open('/preview/' + encodeURIComponent(selectedTeamId), '_blank');
 }
 
 // --- Helpers ---

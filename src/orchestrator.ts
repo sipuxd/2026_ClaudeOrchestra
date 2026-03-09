@@ -72,6 +72,7 @@ export interface OrchestratorEvents {
   'error': [teamId: string, error: Error];
   'feedback': [teamId: string, feedback: FeedbackPayload];
   'feedback-response': [teamId: string, feedbackId: string, value: string];
+  'agent-task': [teamId: string, instance: RoleInstance, subtask: string];
   'tick': [teamId: string];
   'shutdown': [];
 }

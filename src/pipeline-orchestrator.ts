@@ -173,6 +173,11 @@ class AgentSession {
     return this._closed;
   }
 
+  /** Last activity log from the most recent send() call. */
+  get lastActivityLog(): string {
+    return this.activityLog;
+  }
+
   /**
    * Send a message to this agent and wait for the complete response.
    * Returns the full accumulated text from the agent's turn.
@@ -716,7 +721,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
       // Send task to worker and wait for result
       const result = await worker.send(task);
-      this.emit('agent-output', teamId, 'Worker-1' as any, result);
+      const simpleDisplay = result.trim() || worker.lastActivityLog || '(no text output)';
+      this.emit('agent-output', teamId, 'Worker-1' as any, simpleDisplay);
 
       // Done — keep session alive for Q&A
       this.completePipeline(teamId, ctx, startTime);
@@ -793,7 +799,9 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
             const w1Result = await worker1.send(
               `You are Worker-1. ${workerInstruction}`
             );
-            this.emit('agent-output', teamId, 'Worker-1' as any, w1Result);
+            // Use activity log as fallback display when text result is empty (most work is tool_use)
+            const w1Display = w1Result.trim() || worker1.lastActivityLog || '(no text output)';
+            this.emit('agent-output', teamId, 'Worker-1' as any, w1Display);
 
             // --- Worker-2: Verify completeness (loop up to MAX_VERIFY_PASSES) ---
             let w2Result = '';
@@ -849,7 +857,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
                 `${w2Result.substring(0, 3000)}\n\n` +
                 `Fix all reported gaps. Do not re-implement what already works.`
               );
-              this.emit('agent-output', teamId, 'Worker-1' as any, currentW1Result);
+              const fixDisplay = currentW1Result.trim() || worker1.lastActivityLog || '(no text output)';
+              this.emit('agent-output', teamId, 'Worker-1' as any, fixDisplay);
             }
 
             workerResults = { w1: currentW1Result, w2: w2Result };

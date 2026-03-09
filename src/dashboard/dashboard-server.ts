@@ -172,37 +172,37 @@ export class DashboardServer {
     if (method === 'GET' && pathname === '/api/teams') return this.handleGetTeams(res);
     if (method === 'GET' && pathname === '/api/registry') return this.handleGetRegistry(res);
 
-    // /api/teams/:id patterns
+    // /api/teams/:id patterns — decode URI component for team names with spaces/special chars
     const teamMatch = pathname.match(/^\/api\/teams\/([^/]+)$/);
-    if (teamMatch && method === 'GET') return this.handleGetTeam(teamMatch[1], res);
+    if (teamMatch && method === 'GET') return this.handleGetTeam(decodeURIComponent(teamMatch[1]), res);
 
     const taskMatch = pathname.match(/^\/api\/teams\/([^/]+)\/task$/);
     if (taskMatch && method === 'POST') {
-      this.handleAssignTask(taskMatch[1], req, res);
+      this.handleAssignTask(decodeURIComponent(taskMatch[1]), req, res);
       return;
     }
 
     const stopMatch = pathname.match(/^\/api\/teams\/([^/]+)\/stop$/);
     if (stopMatch && method === 'POST') {
-      this.handleStopTeam(stopMatch[1], res);
+      this.handleStopTeam(decodeURIComponent(stopMatch[1]), res);
       return;
     }
 
     const pushMergeMatch = pathname.match(/^\/api\/teams\/([^/]+)\/push-merge$/);
     if (pushMergeMatch && method === 'POST') {
-      this.handlePushMerge(pushMergeMatch[1], res);
+      this.handlePushMerge(decodeURIComponent(pushMergeMatch[1]), res);
       return;
     }
 
     const feedbackMatch = pathname.match(/^\/api\/teams\/([^/]+)\/feedback$/);
     if (feedbackMatch && method === 'POST') {
-      this.handleFeedbackResponse(feedbackMatch[1], req, res);
+      this.handleFeedbackResponse(decodeURIComponent(feedbackMatch[1]), req, res);
       return;
     }
 
     const askMatch = pathname.match(/^\/api\/teams\/([^/]+)\/ask$/);
     if (askMatch && method === 'POST') {
-      this.handleAskAgent(askMatch[1], req, res);
+      this.handleAskAgent(decodeURIComponent(askMatch[1]), req, res);
       return;
     }
 

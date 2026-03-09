@@ -1302,8 +1302,6 @@ function renderAgentPanels() {
     const statusClass = isDone && hasText ? 'done' : (isActive ? 'streaming' : '');
     const subtasks = agentSubtasks[selectedTeamId] || {};
     const subtask = subtasks[agent] || '';
-    const streams = agentStreaming[selectedTeamId] || {};
-    const streamText = streams[agent] || '';
     const streamVisible = streamText.length > 0 ? 'visible' : '';
     return '<div class="agent-panel" id="agent-' + agent + '" style="--agent-color:' + color + '">'
       + '<div class="agent-header" onclick="toggleAgent(\\'' + agent + '\\')">'

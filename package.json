@@ -12,7 +12,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:integration": "vitest run --config vitest.integration.config.ts",
-    "test:stress": "vitest run --config vitest.stress.config.ts"
+    "test:stress": "vitest run --config vitest.stress.config.ts",
+    "dashboard": "node dist/index.js dashboard --mode pipeline"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

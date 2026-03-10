@@ -103,19 +103,78 @@ export function parseSecurityVerdict(text: string): ParsedVerdict<SecurityVerdic
 
 export function parseReviewVerdict(text: string): ParsedVerdict<ReviewVerdict> {
   const trimmed = text.trimStart();
-  if (trimmed.startsWith('APPROVED')) return { verdict: 'APPROVED', details: trimmed };
-  if (trimmed.startsWith('REVISION_NEEDED')) return { verdict: 'REVISION_NEEDED', details: trimmed };
-  if (trimmed.startsWith('REJECTED')) return { verdict: 'REJECTED', details: trimmed };
-  // Default to APPROVED if no clear verdict
-  return { verdict: 'APPROVED', details: trimmed };
+  const upper = trimmed.toUpperCase();
+
+  // Check explicit prefix first
+  if (upper.startsWith('APPROVED')) return { verdict: 'APPROVED', details: trimmed };
+  if (upper.startsWith('REVISION_NEEDED')) return { verdict: 'REVISION_NEEDED', details: trimmed };
+  if (upper.startsWith('REJECTED')) return { verdict: 'REJECTED', details: trimmed };
+
+  // Scan full response for verdict indicators when prefix is missing
+  const rejectPatterns = [/\brejected?\b/i, /\bfundamentally\s+flawed\b/i, /\bstart\s+over\b/i];
+  const revisionPatterns = [
+    /\brevision\s*(needed|required)\b/i,
+    /\bneeds?\s+(revision|fix|change|work|improvement)/i,
+    /\bfix\s+(required|needed|before)\b/i,
+    /\bnot\s+(ready|acceptable|approved)\b/i,
+    /\bcannot\s+approve\b/i,
+    /\bsend\s+back\b/i,
+  ];
+  const approvePatterns = [
+    /\bapproved?\b/i,
+    /\blooks?\s+good\b/i,
+    /\bwell[\s-]implemented\b/i,
+    /\bready\s+(to\s+)?(merge|ship|deploy)\b/i,
+  ];
+
+  const hasReject = rejectPatterns.some(p => p.test(trimmed));
+  const hasRevision = revisionPatterns.some(p => p.test(trimmed));
+  const hasApprove = approvePatterns.some(p => p.test(trimmed));
+
+  if (hasReject && !hasApprove) return { verdict: 'REJECTED', details: trimmed };
+  if (hasRevision && !hasApprove) return { verdict: 'REVISION_NEEDED', details: trimmed };
+  if (hasApprove && !hasRevision && !hasReject) return { verdict: 'APPROVED', details: trimmed };
+
+  // Ambiguous or no signals — err on side of caution, request revision
+  return { verdict: 'REVISION_NEEDED', details: trimmed };
 }
 
 export function parseVerifyVerdict(text: string): ParsedVerdict<VerifyVerdict> {
   const trimmed = text.trimStart();
-  if (trimmed.toUpperCase().startsWith('GAPS_FOUND')) return { verdict: 'GAPS_FOUND', details: trimmed };
-  if (trimmed.toUpperCase().startsWith('COMPLETE')) return { verdict: 'COMPLETE', details: trimmed };
-  // Default to COMPLETE if no clear verdict (benefit of the doubt)
-  return { verdict: 'COMPLETE', details: trimmed };
+  const upper = trimmed.toUpperCase();
+
+  // Check explicit prefix first (strongest signal)
+  if (upper.startsWith('GAPS_FOUND')) return { verdict: 'GAPS_FOUND', details: trimmed };
+  if (upper.startsWith('COMPLETE')) return { verdict: 'COMPLETE', details: trimmed };
+
+  // Scan full response for gap indicators when prefix is missing
+  const gapPatterns = [
+    /\bgaps?\s*found\b/i,
+    /\baction\s*required\b/i,
+    /\bmissing\s+(requirement|implementation|test|file)/i,
+    /\bnot\s+(complete|fully\s+implemented|met)\b/i,
+    /\bincomplete\b/i,
+    /\bfail(s|ed|ing|ure)?\b/i,
+    /\bfix\s+(required|needed)\b/i,
+  ];
+  const completePatterns = [
+    /\ball\s+(requirements|tasks?)\s+(are\s+)?(fully\s+)?met\b/i,
+    /\bfully\s+(complete|implemented|met)\b/i,
+    /\bno\s+gaps?\s*(found)?\b/i,
+    /\bverified\s+complete\b/i,
+    /\blooks?\s+good\b/i,
+    /\bno\s+(issues?|problems?|concerns?)\b/i,
+  ];
+
+  const hasGaps = gapPatterns.some(p => p.test(trimmed));
+  const hasComplete = completePatterns.some(p => p.test(trimmed));
+
+  // If gap signals found (and no competing complete signals), treat as gaps
+  if (hasGaps && !hasComplete) return { verdict: 'GAPS_FOUND', details: trimmed };
+  if (hasComplete && !hasGaps) return { verdict: 'COMPLETE', details: trimmed };
+
+  // Ambiguous or no signals — default to GAPS_FOUND (err on the side of thoroughness)
+  return { verdict: 'GAPS_FOUND', details: trimmed };
 }
 
 const MAX_VERIFY_PASSES = 2;

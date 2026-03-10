@@ -1303,7 +1303,8 @@ function renderAgentPanels() {
     const subtasks = agentSubtasks[selectedTeamId] || {};
     const subtask = subtasks[agent] || '';
     const streamVisible = streamText.length > 0 ? 'visible' : '';
-    return '<div class="agent-panel" id="agent-' + agent + '" style="--agent-color:' + color + '">'
+    const panelClass = 'agent-panel' + (isActive && !isDone ? ' streaming' : '');
+    return '<div class="' + panelClass + '" id="agent-' + agent + '" style="--agent-color:' + color + '">'
       + '<div class="agent-header" onclick="toggleAgent(\\'' + agent + '\\')">'
       + '<span class="agent-name"><span class="agent-dot ' + dotClass + '" style="--agent-color:' + color + '"></span>' + agent + '</span>'
       + '<span class="agent-status ' + statusClass + '" style="--agent-color:' + color + '">' + statusText + '</span>'

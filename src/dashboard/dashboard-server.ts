@@ -272,7 +272,7 @@ export class DashboardServer {
   ): Promise<void> {
     try {
       const body = JSON.parse(await this.readBody(req));
-      const { name, projectPath, task } = body;
+      const { name, projectPath, task, images } = body;
 
       if (!name || !projectPath) {
         this.sendJSON(res, { error: 'name and projectPath are required' }, 400);
@@ -282,7 +282,7 @@ export class DashboardServer {
       const state = this.orchestrator.createTeam(name, projectPath);
 
       if (task) {
-        this.orchestrator.assignTask(name, task);
+        this.orchestrator.assignTask(name, task, images);
       }
 
       this.sendJSON(res, state.snapshot, 201);
@@ -298,14 +298,14 @@ export class DashboardServer {
   ): Promise<void> {
     try {
       const body = JSON.parse(await this.readBody(req));
-      const { description } = body;
+      const { description, images } = body;
 
       if (!description) {
         this.sendJSON(res, { error: 'description is required' }, 400);
         return;
       }
 
-      this.orchestrator.assignTask(teamId, description);
+      this.orchestrator.assignTask(teamId, description, images);
       this.sendJSON(res, { ok: true });
     } catch (err: any) {
       this.sendJSON(res, { error: err.message }, 400);
@@ -375,7 +375,7 @@ export class DashboardServer {
   ): Promise<void> {
     try {
       const body = JSON.parse(await this.readBody(req));
-      const { message } = body;
+      const { message, images } = body;
 
       if (!message) {
         this.sendJSON(res, { error: 'message is required' }, 400);
@@ -383,7 +383,7 @@ export class DashboardServer {
       }
 
       // Fire and forget — response comes via SSE feedback events
-      this.orchestrator.sendMessage(teamId, message).catch(() => {
+      this.orchestrator.sendMessage(teamId, message, images).catch(() => {
         // Errors are emitted as feedback events
       });
       this.sendJSON(res, { ok: true });

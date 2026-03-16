@@ -39,10 +39,22 @@ class PromptChannel {
   private waiter: ((value: IteratorResult<SDKUserMessage>) => void) | null = null;
   private closed = false;
 
-  push(prompt: string): void {
+  push(prompt: string, images?: Array<{ media_type: string; data: string }>): void {
+    let content: string | Array<{ type: string; [key: string]: any }>;
+    if (images && images.length > 0) {
+      content = [
+        { type: 'text', text: prompt },
+        ...images.map(img => ({
+          type: 'image' as const,
+          source: { type: 'base64' as const, media_type: img.media_type, data: img.data },
+        })),
+      ];
+    } else {
+      content = prompt;
+    }
     const msg: SDKUserMessage = {
       type: 'user',
-      message: { role: 'user', content: prompt },
+      message: { role: 'user', content },
       parent_tool_use_id: null,
       session_id: '',
     };
@@ -241,7 +253,7 @@ class AgentSession {
    * Send a message to this agent and wait for the complete response.
    * Returns the full accumulated text from the agent's turn.
    */
-  async send(message: string): Promise<string> {
+  async send(message: string, images?: Array<{ media_type: string; data: string }>): Promise<string> {
     if (this._closed) {
       throw new Error(`AgentSession "${this.name}" is closed`);
     }
@@ -250,7 +262,7 @@ class AgentSession {
       this.pendingReject = reject;
       this.accumulated = '';
       this.activityLog = '';
-      this.channel.push(message);
+      this.channel.push(message, images);
     });
   }
 
@@ -544,7 +556,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
   // --- Task Assignment ---
 
-  assignTask(teamId: string, taskDescription: string): void {
+  assignTask(teamId: string, taskDescription: string, images?: Array<{ media_type: string; data: string }>): void {
     if (this.shuttingDown) {
       throw new Error('Orchestrator is shutting down');
     }
@@ -591,9 +603,9 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     // Launch the pipeline in the background
     ctx.pipelineRunning = true;
     if (complexity === 'simple') {
-      this.runSimplePipeline(teamId, ctx, taskDescription);
+      this.runSimplePipeline(teamId, ctx, taskDescription, images);
     } else {
-      this.runStandardPipeline(teamId, ctx, taskDescription);
+      this.runStandardPipeline(teamId, ctx, taskDescription, images);
     }
   }
 
@@ -762,7 +774,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   private async runSimplePipeline(
     teamId: string,
     ctx: PipelineTeamContext,
-    task: string
+    task: string,
+    images?: Array<{ media_type: string; data: string }>
   ): Promise<void> {
     const startTime = Date.now();
 
@@ -779,7 +792,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       this.emit('agent-output', teamId, 'Worker-1' as any, `[Pipeline] Starting simple task...`);
 
       // Send task to worker and wait for result
-      const result = await worker.send(task);
+      const result = await worker.send(task, images);
       const simpleDisplay = result.trim() || worker.lastActivityLog || '(no text output)';
       this.emit('agent-output', teamId, 'Worker-1' as any, simpleDisplay);
 
@@ -795,7 +808,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   private async runStandardPipeline(
     teamId: string,
     ctx: PipelineTeamContext,
-    task: string
+    task: string,
+    images?: Array<{ media_type: string; data: string }>
   ): Promise<void> {
     const startTime = Date.now();
     const cwd = ctx.state.snapshot.projectPath;
@@ -856,7 +870,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
               `[Pipeline] Worker-1 implementing...`);
 
             const w1Result = await worker1.send(
-              `You are Worker-1. ${workerInstruction}`
+              `You are Worker-1. ${workerInstruction}`,
+              images
             );
             // Use activity log as fallback display when text result is empty (most work is tool_use)
             const w1Display = w1Result.trim() || worker1.lastActivityLog || '(no text output)';
@@ -1097,7 +1112,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   // --- User Q&A ---
 
   /** Send a user question to a warm agent session and emit the response as feedback */
-  async sendMessage(teamId: string, message: string): Promise<void> {
+  async sendMessage(teamId: string, message: string, images?: Array<{ media_type: string; data: string }>): Promise<void> {
     const ctx = this.teams.get(teamId);
     if (!ctx) throw new Error(`Team "${teamId}" not found`);
     if (ctx.pipelineRunning) throw new Error('Cannot ask while pipeline is running');
@@ -1126,7 +1141,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
     const response = await liveSession.send(
       `USER QUESTION (not a new task — just answer this question about ` +
-      `the work you just completed):\n\n${message}`
+      `the work you just completed):\n\n${message}`,
+      images
     );
 
     this.emit('agent-output', teamId, instance, response);

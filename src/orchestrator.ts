@@ -86,6 +86,9 @@ export interface FeedbackPayload {
   actions?: Array<{ label: string; value: string }>;
   blocking?: boolean;
   timestamp: string;
+  sourceAgent?: string;
+  highlightTerms?: string[];
+  detail?: string;
 }
 
 // --- Per-team runtime context ---

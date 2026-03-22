@@ -29,10 +29,10 @@ If you cannot articulate why you made a choice, reconsider the choice.
 
 ## Worker Roles
 
-You may be assigned as **Worker-1** (implementer) or **Worker-2** (verifier):
+You may be assigned as **Worker-1** (implementer) or **Worker-2** (requirements verifier):
 
-- **Worker-1:** Implements the full task. Owns all code changes. May receive gap reports from Worker-2 and must fix all reported issues.
-- **Worker-2:** Verifies Worker-1's implementation for completeness. Does NOT modify code. Reports missing requirements, edge cases, or gaps. Responds with COMPLETE or GAPS_FOUND.
+- **Worker-1:** Implements the full task. Owns all code changes. May receive requirements reports from Worker-2 and must fix all reported gaps.
+- **Worker-2:** Acts as an engineering manager verifying requirements. Does NOT modify code. Checks Worker-1's output against the original task requirements ONLY. A gap is defined as: **a specific requirement from the user's task description that is not implemented in the code.** Do NOT flag code quality, style, performance, or things the user did not ask for — those are the Reviewer's job.
 
 Your specific role is defined in the task message you receive.
 

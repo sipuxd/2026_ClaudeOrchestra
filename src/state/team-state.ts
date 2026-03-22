@@ -34,6 +34,7 @@ export interface TaskInfo {
   description: string;
   assignedAt: string;
   complexity?: TaskComplexity;
+  requirements?: string;
 }
 
 // --- Loop counters ---
@@ -341,6 +342,14 @@ export class TeamState {
       throw new TransitionError('Cannot set complexity: no task assigned');
     }
     this.data.currentTask.complexity = complexity;
+    this.touch();
+  }
+
+  setTaskRequirements(requirements: string): void {
+    if (!this.data.currentTask) {
+      throw new TransitionError('Cannot set requirements: no task assigned');
+    }
+    this.data.currentTask.requirements = requirements;
     this.touch();
   }
 

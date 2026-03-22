@@ -125,6 +125,10 @@ export class DashboardServer {
       this.broadcast('feedback', { teamId, ...feedback });
     });
 
+    this.orchestrator.on('security-review', (teamId, data) => {
+      this.broadcast('security-review', { teamId, ...data });
+    });
+
     this.orchestrator.on('shutdown', () => {
       this.broadcast('shutdown', {});
       for (const client of this.sseClients) {
@@ -203,6 +207,12 @@ export class DashboardServer {
     const askMatch = pathname.match(/^\/api\/teams\/([^/]+)\/ask$/);
     if (askMatch && method === 'POST') {
       this.handleAskAgent(decodeURIComponent(askMatch[1]), req, res);
+      return;
+    }
+
+    const secReviewMatch = pathname.match(/^\/api\/teams\/([^/]+)\/security-review$/);
+    if (secReviewMatch && method === 'POST') {
+      this.handleSecurityReview(decodeURIComponent(secReviewMatch[1]), res);
       return;
     }
 
@@ -384,6 +394,27 @@ export class DashboardServer {
 
       // Fire and forget — response comes via SSE feedback events
       this.orchestrator.sendMessage(teamId, message, images).catch(() => {
+        // Errors are emitted as feedback events
+      });
+      this.sendJSON(res, { ok: true });
+    } catch (err: any) {
+      this.sendJSON(res, { error: err.message }, 400);
+    }
+  }
+
+  private handleSecurityReview(
+    teamId: string,
+    res: http.ServerResponse
+  ): void {
+    try {
+      const status = this.orchestrator.getTeamStatus(teamId);
+      if (!status) {
+        this.sendJSON(res, { error: `Team "${teamId}" not found` }, 404);
+        return;
+      }
+
+      // Fire and forget — results come via SSE security-review events
+      this.orchestrator.runSecurityReview(teamId).catch(() => {
         // Errors are emitted as feedback events
       });
       this.sendJSON(res, { ok: true });

@@ -50,6 +50,7 @@ ${CSS}
     <div class="controls-bar" id="controlsBar">
       <div class="controls-actions" id="controlsActions">
         <button class="btn btn-danger" id="stopBtn" onclick="stopCurrentTeam()">Stop</button>
+        <button class="btn btn-security-review" id="securityReviewBtn" onclick="runSecurityReview()" style="display:none">Final Security Review</button>
         <button class="btn btn-merge" id="pushMergeBtn" onclick="pushAndMerge()" style="display:none">Push &amp; Merge to Main</button>
         <button class="btn btn-preview" id="previewBtn" onclick="previewProject()" style="display:none">Preview</button>
       </div>
@@ -746,6 +747,31 @@ body {
   cursor: not-allowed;
 }
 
+.btn-security-review {
+  background: transparent;
+  color: #d29922;
+  border: 1px solid #d29922;
+}
+.btn-security-review:hover { background: rgba(210,153,34,0.1); }
+.btn-security-review.running {
+  background: #21262d;
+  color: #484f58;
+  border-color: #30363d;
+  cursor: not-allowed;
+}
+.btn-security-review.passed {
+  background: #238636;
+  color: #fff;
+  border-color: #238636;
+}
+.btn-security-review.passed:hover { background: #2ea043; }
+.btn-security-review.concerns {
+  background: #da3633;
+  color: #fff;
+  border-color: #da3633;
+}
+.btn-security-review.concerns:hover { background: #f85149; }
+
 .btn-preview {
   background: #21262d;
   color: #c9d1d9;
@@ -978,6 +1004,7 @@ let timingIntervals = {};
 let feedbackItems = {};
 let agentSubtasks = {};
 let agentStreaming = {};
+let securityReviewState = {};
 let attachedImages = [];
 let modalAttachedImages = [];
 
@@ -1076,6 +1103,7 @@ evtSource.addEventListener('task-assigned', (e) => {
     agentSubtasks[teamId] = {};
     agentStreaming[teamId] = {};
     feedbackItems[teamId] = [];
+    securityReviewState[teamId] = { status: 'idle' };
     startTimingInterval(teamId);
   }
   if (teamId === selectedTeamId) renderTeamDetail();
@@ -1174,6 +1202,13 @@ evtSource.addEventListener('feedback', (e) => {
   if (!feedbackItems[teamId]) feedbackItems[teamId] = [];
   feedbackItems[teamId].push(data);
   if (teamId === selectedTeamId) renderFeedbackBar();
+});
+
+evtSource.addEventListener('security-review', (e) => {
+  const data = JSON.parse(e.data);
+  const { teamId, status, result } = data;
+  securityReviewState[teamId] = { status, result: result || '' };
+  if (teamId === selectedTeamId) renderSecurityReviewBtn();
 });
 
 // --- Image paste/drop/file handlers ---
@@ -1603,6 +1638,9 @@ function renderControlsBar() {
   // Preview button — visible when phase is done
   document.getElementById('previewBtn').style.display = phase === 'done' ? '' : 'none';
 
+  // Security review button
+  renderSecurityReviewBtn();
+
   // Ask button — visible when pipeline is not running (terminal state)
   const askBtn = document.getElementById('askBtn');
   askBtn.style.display = !isRunning ? '' : 'none';
@@ -1747,6 +1785,64 @@ async function askAgent() {
   } finally {
     btn.disabled = false;
     btn.textContent = 'Ask';
+  }
+}
+
+function renderSecurityReviewBtn() {
+  const btn = document.getElementById('securityReviewBtn');
+  if (!btn) return;
+  if (!selectedTeamId || !teams[selectedTeamId]) { btn.style.display = 'none'; return; }
+  const phase = teams[selectedTeamId].currentPhase;
+  if (phase !== 'done') { btn.style.display = 'none'; return; }
+
+  btn.style.display = '';
+  const state = securityReviewState[selectedTeamId] || { status: 'idle' };
+
+  btn.className = 'btn btn-security-review';
+  btn.disabled = false;
+
+  if (state.status === 'running') {
+    btn.classList.add('running');
+    btn.disabled = true;
+    btn.textContent = 'Reviewing...';
+  } else if (state.status === 'passed') {
+    btn.classList.add('passed');
+    btn.textContent = 'Security: Passed';
+  } else if (state.status === 'concerns') {
+    btn.classList.add('concerns');
+    btn.textContent = 'Security: Concerns Found';
+  } else {
+    btn.textContent = 'Final Security Review';
+  }
+}
+
+async function runSecurityReview() {
+  if (!selectedTeamId) return;
+
+  const state = securityReviewState[selectedTeamId] || { status: 'idle' };
+  if (state.status === 'running') return;
+
+  // Allow re-run with confirmation if already reviewed
+  if (state.status === 'passed' || state.status === 'concerns') {
+    if (!confirm('Security review already completed. Run again?')) return;
+  }
+
+  securityReviewState[selectedTeamId] = { status: 'running' };
+  renderSecurityReviewBtn();
+
+  try {
+    const res = await fetch('/api/teams/' + encodeURIComponent(selectedTeamId) + '/security-review', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) {
+      showNotification('Security review failed: ' + (data.error || 'Unknown error'), 'error');
+      securityReviewState[selectedTeamId] = { status: 'idle' };
+      renderSecurityReviewBtn();
+    }
+    // Actual result comes via SSE
+  } catch (err) {
+    showNotification('Network error: ' + err.message, 'error');
+    securityReviewState[selectedTeamId] = { status: 'idle' };
+    renderSecurityReviewBtn();
   }
 }
 

@@ -407,6 +407,8 @@ interface PipelineTeamContext {
   pipelineRunning: boolean;
   /** Pending blocking feedback requests awaiting user response */
   pendingFeedback: Map<string, { resolve: (value: string) => void; feedback: FeedbackPayload }>;
+  /** Active final security review session (if running) */
+  securityReviewSession?: AgentSession;
 }
 
 // --- PipelineOrchestrator ---
@@ -471,6 +473,9 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
     // Add .claude-orchestra/ to the project's .gitignore if not present
     this.ensureGitignore(resolvedProjectPath);
+
+    // Ensure we're on a dev branch — create one if on main
+    this.ensureDevBranch(resolvedProjectPath);
 
     const limits: LoopLimits = {
       ...DEFAULT_LOOP_LIMITS,
@@ -568,6 +573,12 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     // Clean up previous sessions if re-assigning after completion
     if (ctx.sessions.length > 0) {
       this.closeSessions(ctx);
+    }
+
+    // Clean up any running security review
+    if (ctx.securityReviewSession && !ctx.securityReviewSession.closed) {
+      ctx.securityReviewSession.close();
+      ctx.securityReviewSession = undefined;
     }
 
     // Reset from terminal state for re-launch
@@ -713,6 +724,88 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     return GitOps.pushAndMerge(ctx.state.snapshot.projectPath);
   }
 
+  // --- Final Security Review (user-initiated) ---
+
+  /**
+   * Spawn a fresh agent to perform a comprehensive security review
+   * of all changes on the current branch vs main. Results stream
+   * to the Security-1 panel and a security-review event is emitted.
+   */
+  async runSecurityReview(teamId: string): Promise<void> {
+    const ctx = this.teams.get(teamId);
+    if (!ctx) throw new Error(`Team "${teamId}" not found`);
+    if (ctx.pipelineRunning) throw new Error('Cannot run security review while pipeline is running');
+
+    // Close any previous security review session
+    if (ctx.securityReviewSession && !ctx.securityReviewSession.closed) {
+      ctx.securityReviewSession.close();
+    }
+
+    const cwd = ctx.state.snapshot.projectPath;
+
+    // Get the full branch diff
+    const diffResult = GitOps.diff(cwd);
+    if (!diffResult.success) {
+      this.emit('security-review', teamId, { status: 'concerns', result: `Failed to get diff: ${diffResult.output}` });
+      return;
+    }
+    if (!diffResult.output.trim()) {
+      this.emit('security-review', teamId, { status: 'passed', result: 'No changes to review — branch is identical to main.' });
+      return;
+    }
+
+    this.emit('security-review', teamId, { status: 'running' });
+    this.emit('agent-output', teamId, 'Security-1' as any, '[Security Review] Starting comprehensive review...');
+
+    try {
+      const systemPrompt = this.loadRolePrompt('security-review.claude.md');
+      const session = new AgentSession('SecurityReview', systemPrompt, {
+        model: this.models[Role.Security],
+        cwd,
+        effort: 'high' as any,
+        maxTurns: 15,
+        onProgress: (text: string) => {
+          this.emit('agent-progress', teamId, 'Security-1' as any, text);
+        },
+      });
+      ctx.securityReviewSession = session;
+
+      // Truncate large diffs to avoid exceeding context
+      const MAX_DIFF_CHARS = 80_000;
+      let diffText = diffResult.output;
+      if (diffText.length > MAX_DIFF_CHARS) {
+        diffText = diffText.substring(0, MAX_DIFF_CHARS) +
+          '\n\n[DIFF TRUNCATED — use `git diff main...HEAD` via Bash to see the full diff]';
+      }
+
+      const response = await session.send(
+        'Review the following git diff for security concerns. Analyze every change.\n\n' + diffText
+      );
+
+      // Parse verdict from response
+      const upper = response.toUpperCase();
+      const hasConcerns = upper.includes('CONCERNS') && !upper.startsWith('**PASSED');
+      const status = hasConcerns ? 'concerns' : 'passed';
+
+      this.emit('agent-output', teamId, 'Security-1' as any, response);
+      this.emit('security-review', teamId, { status, result: response });
+
+      session.close();
+      ctx.securityReviewSession = undefined;
+    } catch (err: any) {
+      this.emit('security-review', teamId, { status: 'idle' });
+      this.emit('feedback', teamId, {
+        id: randomUUID(),
+        type: 'error' as any,
+        title: 'Security review failed',
+        message: err.message || 'Unknown error',
+        blocking: false,
+        timestamp: new Date().toISOString(),
+      });
+      ctx.securityReviewSession = undefined;
+    }
+  }
+
   // --- Private: .gitignore Management ---
 
   private ensureGitignore(projectPath: string): void {
@@ -731,6 +824,29 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     // Append the entry
     const separator = content.length > 0 && !content.endsWith('\n') ? '\n' : '';
     fs.writeFileSync(gitignorePath, content + separator + entry + '\n', 'utf-8');
+  }
+
+  // --- Private: Dev Branch Setup ---
+
+  private ensureDevBranch(projectPath: string): void {
+    const current = GitOps.currentBranch(projectPath);
+    if (current !== 'main') return; // already on a non-main branch
+
+    const { execSync } = require('node:child_process');
+    try {
+      // Check if local dev branch already exists
+      execSync('git rev-parse --verify dev', { cwd: projectPath, stdio: 'pipe' });
+      // dev exists locally, just check it out
+      execSync('git checkout dev', { cwd: projectPath, stdio: 'pipe' });
+    } catch {
+      // No local dev branch — create it and push to origin
+      execSync('git checkout -b dev', { cwd: projectPath, stdio: 'pipe' });
+      try {
+        execSync('git push -u origin dev', { cwd: projectPath, stdio: 'pipe' });
+      } catch {
+        // Push may fail if no remote — that's fine, local dev is created
+      }
+    }
   }
 
   // --- Private: Session Management ---

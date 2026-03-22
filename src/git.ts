@@ -50,6 +50,14 @@ export class GitOps {
   }
 
   /**
+   * Get the diff of the current branch against a base branch.
+   * Uses three-dot form to show only changes on the current branch.
+   */
+  static diff(projectPath: string, base: string = 'main'): GitResult {
+    return git(projectPath, `diff ${base}...HEAD`);
+  }
+
+  /**
    * Auto-commit all changes on the current branch.
    * Called by the engine at phase boundaries — safety checkpoints.
    * Only commits if there are changes.
@@ -96,9 +104,10 @@ export class GitOps {
    * Full push-and-merge workflow. User-initiated only.
    *
    * 1. git push origin dev
-   * 2. git checkout main && git merge dev
-   * 3. git push origin main
-   * 4. git checkout dev
+   * 2. git checkout main && git pull origin main
+   * 3. git merge dev
+   * 4. git push origin main
+   * 5. git checkout dev
    *
    * Returns combined output from all steps. Stops on first failure.
    */
@@ -113,10 +122,17 @@ export class GitOps {
       return { success: false, output: outputs.join('\n') };
     }
 
-    // Step 2: Checkout main and merge dev
+    // Step 2: Checkout main, pull latest, and merge dev
     const checkoutMain = git(projectPath, 'checkout main');
     outputs.push(`[checkout main] ${checkoutMain.output}`);
     if (!checkoutMain.success) {
+      return { success: false, output: outputs.join('\n') };
+    }
+
+    const pullMain = git(projectPath, 'pull origin main');
+    outputs.push(`[pull main] ${pullMain.output}`);
+    if (!pullMain.success) {
+      git(projectPath, `checkout ${devBranch}`);
       return { success: false, output: outputs.join('\n') };
     }
 

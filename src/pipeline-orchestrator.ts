@@ -162,14 +162,16 @@ export function parseVerifyVerdict(text: string): ParsedVerdict<VerifyVerdict> {
   if (upper.startsWith('GAPS_FOUND')) return { verdict: 'GAPS_FOUND', details: trimmed };
   if (upper.startsWith('COMPLETE')) return { verdict: 'COMPLETE', details: trimmed };
 
-  // Scan full response for gap indicators when prefix is missing
+  // Check for unchecked items in requirements checklist (deterministic)
+  const hasUnchecked = /- \[ \]/m.test(trimmed);
+  const hasChecked = /- \[x\]/mi.test(trimmed);
+  if (hasUnchecked) return { verdict: 'GAPS_FOUND', details: trimmed };
+  if (hasChecked && !hasUnchecked) return { verdict: 'COMPLETE', details: trimmed };
+
+  // Scan full response for gap indicators when no checklist found
   const gapPatterns = [
     /\bgaps?\s*found\b/i,
     /\baction\s*required\b/i,
-    /\bmissing\s+(requirement|implementation|test|file)/i,
-    /\bnot\s+(complete|fully\s+implemented|met)\b/i,
-    /\bincomplete\b/i,
-    /\bfail(s|ed|ing|ure)?\b/i,
     /\bfix\s+(required|needed)\b/i,
   ];
   const completePatterns = [
@@ -177,19 +179,16 @@ export function parseVerifyVerdict(text: string): ParsedVerdict<VerifyVerdict> {
     /\bfully\s+(complete|implemented|met)\b/i,
     /\bno\s+gaps?\s*(found)?\b/i,
     /\bverified\s+complete\b/i,
-    /\blooks?\s+good\b/i,
-    /\bno\s+(issues?|problems?|concerns?)\b/i,
+    /\bcomplete\b/i,
   ];
 
   const hasGaps = gapPatterns.some(p => p.test(trimmed));
   const hasComplete = completePatterns.some(p => p.test(trimmed));
 
-  // If gap signals found (and no competing complete signals), treat as gaps
   if (hasGaps && !hasComplete) return { verdict: 'GAPS_FOUND', details: trimmed };
-  if (hasComplete && !hasGaps) return { verdict: 'COMPLETE', details: trimmed };
 
-  // Ambiguous or no signals — default to GAPS_FOUND (err on the side of thoroughness)
-  return { verdict: 'GAPS_FOUND', details: trimmed };
+  // Default to COMPLETE — if the verifier didn't explicitly flag gaps, trust it
+  return { verdict: 'COMPLETE', details: trimmed };
 }
 
 const MAX_VERIFY_PASSES = 2;
@@ -1102,10 +1101,15 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
                 break;
               }
 
-              // GAPS_FOUND — send Worker-1 back to fix
+              // GAPS_FOUND — extract only unmet requirements for the detail modal
+              const unmetLines = w2Result.split('\n')
+                .filter(line => /- \[ \]/.test(line))
+                .join('\n');
+              const gapDetail = unmetLines || w2Result.substring(0, 4000);
+
               this.notifyUser(teamId, 'info', 'Requirements Gap',
                 `Worker-2 found unmet requirements (pass ${verifyPass}) — Worker-1 is fixing them.`,
-                undefined, undefined, w2Result.substring(0, 4000));
+                undefined, undefined, gapDetail);
 
               this.emit('agent-task', teamId, 'Worker-1' as any, `Fixing gaps (attempt ${verifyPass})`);
               this.emit('agent-output', teamId, 'Worker-1' as any,

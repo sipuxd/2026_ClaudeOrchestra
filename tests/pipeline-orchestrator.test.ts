@@ -167,6 +167,7 @@ describe('PipelineOrchestrator', () => {
       registryPath: path.join(tmpDir, 'registry.json'),
       rolesDir,
       maxConcurrentTeams: 3,
+      skipRequirements: true,
     });
   });
 
@@ -556,6 +557,7 @@ describe('PipelineOrchestrator', () => {
         registryPath: path.join(tmpDir, 'registry-model.json'),
         rolesDir,
         models: { [Role.Worker]: 'claude-sonnet-4-6' },
+        skipRequirements: true,
       });
 
       orch.createTeam('model-override', projectDir);
@@ -573,6 +575,7 @@ describe('PipelineOrchestrator', () => {
         registryPath: path.join(tmpDir, 'registry-effort.json'),
         rolesDir,
         effort: 'high',
+        skipRequirements: true,
       });
 
       orch.createTeam('effort-test', projectDir);
@@ -796,10 +799,10 @@ describe('PipelineOrchestrator', () => {
       worker1.respond('Implemented JWT auth module.');
       await new Promise(resolve => setTimeout(resolve, 100));
 
-      // Worker-2 should receive a COMPLETENESS VERIFICATION prompt
+      // Worker-2 should receive a REQUIREMENTS VERIFICATION prompt
       expect(worker2.receivedMessages.length).toBeGreaterThanOrEqual(1);
       const verifyMsg = worker2.receivedMessages[worker2.receivedMessages.length - 1];
-      expect(verifyMsg).toContain('COMPLETENESS VERIFICATION');
+      expect(verifyMsg).toContain('REQUIREMENTS VERIFICATION');
       expect(verifyMsg).toContain('Implemented JWT auth module.');
     });
 

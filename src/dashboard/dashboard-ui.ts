@@ -37,16 +37,31 @@ ${CSS}
   <div class="team-detail" id="teamDetail" style="display:none">
     <div class="detail-header">
       <div class="detail-title">
+        <button class="btn-back" id="backBtn" onclick="navigateToOverview()" style="display:none">&#8249; Back</button>
         <h2 id="detailTeamName"></h2>
         <span class="complexity-badge" id="detailComplexity"></span>
       </div>
-      <div class="detail-timing" id="detailTiming"></div>
+      <div class="detail-header-right">
+        <div class="detail-timing" id="detailTiming"></div>
+        <button class="btn-side-toggle" id="sidePanelToggle" onclick="toggleSidePanel()" title="Notifications">&#128276;<span class="badge-count" id="feedbackBadge" style="display:none">0</span></button>
+      </div>
     </div>
     <div class="detail-project" id="detailProject"></div>
     <div class="phase-bar" id="phaseBar"></div>
-    <div class="feedback-bar" id="feedbackBar" style="display:none"></div>
-    <div class="task-section" id="taskSection"></div>
-    <div class="agent-panels" id="agentPanels"></div>
+    <div class="content-with-side-panel" id="contentWrapper">
+      <div class="content-main" id="contentMain">
+        <div class="task-section" id="taskSection"></div>
+        <div class="agent-overview" id="agentOverview"></div>
+        <div class="agent-detail-view" id="agentDetailView" style="display:none"></div>
+      </div>
+      <div class="side-panel" id="sidePanel">
+        <div class="side-panel-header">
+          <span>Notifications</span>
+          <button class="side-panel-close" onclick="toggleSidePanel()">&times;</button>
+        </div>
+        <div class="side-panel-content" id="sidePanelContent"></div>
+      </div>
+    </div>
     <div class="controls-bar" id="controlsBar">
       <div class="controls-actions" id="controlsActions">
         <button class="btn btn-danger" id="stopBtn" onclick="stopCurrentTeam()">Stop</button>
@@ -58,7 +73,10 @@ ${CSS}
         <label class="relaunch-label">Next Task or Ask</label>
         <div id="imagePreviewStrip" class="image-preview-strip" style="display:none"></div>
         <div class="relaunch-input">
-          <textarea id="relaunchText" placeholder="Describe what to build next, or ask a question... (paste or drop images)"></textarea>
+          <div class="relaunch-input-wrapper">
+            <div class="prompt-resize-handle" id="promptResizeHandle">&#8597;</div>
+            <textarea id="relaunchText" placeholder="Describe what to build next, or ask a question... (paste or drop images)" rows="3"></textarea>
+          </div>
           <input type="file" id="imageFileInput" accept="image/*" multiple style="display:none" />
           <div class="relaunch-buttons">
             <button class="btn btn-attach" id="attachBtn" onclick="document.getElementById('imageFileInput').click()" title="Attach images">&#128206;</button>
@@ -244,6 +262,21 @@ body {
   white-space: nowrap;
 }
 
+.team-item-delete {
+  background: none;
+  border: none;
+  color: #484f58;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+  flex-shrink: 0;
+  display: none;
+  transition: color 0.15s;
+}
+.team-item:hover .team-item-delete { display: block; }
+.team-item-delete:hover { color: #f85149; }
+
 .new-team-btn {
   margin: 12px;
   padding: 10px;
@@ -279,7 +312,10 @@ body {
 .no-selection h2 { color: #8b949e; font-weight: 500; }
 .no-selection p { font-size: 0.95rem; }
 
-.team-detail { padding: 24px; }
+.team-detail {
+  padding: 24px;
+  padding-bottom: 180px;
+}
 
 .detail-header {
   display: flex;
@@ -440,7 +476,252 @@ body {
   overflow-y: auto;
 }
 
-/* --- Agent Panels --- */
+/* --- Content Layout with Side Panel --- */
+.content-with-side-panel {
+  display: flex;
+  gap: 0;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.content-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  transition: flex 0.3s ease;
+}
+
+.side-panel {
+  width: 0;
+  overflow: hidden;
+  background: #161b22;
+  border-left: 1px solid transparent;
+  transition: width 0.3s ease, border-color 0.3s ease;
+  flex-shrink: 0;
+}
+
+.side-panel.open {
+  width: 340px;
+  border-left-color: #30363d;
+}
+
+.side-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px;
+  border-bottom: 1px solid #30363d;
+  font-weight: 600;
+  color: #f0f6fc;
+  font-size: 0.9rem;
+}
+
+.side-panel-close {
+  background: none;
+  border: none;
+  color: #8b949e;
+  font-size: 1.3rem;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.side-panel-close:hover { color: #f0f6fc; }
+
+.side-panel-content {
+  padding: 12px;
+  overflow-y: auto;
+  max-height: calc(100vh - 340px);
+}
+
+.btn-side-toggle {
+  background: #21262d;
+  border: 1px solid #30363d;
+  color: #c9d1d9;
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 1rem;
+  cursor: pointer;
+  position: relative;
+  transition: background 0.15s;
+}
+.btn-side-toggle:hover { background: #30363d; }
+
+.badge-count {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  background: #f85149;
+  color: #fff;
+  font-size: 0.6rem;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 10px;
+  min-width: 16px;
+  text-align: center;
+}
+
+.detail-header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.btn-back {
+  background: none;
+  border: none;
+  color: #58a6ff;
+  font-size: 0.95rem;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: background 0.15s;
+  margin-right: 8px;
+}
+.btn-back:hover { background: #1f2937; }
+
+/* --- Agent Overview Cards --- */
+.agent-overview {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+@media (max-width: 1100px) {
+  .agent-overview { grid-template-columns: repeat(2, 1fr); }
+}
+
+.agent-card {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 12px;
+  padding: 16px;
+  cursor: pointer;
+  transition: border-color 0.2s, transform 0.15s;
+}
+.agent-card:hover {
+  border-color: var(--agent-color);
+  transform: translateY(-2px);
+}
+.agent-card.streaming { border-color: var(--agent-color); }
+
+.agent-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.agent-card-name {
+  font-weight: 600;
+  font-size: 0.85rem;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.agent-card-status {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 600;
+}
+
+.agent-card-progress {
+  height: 4px;
+  background: #21262d;
+  border-radius: 2px;
+  margin: 12px 0 8px;
+  overflow: hidden;
+}
+
+.agent-card-progress-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.5s ease;
+}
+
+.agent-card-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.agent-card-link {
+  font-size: 0.75rem;
+  color: #58a6ff;
+}
+
+.agent-card-percent {
+  font-size: 0.7rem;
+  color: #8b949e;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Agent Detail View --- */
+
+.agent-detail-panel {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 12px;
+  overflow-y: auto;
+  max-height: calc(100vh - 500px);
+}
+
+.agent-detail-view {
+  margin-bottom: 20px;
+}
+
+.agent-detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid #21262d;
+}
+
+.agent-detail-name {
+  font-weight: 600;
+  font-size: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.agent-detail-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.agent-detail-output {
+  padding: 14px 18px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 0.82rem;
+  line-height: 1.6;
+  color: #c9d1d9;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #0d1117;
+}
+
+.agent-detail-stream {
+  padding: 10px 18px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: #7d8590;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #010409;
+  border-top: 1px solid #21262d;
+  display: none;
+}
+.agent-detail-stream.visible { display: block; }
+
+/* --- Legacy Agent Panels (kept for compat) --- */
 .agent-panels {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -578,9 +859,15 @@ body {
 .controls-bar {
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  padding-top: 12px;
+  gap: 12px;
+  padding: 12px 24px 16px;
   border-top: 1px solid #30363d;
+  background: #0d1117;
+  position: fixed;
+  bottom: 0;
+  left: 280px;
+  right: 0;
+  z-index: 5;
 }
 
 .controls-actions {
@@ -594,6 +881,28 @@ body {
   gap: 8px;
 }
 
+.relaunch-input-wrapper {
+  position: relative;
+}
+
+.prompt-resize-handle {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  width: 16px;
+  height: 16px;
+  cursor: ns-resize;
+  color: #484f58;
+  font-size: 0.75rem;
+  user-select: none;
+  transition: color 0.15s;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.prompt-resize-handle:hover { color: #8b949e; }
+
 .relaunch-label {
   font-size: 0.7rem;
   font-weight: 600;
@@ -605,11 +914,13 @@ body {
 .relaunch-input {
   display: flex;
   gap: 8px;
-  align-items: flex-start;
+  align-items: flex-end;
 }
 
+.relaunch-input-wrapper { flex: 1; }
+
 .relaunch-input textarea {
-  flex: 1;
+  width: 100%;
   background: #0d1117;
   border: 1px solid #30363d;
   border-radius: 8px;
@@ -617,9 +928,9 @@ body {
   color: #c9d1d9;
   font-family: inherit;
   font-size: 0.85rem;
-  resize: vertical;
-  min-height: 40px;
-  max-height: 120px;
+  resize: none;
+  min-height: 72px;
+  max-height: 300px;
 }
 
 .relaunch-input textarea:focus {
@@ -629,8 +940,9 @@ body {
 
 .relaunch-buttons {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   gap: 6px;
+  align-items: flex-end;
 }
 
 .btn-ask {
@@ -729,6 +1041,11 @@ body {
   color: #fff;
 }
 .btn-primary:hover { background: #2ea043; }
+.btn-primary:disabled {
+  background: #21262d;
+  color: #484f58;
+  cursor: not-allowed;
+}
 
 .btn-danger {
   background: #da3633;
@@ -909,6 +1226,7 @@ body {
   color: #8b949e;
   font-size: 0.8rem;
   line-height: 1.4;
+  white-space: pre-wrap;
 }
 
 .feedback-time {
@@ -953,6 +1271,22 @@ body {
   color: #c9d1d9;
 }
 
+.feedback-item.clickable {
+  cursor: pointer;
+}
+.feedback-item.clickable:hover {
+  background: #1c2128;
+}
+
+.highlight-line {
+  background: rgba(210, 153, 34, 0.25);
+  border-left: 2px solid #d29922;
+  padding-left: 6px;
+  margin-left: -8px;
+  display: inline-block;
+  width: calc(100% + 8px);
+}
+
 @keyframes feedback-slide {
   from { transform: translateY(-8px); opacity: 0; }
   to { transform: translateY(0); opacity: 1; }
@@ -995,6 +1329,7 @@ body {
 const JS = `
 // --- State ---
 let teams = {};
+let archivedTeams = {};
 let selectedTeamId = null;
 let agentOutputs = {};
 let agentPanelCollapsed = {};
@@ -1005,6 +1340,9 @@ let feedbackItems = {};
 let agentSubtasks = {};
 let agentStreaming = {};
 let securityReviewState = {};
+let currentView = 'overview';
+let selectedAgent = null;
+let sidePanelOpen = false;
 let attachedImages = [];
 let modalAttachedImages = [];
 
@@ -1126,6 +1464,7 @@ evtSource.addEventListener('phase-transition', (e) => {
   if (teamId === selectedTeamId) {
     renderPhaseBar();
     renderControlsBar();
+    if (currentView === 'overview') renderAgentOverview();
   }
 });
 
@@ -1180,13 +1519,9 @@ evtSource.addEventListener('task-complete', (e) => {
     renderPhaseBar();
     renderTiming(durationMs);
     renderControlsBar();
-    // Mark all agent panels as done
-    AGENTS.forEach(a => {
-      const dot = document.querySelector('#agent-' + CSS.escape(a) + ' .agent-dot');
-      if (dot) { dot.className = 'agent-dot done'; }
-      const st = document.querySelector('#agent-' + CSS.escape(a) + ' .agent-status');
-      if (st) { st.className = 'agent-status done'; st.textContent = 'done'; }
-    });
+    // Re-render current view
+    if (currentView === 'overview') renderAgentOverview();
+    else if (currentView === 'detail' && selectedAgent) renderAgentDetailView(selectedAgent);
   }
   showNotification('Task ' + (phase === 'done' ? 'completed' : 'errored') + ' for ' + teamId + ' (' + (durationMs / 1000).toFixed(1) + 's)', phase === 'done' ? 'success' : 'error');
 });
@@ -1201,7 +1536,13 @@ evtSource.addEventListener('feedback', (e) => {
   const { teamId } = data;
   if (!feedbackItems[teamId]) feedbackItems[teamId] = [];
   feedbackItems[teamId].push(data);
-  if (teamId === selectedTeamId) renderFeedbackBar();
+  if (teamId === selectedTeamId) {
+    renderFeedbackBar();
+    // Auto-open side panel for blocking feedback (e.g., requirements approval)
+    if (data.blocking && !sidePanelOpen) {
+      toggleSidePanel();
+    }
+  }
 });
 
 evtSource.addEventListener('security-review', (e) => {
@@ -1333,6 +1674,7 @@ function renderSidebar() {
       html += '<div class="team-item' + (isActive ? ' active' : '') + '" onclick="selectTeam(\\'' + escapeAttr(id) + '\\')">'
         + '<span class="team-item-name">' + escapeHtml(t.teamName || id) + '</span>'
         + '<span class="team-item-phase" style="background:' + color + '22;color:' + color + '">' + (PHASE_LABELS[phase] || phase) + '</span>'
+        + '<button class="team-item-delete" data-team="' + escapeHtml(id) + '" title="Remove team">&times;</button>'
         + '</div>';
     });
     html += '</div></div>';
@@ -1342,6 +1684,8 @@ function renderSidebar() {
 
 function selectTeam(teamId) {
   selectedTeamId = teamId;
+  currentView = 'overview';
+  selectedAgent = null;
   renderSidebar();
   renderTeamDetail();
   document.getElementById('noSelection').style.display = 'none';
@@ -1363,9 +1707,20 @@ function renderTeamDetail() {
 
   renderProjectInfo();
   renderPhaseBar();
-  renderFeedbackBar();
+  renderSidePanelContent();
+  updateFeedbackBadge();
   renderTaskSection();
-  renderAgentPanels();
+  if (currentView === 'detail' && selectedAgent) {
+    document.getElementById('agentOverview').style.display = 'none';
+    document.getElementById('agentDetailView').style.display = '';
+    document.getElementById('backBtn').style.display = '';
+    renderAgentDetailView(selectedAgent);
+  } else {
+    document.getElementById('agentOverview').style.display = '';
+    document.getElementById('agentDetailView').style.display = 'none';
+    document.getElementById('backBtn').style.display = 'none';
+    renderAgentOverview();
+  }
   renderControlsBar();
 
   if (taskStartTimes[selectedTeamId]) {
@@ -1422,17 +1777,23 @@ function renderPhaseBar() {
 }
 
 function renderFeedbackBar() {
-  const bar = document.getElementById('feedbackBar');
+  // Redirected to side panel
+  renderSidePanelContent();
+  updateFeedbackBadge();
+}
+
+function renderSidePanelContent() {
+  const container = document.getElementById('sidePanelContent');
+  if (!container) return;
   const items = feedbackItems[selectedTeamId] || [];
   if (!items.length) {
-    bar.style.display = 'none';
+    container.innerHTML = '<div style="text-align:center;color:#484f58;padding:24px;font-size:0.85rem">No notifications yet</div>';
     return;
   }
-  bar.style.display = 'flex';
 
   const ICONS = { info: '\\u2139\\uFE0F', warning: '\\u26A0\\uFE0F', question: '\\u2753', decision: '\\uD83D\\uDD36' };
 
-  bar.innerHTML = items.map((item, idx) => {
+  container.innerHTML = items.map((item, idx) => {
     const icon = ICONS[item.type] || '\\u2139\\uFE0F';
     let actionsHtml = '';
     if (item.actions && item.actions.length > 0) {
@@ -1444,20 +1805,48 @@ function renderFeedbackBar() {
         + '</div>';
     }
     const timeAgo = formatTimeAgo(item.timestamp);
-    return '<div class="feedback-item ' + (item.type || 'info') + '">'
+    const clickable = item.sourceAgent ? ' clickable' : '';
+    const termsStr = (item.highlightTerms || []).join('|');
+    const dataAttrs = item.sourceAgent
+      ? ' data-agent="' + escapeHtml(item.sourceAgent) + '" data-terms="' + escapeHtml(termsStr) + '"'
+      : '';
+    return '<div class="feedback-item ' + (item.type || 'info') + clickable + '"' + dataAttrs + '>'
       + '<span class="feedback-icon">' + icon + '</span>'
       + '<div class="feedback-content">'
-      + '<div class="feedback-title">' + escapeHtml(item.title) + '</div>'
+      + '<div class="feedback-title">' + escapeHtml(item.title) + (item.sourceAgent ? ' <span style="font-size:0.7rem;color:#58a6ff">\\u2192 ' + escapeHtml(item.sourceAgent) + '</span>' : '') + '</div>'
       + '<div class="feedback-message">' + escapeHtml(item.message) + '</div>'
       + actionsHtml
       + '<div class="feedback-time">' + timeAgo + '</div>'
       + '</div>'
-      + '<button class="feedback-dismiss" onclick="dismissFeedback(' + idx + ')">&times;</button>'
+      + '<button class="feedback-dismiss" onclick="event.stopPropagation();dismissFeedback(' + idx + ')">&times;</button>'
       + '</div>';
   }).join('');
 
-  // Scroll to latest item
-  bar.scrollTop = bar.scrollHeight;
+  container.scrollTop = container.scrollHeight;
+}
+
+function toggleSidePanel() {
+  sidePanelOpen = !sidePanelOpen;
+  const panel = document.getElementById('sidePanel');
+  if (sidePanelOpen) {
+    panel.classList.add('open');
+    renderSidePanelContent();
+  } else {
+    panel.classList.remove('open');
+  }
+  updateFeedbackBadge();
+}
+
+function updateFeedbackBadge() {
+  const badge = document.getElementById('feedbackBadge');
+  if (!badge) return;
+  const items = feedbackItems[selectedTeamId] || [];
+  if (items.length > 0 && !sidePanelOpen) {
+    badge.textContent = items.length;
+    badge.style.display = '';
+  } else {
+    badge.style.display = 'none';
+  }
 }
 
 function dismissFeedback(idx) {
@@ -1504,7 +1893,13 @@ function renderTaskSection() {
   const t = teams[selectedTeamId];
   const el = document.getElementById('taskSection');
   if (t.currentTask) {
-    el.textContent = t.currentTask.description;
+    let html = escapeHtml(t.currentTask.description);
+    if (t.currentTask.requirements) {
+      html += '<div style="margin-top:8px;padding-top:8px;border-top:1px solid #21262d;font-size:0.78rem;color:#7ee787">'
+        + '<strong>Approved Requirements:</strong><pre style="margin:4px 0 0;white-space:pre-wrap;color:#8b949e;font-size:0.78rem">'
+        + escapeHtml(t.currentTask.requirements) + '</pre></div>';
+    }
+    el.innerHTML = html;
     el.style.display = '';
   } else {
     el.style.display = 'none';
@@ -1512,101 +1907,213 @@ function renderTaskSection() {
 }
 
 function renderAgentPanels() {
-  const container = document.getElementById('agentPanels');
-  const outputs = agentOutputs[selectedTeamId] || {};
-  const phase = teams[selectedTeamId]?.currentPhase;
-  const terminal = ['done', 'errored', 'cancelled'];
-  const isDone = terminal.includes(phase);
+  // Legacy — redirected to overview/detail system
+  if (currentView === 'detail' && selectedAgent) {
+    renderAgentDetailView(selectedAgent);
+  } else {
+    renderAgentOverview();
+  }
+}
 
+// --- Navigation ---
+
+function navigateToOverview() {
+  currentView = 'overview';
+  selectedAgent = null;
+  activeHighlightTerms = null;
+  document.getElementById('backBtn').style.display = 'none';
+  document.getElementById('agentOverview').style.display = '';
+  document.getElementById('agentDetailView').style.display = 'none';
+  renderAgentOverview();
+}
+
+let activeHighlightTerms = null;
+
+function navigateToAgent(agent) {
+  currentView = 'detail';
+  selectedAgent = agent;
+  activeHighlightTerms = null;
+  document.getElementById('backBtn').style.display = '';
+  document.getElementById('agentOverview').style.display = 'none';
+  document.getElementById('agentDetailView').style.display = '';
+  renderAgentDetailView(agent);
+}
+
+function viewAgentWithHighlight(agent, termsStr) {
+  activeHighlightTerms = termsStr ? termsStr.split('|') : null;
+  currentView = 'detail';
+  selectedAgent = agent;
+  document.getElementById('backBtn').style.display = '';
+  document.getElementById('agentOverview').style.display = 'none';
+  document.getElementById('agentDetailView').style.display = '';
+  renderAgentDetailView(agent);
+  if (activeHighlightTerms) {
+    setTimeout(() => applyHighlights(), 50);
+  }
+}
+
+function applyHighlights() {
+  if (!activeHighlightTerms || !selectedAgent) return;
+  const outputEl = document.getElementById('detail-output-' + selectedAgent);
+  if (!outputEl) return;
+  const text = outputEl.textContent || '';
+  const lines = text.split('\\n');
+  const regex = new RegExp('(' + activeHighlightTerms.join('|') + ')', 'gi');
+  let firstHighlightIdx = -1;
+  const highlighted = lines.map((line, idx) => {
+    if (regex.test(line)) {
+      if (firstHighlightIdx === -1) firstHighlightIdx = idx;
+      regex.lastIndex = 0;
+      return '<span class="highlight-line">' + escapeHtml(line) + '</span>';
+    }
+    return escapeHtml(line);
+  }).join('\\n');
+  outputEl.innerHTML = highlighted;
+  // Scroll to first highlight
+  const firstHL = outputEl.querySelector('.highlight-line');
+  if (firstHL) firstHL.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+// --- Overview Cards ---
+
+function getAgentProgress(agent) {
+  const outputs = agentOutputs[selectedTeamId] || {};
   const streams = agentStreaming[selectedTeamId] || {};
+  const phase = teams[selectedTeamId]?.currentPhase;
+  const isDone = ['done', 'errored', 'cancelled'].includes(phase);
+  const text = outputs[agent] || '';
+  const streamText = streams[agent] || '';
+  const hasText = text.length > 0;
+  const isStreaming = streamText.length > 0;
+  const isActive = hasText || isStreaming;
+
+  // Agent has final output and is no longer streaming — it's done
+  if (hasText && !isStreaming) return 100;
+  // Entire pipeline done
+  if (isDone && hasText) return 100;
+  if (!isActive) return 0;
+  return Math.min(90, Math.max(10, Math.floor((streamText.length / 3000) * 90)));
+}
+
+function renderAgentOverview() {
+  const container = document.getElementById('agentOverview');
+  if (!container) return;
+  const outputs = agentOutputs[selectedTeamId] || {};
+  const streams = agentStreaming[selectedTeamId] || {};
+  const phase = teams[selectedTeamId]?.currentPhase;
+  const isDone = ['done', 'errored', 'cancelled'].includes(phase);
+  const complexity = teams[selectedTeamId]?.currentTask?.complexity;
+  const isSimple = complexity === 'simple';
+
   container.innerHTML = AGENTS.map(agent => {
+    const skipped = isSimple && agent !== 'Worker-1';
     const color = AGENT_COLORS[agent] || '#8b949e';
     const text = outputs[agent] || '';
     const streamText = streams[agent] || '';
     const hasText = text.length > 0;
-    const isActive = hasText || streamText.length > 0;
-    const collapsed = agentPanelCollapsed[agent] && !isActive ? 'collapsed' : '';
-    const dotClass = isDone && hasText ? 'done' : (isActive ? 'active' : '');
-    const statusText = isDone && hasText ? 'done' : (isActive ? 'working' : 'idle');
-    const statusClass = isDone && hasText ? 'done' : (isActive ? 'streaming' : '');
-    const subtasks = agentSubtasks[selectedTeamId] || {};
-    const subtask = subtasks[agent] || '';
-    const streamVisible = streamText.length > 0 ? 'visible' : '';
-    const panelClass = 'agent-panel' + (isActive && !isDone ? ' streaming' : '');
-    return '<div class="' + panelClass + '" id="agent-' + agent + '" style="--agent-color:' + color + '">'
-      + '<div class="agent-header" onclick="toggleAgent(\\'' + agent + '\\')">'
-      + '<span class="agent-name"><span class="agent-dot ' + dotClass + '" style="--agent-color:' + color + '"></span>' + agent + '</span>'
-      + '<span class="agent-status ' + statusClass + '" style="--agent-color:' + color + '">' + statusText + '</span>'
+    const isStreaming = streamText.length > 0;
+    const isActive = hasText || isStreaming;
+    const agentDone = (hasText && !isStreaming) || (isDone && hasText);
+
+    if (skipped) {
+      return '<div class="agent-card skipped" style="--agent-color:' + color + ';opacity:0.4;cursor:default">'
+        + '<div class="agent-card-header">'
+        + '<span class="agent-card-name"><span class="agent-dot" style="--agent-color:' + color + '"></span>' + agent + '</span>'
+        + '<span class="agent-card-status" style="color:#484f58">SKIPPED</span>'
+        + '</div>'
+        + '<div class="agent-card-progress"><div class="agent-card-progress-fill" style="width:0%"></div></div>'
+        + '<div class="agent-card-footer"><span class="agent-card-percent">Simple task</span></div>'
+        + '</div>';
+    }
+
+    const dotClass = agentDone ? 'done' : (isActive ? 'active' : '');
+    const statusText = agentDone ? 'Done' : (isActive ? 'Working...' : 'IDLE');
+    const statusColor = agentDone ? '#7ee787' : (isActive ? color : '#484f58');
+    const progress = getAgentProgress(agent);
+    const cardClass = 'agent-card' + (isActive && !agentDone ? ' streaming' : '');
+
+    return '<div class="' + cardClass + '" style="--agent-color:' + color + '" onclick="navigateToAgent(\\'' + agent + '\\')">'
+      + '<div class="agent-card-header">'
+      + '<span class="agent-card-name"><span class="agent-dot ' + dotClass + '" style="--agent-color:' + color + '"></span>' + agent + '</span>'
+      + '<span class="agent-card-status" style="color:' + statusColor + '">' + statusText + '</span>'
       + '</div>'
-      + (subtask ? '<div class="agent-subtask" title="' + escapeHtml(subtask) + '">' + escapeHtml(subtask) + '</div>' : '')
-      + '<div class="agent-output ' + collapsed + '" id="output-' + agent + '">' + escapeHtml(truncateOutput(text)) + '</div>'
-      + '<div class="agent-stream ' + streamVisible + '" id="stream-' + agent + '">'
-      + escapeHtml(truncateOutput(streamText))
-      + (streamVisible ? '<span class="typing-dots"><span></span><span></span><span></span></span>' : '')
+      + '<div class="agent-card-progress"><div class="agent-card-progress-fill" style="width:' + progress + '%;background:' + color + '"></div></div>'
+      + '<div class="agent-card-footer">'
+      + '<span class="agent-card-percent">' + progress + '% Complete</span>'
       + '</div>'
       + '</div>';
   }).join('');
 }
 
+// --- Detail View ---
+
+
+function renderAgentDetailView(agent) {
+  const container = document.getElementById('agentDetailView');
+  if (!container) return;
+  const color = AGENT_COLORS[agent] || '#8b949e';
+  const outputs = agentOutputs[selectedTeamId] || {};
+  const streams = agentStreaming[selectedTeamId] || {};
+  const text = outputs[agent] || '';
+  const streamText = streams[agent] || '';
+  const phase = teams[selectedTeamId]?.currentPhase;
+  const isDone = ['done', 'errored', 'cancelled'].includes(phase);
+  const hasText = text.length > 0;
+  const isStreaming = streamText.length > 0;
+  const isActive = hasText || isStreaming;
+  const agentDone = (hasText && !isStreaming) || (isDone && hasText);
+  const dotClass = agentDone ? 'done' : (isActive ? 'active' : '');
+  const statusText = agentDone ? 'DONE' : (isActive ? 'Working...' : 'IDLE');
+  const statusClass = agentDone ? 'done' : (isActive ? 'streaming' : '');
+  const streamVisible = isStreaming ? 'visible' : '';
+  const contentHtml = '<div class="agent-detail-output" id="detail-output-' + agent + '">' + escapeHtml(truncateOutput(text)) + '</div>'
+    + '<div class="agent-detail-stream ' + streamVisible + '" id="detail-stream-' + agent + '">'
+    + escapeHtml(streamText.length > 3000 ? '...' + streamText.slice(-3000) : streamText)
+    + (streamVisible ? '<span class="typing-dots"><span></span><span></span><span></span></span>' : '')
+    + '</div>';
+
+  container.innerHTML = '<div class="agent-detail-panel" style="--agent-color:' + color + '">'
+    + '<div class="agent-detail-header">'
+    + '<span class="agent-detail-name"><span class="agent-dot ' + dotClass + '" style="--agent-color:' + color + '"></span>' + agent + '</span>'
+    + '<span class="agent-status ' + statusClass + '" style="--agent-color:' + color + '">' + statusText + '</span>'
+    + '</div>'
+    + contentHtml
+    + '</div>';
+
+  // Auto-scroll output/stream
+  const outputEl = document.getElementById('detail-output-' + agent);
+  if (outputEl) outputEl.scrollTop = outputEl.scrollHeight;
+  const streamEl = document.getElementById('detail-stream-' + agent);
+  if (streamEl) streamEl.scrollTop = streamEl.scrollHeight;
+
+  // Ensure panel doesn't overlap controls bar
+  if (typeof updateDetailPanelHeight === 'function') updateDetailPanelHeight();
+}
+
 function updateAgentSubtask(instance, subtask) {
-  const panel = document.getElementById('agent-' + instance);
-  if (!panel) return;
-  let el = panel.querySelector('.agent-subtask');
-  if (!el) {
-    el = document.createElement('div');
-    el.className = 'agent-subtask';
-    const header = panel.querySelector('.agent-header');
-    if (header) header.after(el);
-  }
-  el.textContent = subtask;
-  el.title = subtask;
+  // Subtasks only used in legacy panels — overview cards don't show them
 }
 
 function updateAgentPanel(instance, text, streaming) {
-  const panel = document.getElementById('agent-' + instance);
-  if (!panel) return;
-
-  const outputEl = document.getElementById('output-' + instance);
-  if (outputEl) {
-    outputEl.textContent = truncateOutput(text);
-    outputEl.classList.remove('collapsed');
-    outputEl.scrollTop = outputEl.scrollHeight;
+  // Update overview card if in overview mode
+  if (currentView === 'overview') {
+    renderAgentOverview();
   }
-
-  const dot = panel.querySelector('.agent-dot');
-  if (dot) {
-    dot.className = 'agent-dot ' + (streaming ? 'active' : 'done');
-  }
-
-  const statusEl = panel.querySelector('.agent-status');
-  if (statusEl) {
-    statusEl.className = 'agent-status ' + (streaming ? 'streaming' : 'done');
-    statusEl.textContent = streaming ? 'working...' : 'done';
-  }
-
-  if (streaming) {
-    panel.classList.add('streaming');
-  } else {
-    panel.classList.remove('streaming');
+  // Update detail view if this agent is selected
+  if (currentView === 'detail' && selectedAgent === instance) {
+    renderAgentDetailView(instance);
   }
 }
 
 function updateAgentStream(instance, text) {
-  const streamEl = document.getElementById('stream-' + instance);
-  if (!streamEl) return;
-
-  if (!text || text.length === 0) {
-    streamEl.classList.remove('visible');
-    streamEl.innerHTML = '';
-    return;
+  // Update overview cards (progress changes)
+  if (currentView === 'overview') {
+    renderAgentOverview();
   }
-
-  streamEl.classList.add('visible');
-  // Show last ~3000 chars of streaming text for readability
-  const display = text.length > 3000 ? '...' + text.slice(-3000) : text;
-  streamEl.innerHTML = escapeHtml(display) + '<span class="typing-dots"><span></span><span></span><span></span></span>';
-  // Auto-scroll to bottom
-  streamEl.scrollTop = streamEl.scrollHeight;
+  // Update detail view if this agent is selected
+  if (currentView === 'detail' && selectedAgent === instance) {
+    renderAgentDetailView(instance);
+  }
 }
 
 function toggleProject(proj) {
@@ -1729,6 +2236,27 @@ async function stopCurrentTeam() {
   } catch (err) {
     showNotification('Failed to stop: ' + err.message, 'error');
   }
+}
+
+async function deleteTeam(teamId) {
+  try {
+    await fetch('/api/teams/' + encodeURIComponent(teamId) + '/stop', { method: 'POST' });
+  } catch {}
+  // Remove from client state
+  delete teams[teamId];
+  delete agentOutputs[teamId];
+  delete agentStreaming[teamId];
+  delete agentSubtasks[teamId];
+  delete feedbackItems[teamId];
+  delete securityReviewState[teamId];
+  if (selectedTeamId === teamId) {
+    selectedTeamId = null;
+    currentView = 'overview';
+    selectedAgent = null;
+    document.getElementById('teamDetail').style.display = 'none';
+    document.getElementById('noSelection').style.display = '';
+  }
+  renderSidebar();
 }
 
 async function relaunchCurrentTeam() {
@@ -1908,11 +2436,75 @@ function showNotification(message, type) {
   }, 4000);
 }
 
+// --- Prompt resize handle ---
+function updateDetailPanelHeight() {
+  const controlsBar = document.getElementById('controlsBar');
+  if (!controlsBar) return;
+  const barH = controlsBar.offsetHeight;
+  document.querySelectorAll('.agent-detail-panel').forEach(el => {
+    const panelTop = el.getBoundingClientRect().top;
+    const maxH = window.innerHeight - panelTop - barH - 48;
+    el.style.maxHeight = Math.max(100, maxH) + 'px';
+  });
+}
+
+setTimeout(() => {
+  const handle = document.getElementById('promptResizeHandle');
+  const ta = document.getElementById('relaunchText');
+  if (handle && ta) {
+    let startY = 0;
+    let startH = 0;
+    handle.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      startY = e.clientY;
+      startH = ta.offsetHeight;
+      const onMove = (ev) => {
+        const delta = startY - ev.clientY;
+        const newH = Math.min(300, Math.max(72, startH + delta));
+        ta.style.height = newH + 'px';
+        updateDetailPanelHeight();
+      };
+      const onUp = () => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  }
+  window.addEventListener('resize', updateDetailPanelHeight);
+  updateDetailPanelHeight();
+}, 200);
+
 // --- Keyboard shortcuts ---
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') hideNewTeamModal();
+  if (e.key === 'Escape') {
+    if (currentView === 'detail') { navigateToOverview(); return; }
+    hideNewTeamModal();
+  }
   if (e.key === 'Enter' && document.getElementById('newTeamModal').style.display === 'flex') {
     if (e.target.tagName !== 'TEXTAREA') createTeam();
   }
 });
+
+// --- Delegated click for team delete ---
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('.team-item-delete');
+  if (!btn) return;
+  e.stopPropagation();
+  const teamId = btn.dataset.team;
+  if (!teamId) return;
+  if (!confirm('Remove team "' + teamId + '"?')) return;
+  deleteTeam(teamId);
+});
+
+// --- Delegated click for feedback notifications ---
+document.addEventListener('click', (e) => {
+  const item = e.target.closest('.feedback-item.clickable');
+  if (!item) return;
+  const agent = item.dataset.agent;
+  const terms = item.dataset.terms;
+  if (agent) viewAgentWithHighlight(agent, terms || '');
+});
+
 `;

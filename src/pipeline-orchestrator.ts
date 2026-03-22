@@ -3,9 +3,11 @@
 // Eliminates the Supervisor LLM entirely. Code drives the pipeline:
 //   Security scan → Worker-1 implements → Worker-2 verifies → Security sweep → Review
 //
-// Worker-2 acts as a completeness verifier: it checks Worker-1's output
-// against the original task and reports gaps. Worker-1 fixes gaps, Worker-2
-// re-checks (max 2 loops). Worker-2 never modifies code — report only.
+// Worker-2 acts as an engineering manager: it checks Worker-1's output
+// against the original task requirements and reports gaps. A gap is a
+// specific requirement the user asked for that isn't implemented.
+// Worker-1 fixes gaps, Worker-2 re-checks (max 2 loops). Worker-2 never
+// modifies code — requirements verification only.
 //
 // Each agent gets its own SDK query() call with streaming input
 // (PromptChannel) for warm sessions. First message pays ~12s cold start;
@@ -13,6 +15,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { execSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { Query, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
@@ -305,6 +308,7 @@ class AgentSession {
                 const line = detail ? `${tool}: ${detail}` : tool;
                 this.activityLog += (this.activityLog ? '\n' : '') + line;
                 this.onProgress(this.activityLog);
+
               }
               if (block.type === 'thinking' && block.thinking) {
                 const preview = block.thinking.substring(0, 200);
@@ -369,6 +373,8 @@ export interface PipelineOrchestraConfig {
   maxTurns?: Partial<Record<Role, number>>;
   /** Loop limits for phase transitions */
   limits?: Partial<LoopLimits>;
+  /** Skip requirements extraction (useful for testing) */
+  skipRequirements?: boolean;
 }
 
 // --- Pipeline-tuned defaults ---
@@ -611,12 +617,59 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
     this.persistence.persistNow(ctx.state);
 
-    // Launch the pipeline in the background
+    // Extract requirements and get approval before starting pipeline
     ctx.pipelineRunning = true;
+    this.runWithRequirements(teamId, ctx, taskDescription, complexity, images);
+  }
+
+  private async runWithRequirements(
+    teamId: string,
+    ctx: PipelineTeamContext,
+    task: string,
+    complexity: 'simple' | 'standard',
+    images?: Array<{ media_type: string; data: string }>
+  ): Promise<void> {
+    if (this.config.skipRequirements) {
+      // Skip extraction — go straight to pipeline
+      if (complexity === 'simple') {
+        this.runSimplePipeline(teamId, ctx, task, images);
+      } else {
+        this.runStandardPipeline(teamId, ctx, task, images);
+      }
+      return;
+    }
+
+    try {
+      // Extract requirements from the task prompt
+      this.emit('agent-output', teamId, 'Worker-1' as any, '[Pipeline] Extracting requirements...');
+      const requirements = await this.extractRequirements(task, images);
+
+      if (requirements) {
+        // Show requirements for user approval
+        const response = await this.askUser(
+          teamId,
+          'Requirements Checklist',
+          `Review the extracted requirements before agents start:\n\n${requirements}`,
+          [{ label: 'Approve', value: 'approve' }, { label: 'Skip', value: 'skip' }]
+        );
+
+        if (response === 'approve') {
+          ctx.state.setTaskRequirements(requirements);
+          this.persistence.persistNow(ctx.state);
+        }
+        // If 'skip', proceed without requirements
+      }
+    } catch (err: any) {
+      // Extraction failed — proceed without requirements
+      this.notifyUser(teamId, 'warning', 'Requirements extraction skipped',
+        'Could not extract requirements: ' + (err.message || 'Unknown error'));
+    }
+
+    // Start the pipeline
     if (complexity === 'simple') {
-      this.runSimplePipeline(teamId, ctx, taskDescription, images);
+      this.runSimplePipeline(teamId, ctx, task, images);
     } else {
-      this.runStandardPipeline(teamId, ctx, taskDescription, images);
+      this.runStandardPipeline(teamId, ctx, task, images);
     }
   }
 
@@ -832,7 +885,6 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     const current = GitOps.currentBranch(projectPath);
     if (current !== 'main') return; // already on a non-main branch
 
-    const { execSync } = require('node:child_process');
     try {
       // Check if local dev branch already exists
       execSync('git rev-parse --verify dev', { cwd: projectPath, stdio: 'pipe' });
@@ -907,8 +959,12 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
       this.emit('agent-output', teamId, 'Worker-1' as any, `[Pipeline] Starting simple task...`);
 
-      // Send task to worker and wait for result
-      const result = await worker.send(task, images);
+      // Send task to worker (with approved requirements if present)
+      const requirements = ctx.state.snapshot.currentTask?.requirements;
+      const fullPrompt = requirements
+        ? `${task}\n\nAPPROVED REQUIREMENTS:\n${requirements}`
+        : task;
+      const result = await worker.send(fullPrompt, images);
       const simpleDisplay = result.trim() || worker.lastActivityLog || '(no text output)';
       this.emit('agent-output', teamId, 'Worker-1' as any, simpleDisplay);
 
@@ -929,6 +985,10 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   ): Promise<void> {
     const startTime = Date.now();
     const cwd = ctx.state.snapshot.projectPath;
+    const requirements = ctx.state.snapshot.currentTask?.requirements;
+    const requirementsBlock = requirements
+      ? `\nAPPROVED REQUIREMENTS:\n${requirements}\n`
+      : '';
 
     try {
       // Create all 4 agent sessions in parallel (cold starts happen simultaneously)
@@ -957,6 +1017,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
           scanResult = await security.send(
             `PRE-WORK SCAN REQUEST\n\n` +
             `Task: ${task}\n` +
+            requirementsBlock +
             `Project path: ${cwd}\n\n` +
             `Scan all files in the task scope and produce a clearance report.`
           );
@@ -976,6 +1037,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
             const revisionCount = ctx.state.counters.revisions;
             const workerInstruction =
               `TASK: ${task}\n\n` +
+              requirementsBlock +
               `SECURITY CLEARANCE:\n${scanResult}\n\n` +
               (revisionCount > 0 ? `REVISION ATTEMPT ${revisionCount + 1}:\nPrevious work needs revision. Address any feedback and fix issues.\n\n` : '') +
               `Implement the assigned work within the cleared scope.`;
@@ -1009,20 +1071,27 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
                 `[Pipeline] Worker-2 ${verifyLabel.toLowerCase()}...`);
 
               w2Result = await worker2.send(
-                `COMPLETENESS VERIFICATION\n\n` +
-                `You are Worker-2. Your job is to verify that Worker-1's implementation ` +
-                `is complete against the original task requirements. Do NOT modify any code.\n\n` +
+                `REQUIREMENTS VERIFICATION\n\n` +
+                `You are Worker-2, acting as an engineering manager. Your ONLY job is to verify ` +
+                `that Worker-1 built what the user asked for. Do NOT modify any code.\n\n` +
+                `DEFINITION OF A GAP: A specific requirement from the approved requirements list ` +
+                `that is NOT implemented in the code. Do NOT flag code quality, style, ` +
+                `performance, or things not in the requirements.\n\n` +
                 `ORIGINAL TASK: ${task}\n\n` +
-                `SECURITY CLEARANCE:\n${scanResult.substring(0, 1000)}\n\n` +
+                (requirements
+                  ? `APPROVED REQUIREMENTS:\n${requirements}\n\n`
+                  : '') +
                 `WORKER-1 OUTPUT:\n${currentW1Result.substring(0, 3000)}\n\n` +
-                `Check for:\n` +
-                `- Missing requirements from the task description\n` +
-                `- Unhandled edge cases\n` +
-                `- Missing error handling\n` +
-                `- Incomplete implementations (TODOs, placeholder code)\n` +
-                `- Missing files that should have been created\n\n` +
-                `Begin your response with COMPLETE or GAPS_FOUND.\n` +
-                `If GAPS_FOUND, list each gap clearly so Worker-1 can fix them.`
+                `INSTRUCTIONS:\n` +
+                `1. For each approved requirement, check whether it is implemented.\n` +
+                `2. Output a checklist in this format:\n\n` +
+                `REQUIREMENTS CHECKLIST:\n` +
+                `- [x] Requirement description — implemented\n` +
+                `- [ ] Requirement description — NOT implemented (explain what is missing)\n\n` +
+                `3. After the checklist, begin your verdict on a new line:\n` +
+                `   COMPLETE — if all requirements are checked [x]\n` +
+                `   GAPS_FOUND — if any requirement is unchecked [ ]\n\n` +
+                `Only flag gaps for requirements in the approved list. Nothing else.`
               );
               this.emit('agent-output', teamId, 'Worker-2' as any, w2Result);
 
@@ -1034,18 +1103,20 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
               }
 
               // GAPS_FOUND — send Worker-1 back to fix
-              this.notifyUser(teamId, 'info', 'Gaps Found',
-                `Worker-2 found gaps (pass ${verifyPass}) — Worker-1 is fixing them.`);
+              this.notifyUser(teamId, 'info', 'Requirements Gap',
+                `Worker-2 found unmet requirements (pass ${verifyPass}) — Worker-1 is fixing them.`,
+                'Worker-2', ['\\[ \\]', 'NOT implemented', 'GAPS_FOUND']);
 
               this.emit('agent-task', teamId, 'Worker-1' as any, `Fixing gaps (attempt ${verifyPass})`);
               this.emit('agent-output', teamId, 'Worker-1' as any,
                 `[Pipeline] Worker-1 fixing gaps (attempt ${verifyPass})...`);
 
               currentW1Result = await worker1.send(
-                `COMPLETENESS GAPS — FIX REQUIRED (attempt ${verifyPass})\n\n` +
-                `Worker-2 found the following gaps in your implementation:\n\n` +
+                `REQUIREMENTS GAPS — FIX REQUIRED (attempt ${verifyPass})\n\n` +
+                `Worker-2 checked your implementation against the original task requirements ` +
+                `and found unmet requirements (marked [ ] in the checklist below):\n\n` +
                 `${w2Result.substring(0, 3000)}\n\n` +
-                `Fix all reported gaps. Do not re-implement what already works.`
+                `Implement ONLY the unchecked [ ] requirements. Do not re-implement what already works.`
               );
               const fixDisplay = currentW1Result.trim() || worker1.lastActivityLog || '(no text output)';
               this.emit('agent-output', teamId, 'Worker-1' as any, fixDisplay);
@@ -1068,7 +1139,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
             const sweepResult = await security.send(
               `POST-WORK SWEEP REQUEST\n\n` +
-              `Task: ${task}\n\n` +
+              `Task: ${task}\n` +
+              requirementsBlock + `\n` +
               `Worker-1 summary:\n${workerResults.w1.substring(0, 2000)}\n\n` +
               `Worker-2 summary:\n${workerResults.w2.substring(0, 2000)}\n\n` +
               `Sweep all changes made by Workers. Check for introduced vulnerabilities, ` +
@@ -1083,7 +1155,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
               this.emit('agent-output', teamId, 'Security-1' as any,
                 `[Pipeline] Security BLOCKED — retrying workers...`);
               this.notifyUser(teamId, 'warning', 'Security Blocked',
-                'Security sweep found issues — retrying workers with updated constraints.');
+                'Security sweep found issues — retrying workers with updated constraints.',
+                'Security-1', ['blocked', 'issue', 'vulnerability', 'hardcoded', 'secret', 'injection']);
               // Backward transition: Handoff → Work (auto-increments counters, checks limits)
               const fromPhase2 = ctx.state.currentPhase;
               ctx.state.transitionPhase(TeamPhase.Work);
@@ -1108,7 +1181,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
             const reviewResult = await reviewer.send(
               `REVIEW REQUEST\n\n` +
-              `Task: ${task}\n\n` +
+              `Task: ${task}\n` +
+              requirementsBlock + `\n` +
               `Worker-1 summary:\n${workerResults.w1.substring(0, 2000)}\n\n` +
               `Worker-2 summary:\n${workerResults.w2.substring(0, 2000)}\n\n` +
               `Evaluate the quality and correctness of this work. ` +
@@ -1175,7 +1249,9 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     teamId: string,
     type: FeedbackPayload['type'],
     title: string,
-    message: string
+    message: string,
+    sourceAgent?: string,
+    highlightTerms?: string[]
   ): void {
     this.emit('feedback', teamId, {
       id: randomUUID(),
@@ -1184,6 +1260,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       message,
       blocking: false,
       timestamp: new Date().toISOString(),
+      sourceAgent,
+      highlightTerms,
     });
   }
 
@@ -1325,6 +1403,44 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     } catch {
       // Invalid transition — pipeline may re-enter same phase
     }
+  }
+
+  // --- Private: Requirements Extraction ---
+
+  private async extractRequirements(
+    taskDescription: string,
+    images?: Array<{ media_type: string; data: string }>
+  ): Promise<string> {
+    const channel = new PromptChannel();
+    const gen = query({
+      prompt: channel as AsyncIterable<SDKUserMessage>,
+      options: {
+        model: this.models[Role.Worker],
+        systemPrompt:
+          'You are a requirements analyst. Extract explicit requirements from the user\'s task description ' +
+          'as a numbered checklist. Each requirement should be a specific, verifiable outcome the user asked for. ' +
+          'Do NOT add requirements the user didn\'t ask for. Do NOT add code quality, testing, or best practice ' +
+          'requirements unless the user explicitly mentioned them.\n\n' +
+          'Format:\n1. [Requirement description]\n2. [Requirement description]\n...\n\n' +
+          'Be concise. Extract only what the user explicitly wants built.',
+        effort: 'low' as any,
+        maxTurns: 1,
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+        persistSession: false,
+        env: { ...process.env, CLAUDECODE: undefined },
+      } as any,
+    });
+
+    channel.push(taskDescription, images);
+    channel.close();
+
+    let result = '';
+    for await (const msg of gen) {
+      const text = extractSdkText(msg);
+      if (text) result += text;
+    }
+    return result.trim();
   }
 
   // --- Private: Role Prompt Loading ---

@@ -50,14 +50,18 @@ ${CSS}
     <div class="controls-bar" id="controlsBar">
       <div class="controls-actions" id="controlsActions">
         <button class="btn btn-danger" id="stopBtn" onclick="stopCurrentTeam()">Stop</button>
+        <button class="btn btn-security-review" id="securityReviewBtn" onclick="runSecurityReview()" style="display:none">Final Security Review</button>
         <button class="btn btn-merge" id="pushMergeBtn" onclick="pushAndMerge()" style="display:none">Push &amp; Merge to Main</button>
         <button class="btn btn-preview" id="previewBtn" onclick="previewProject()" style="display:none">Preview</button>
       </div>
       <div class="relaunch-group" id="relaunchGroup">
         <label class="relaunch-label">Next Task or Ask</label>
+        <div id="imagePreviewStrip" class="image-preview-strip" style="display:none"></div>
         <div class="relaunch-input">
-          <textarea id="relaunchText" placeholder="Describe what to build next, or ask a question..."></textarea>
+          <textarea id="relaunchText" placeholder="Describe what to build next, or ask a question... (paste or drop images)"></textarea>
+          <input type="file" id="imageFileInput" accept="image/*" multiple style="display:none" />
           <div class="relaunch-buttons">
+            <button class="btn btn-attach" id="attachBtn" onclick="document.getElementById('imageFileInput').click()" title="Attach images">&#128206;</button>
             <button class="btn btn-primary" id="relaunchBtn" onclick="relaunchCurrentTeam()">Run Task</button>
             <button class="btn btn-ask" id="askBtn" onclick="askAgent()">Ask</button>
           </div>
@@ -75,7 +79,12 @@ ${CSS}
     <label>Project Path</label>
     <input type="text" id="modalPath" placeholder="/Users/you/Projects/my-app" autocomplete="off" />
     <label>Task Description</label>
-    <textarea id="modalTask" placeholder="Build a..." rows="4"></textarea>
+    <div id="modalImagePreviewStrip" class="image-preview-strip" style="display:none"></div>
+    <textarea id="modalTask" placeholder="Build a... (paste or drop images)" rows="4"></textarea>
+    <div class="modal-task-actions">
+      <button class="btn btn-attach" onclick="document.getElementById('modalImageFileInput').click()" title="Attach images">&#128206;</button>
+      <input type="file" id="modalImageFileInput" accept="image/*" multiple style="display:none" />
+    </div>
     <div class="modal-actions">
       <button class="btn btn-ghost" onclick="hideNewTeamModal()">Cancel</button>
       <button class="btn btn-primary" onclick="createTeam()">Launch</button>
@@ -645,6 +654,64 @@ body {
   cursor: not-allowed;
 }
 
+.btn-attach {
+  background: #21262d;
+  border: 1px solid #30363d;
+  color: #c9d1d9;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.btn-attach:hover {
+  background: #30363d;
+  border-color: #484f58;
+}
+
+.image-preview-strip {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 4px 0;
+}
+
+.img-preview {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid #30363d;
+}
+
+.img-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.img-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgba(0,0,0,0.7);
+  color: #fff;
+  border: none;
+  font-size: 12px;
+  line-height: 18px;
+  text-align: center;
+  cursor: pointer;
+  padding: 0;
+}
+
+.img-remove:hover {
+  background: #f85149;
+}
+
 /* --- Buttons --- */
 .btn {
   padding: 8px 16px;
@@ -679,6 +746,31 @@ body {
   color: #484f58;
   cursor: not-allowed;
 }
+
+.btn-security-review {
+  background: transparent;
+  color: #d29922;
+  border: 1px solid #d29922;
+}
+.btn-security-review:hover { background: rgba(210,153,34,0.1); }
+.btn-security-review.running {
+  background: #21262d;
+  color: #484f58;
+  border-color: #30363d;
+  cursor: not-allowed;
+}
+.btn-security-review.passed {
+  background: #238636;
+  color: #fff;
+  border-color: #238636;
+}
+.btn-security-review.passed:hover { background: #2ea043; }
+.btn-security-review.concerns {
+  background: #da3633;
+  color: #fff;
+  border-color: #da3633;
+}
+.btn-security-review.concerns:hover { background: #f85149; }
 
 .btn-preview {
   background: #21262d;
@@ -749,6 +841,12 @@ body {
 }
 
 .modal textarea { resize: vertical; }
+
+.modal-task-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 4px;
+}
 
 .modal-actions {
   display: flex;
@@ -906,6 +1004,65 @@ let timingIntervals = {};
 let feedbackItems = {};
 let agentSubtasks = {};
 let agentStreaming = {};
+let securityReviewState = {};
+let attachedImages = [];
+let modalAttachedImages = [];
+
+// --- Image helpers ---
+function addImageToList(file, list, renderFn) {
+  if (!file || !file.type.startsWith('image/')) return;
+  if (list.length >= 5) { showNotification('Max 5 images', 'error'); return; }
+  const reader = new FileReader();
+  reader.onload = () => {
+    const base64 = reader.result.split(',')[1];
+    list.push({ media_type: file.type, data: base64, name: file.name });
+    renderFn();
+  };
+  reader.readAsDataURL(file);
+}
+
+function addImageFile(file) { addImageToList(file, attachedImages, renderImagePreviews); }
+function addModalImageFile(file) { addImageToList(file, modalAttachedImages, renderModalImagePreviews); }
+
+function removeImage(idx) { attachedImages.splice(idx, 1); renderImagePreviews(); }
+function removeModalImage(idx) { modalAttachedImages.splice(idx, 1); renderModalImagePreviews(); }
+
+function clearImages() { attachedImages = []; renderImagePreviews(); }
+function clearModalImages() { modalAttachedImages = []; renderModalImagePreviews(); }
+
+function renderPreviewStrip(list, stripId, removeFn) {
+  const strip = document.getElementById(stripId);
+  if (!strip) return;
+  if (list.length === 0) {
+    strip.style.display = 'none';
+    strip.innerHTML = '';
+    return;
+  }
+  strip.style.display = 'flex';
+  strip.innerHTML = list.map((img, i) =>
+    '<div class="img-preview">' +
+      '<img src="data:' + img.media_type + ';base64,' + img.data + '" />' +
+      '<button class="img-remove" onclick="' + removeFn + '(' + i + ')">&times;</button>' +
+    '</div>'
+  ).join('');
+}
+
+function renderImagePreviews() { renderPreviewStrip(attachedImages, 'imagePreviewStrip', 'removeImage'); }
+function renderModalImagePreviews() { renderPreviewStrip(modalAttachedImages, 'modalImagePreviewStrip', 'removeModalImage'); }
+
+function getAndClearImages() {
+  if (attachedImages.length === 0) return undefined;
+  const imgs = attachedImages.map(i => ({ media_type: i.media_type, data: i.data }));
+  clearImages();
+  return imgs;
+}
+
+function getAndClearModalImages() {
+  if (modalAttachedImages.length === 0) return undefined;
+  const imgs = modalAttachedImages.map(i => ({ media_type: i.media_type, data: i.data }));
+  clearModalImages();
+  return imgs;
+}
 
 // --- Phase config ---
 const PHASES = ['pre_work', 'work', 'handoff', 'review', 'done'];
@@ -946,6 +1103,7 @@ evtSource.addEventListener('task-assigned', (e) => {
     agentSubtasks[teamId] = {};
     agentStreaming[teamId] = {};
     feedbackItems[teamId] = [];
+    securityReviewState[teamId] = { status: 'idle' };
     startTimingInterval(teamId);
   }
   if (teamId === selectedTeamId) renderTeamDetail();
@@ -1045,6 +1203,77 @@ evtSource.addEventListener('feedback', (e) => {
   feedbackItems[teamId].push(data);
   if (teamId === selectedTeamId) renderFeedbackBar();
 });
+
+evtSource.addEventListener('security-review', (e) => {
+  const data = JSON.parse(e.data);
+  const { teamId, status, result } = data;
+  securityReviewState[teamId] = { status, result: result || '' };
+  if (teamId === selectedTeamId) renderSecurityReviewBtn();
+});
+
+// --- Image paste/drop/file handlers ---
+setTimeout(() => {
+  const ta = document.getElementById('relaunchText');
+  if (ta) {
+    ta.addEventListener('paste', (e) => {
+      const items = e.clipboardData && e.clipboardData.items;
+      if (!items) return;
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].type.startsWith('image/')) {
+          e.preventDefault();
+          addImageFile(items[i].getAsFile());
+        }
+      }
+    });
+    ta.addEventListener('dragover', (e) => { e.preventDefault(); });
+    ta.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const files = e.dataTransfer && e.dataTransfer.files;
+      if (!files) return;
+      for (let i = 0; i < files.length; i++) {
+        if (files[i].type.startsWith('image/')) addImageFile(files[i]);
+      }
+    });
+  }
+  const fi = document.getElementById('imageFileInput');
+  if (fi) {
+    fi.addEventListener('change', (e) => {
+      const files = e.target.files;
+      for (let i = 0; i < files.length; i++) addImageFile(files[i]);
+      e.target.value = '';
+    });
+  }
+  const modalTa = document.getElementById('modalTask');
+  if (modalTa) {
+    modalTa.addEventListener('paste', (e) => {
+      const items = e.clipboardData && e.clipboardData.items;
+      if (!items) return;
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].type.startsWith('image/')) {
+          e.preventDefault();
+          addModalImageFile(items[i].getAsFile());
+        }
+      }
+    });
+    modalTa.addEventListener('dragover', (e) => { e.preventDefault(); });
+    modalTa.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const files = e.dataTransfer && e.dataTransfer.files;
+      if (!files) return;
+      for (let i = 0; i < files.length; i++) {
+        if (files[i].type.startsWith('image/')) addModalImageFile(files[i]);
+      }
+    });
+  }
+  const mfi = document.getElementById('modalImageFileInput');
+  if (mfi) {
+    mfi.addEventListener('change', (e) => {
+      const files = e.target.files;
+      for (let i = 0; i < files.length; i++) addModalImageFile(files[i]);
+      e.target.value = '';
+    });
+  }
+}, 100);
 
 // --- Render Functions ---
 
@@ -1409,6 +1638,9 @@ function renderControlsBar() {
   // Preview button — visible when phase is done
   document.getElementById('previewBtn').style.display = phase === 'done' ? '' : 'none';
 
+  // Security review button
+  renderSecurityReviewBtn();
+
   // Ask button — visible when pipeline is not running (terminal state)
   const askBtn = document.getElementById('askBtn');
   askBtn.style.display = !isRunning ? '' : 'none';
@@ -1449,6 +1681,7 @@ function showNewTeamModal() {
 
 function hideNewTeamModal() {
   document.getElementById('newTeamModal').style.display = 'none';
+  clearModalImages();
 }
 
 async function createTeam() {
@@ -1460,9 +1693,11 @@ async function createTeam() {
   if (!name) { errorEl.textContent = 'Team name is required'; return; }
   if (!projectPath) { errorEl.textContent = 'Project path is required'; return; }
 
+  const imgs = getAndClearModalImages();
   try {
     const body = { name, projectPath };
     if (task) body.task = task;
+    if (imgs) body.images = imgs;
 
     const res = await fetch('/api/teams', {
       method: 'POST',
@@ -1501,11 +1736,14 @@ async function relaunchCurrentTeam() {
   const desc = document.getElementById('relaunchText').value.trim();
   if (!desc) { showNotification('Task description is required', 'error'); return; }
 
+  const imgs = getAndClearImages();
   try {
+    const payload = { description: desc };
+    if (imgs) payload.images = imgs;
     const res = await fetch('/api/teams/' + encodeURIComponent(selectedTeamId) + '/task', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ description: desc }),
+      body: JSON.stringify(payload),
     });
     const data = await res.json();
     if (!res.ok) {
@@ -1523,15 +1761,18 @@ async function askAgent() {
   const msg = document.getElementById('relaunchText').value.trim();
   if (!msg) { showNotification('Type a question first', 'error'); return; }
 
+  const imgs = getAndClearImages();
   const btn = document.getElementById('askBtn');
   btn.disabled = true;
   btn.textContent = 'Asking...';
 
   try {
+    const payload = { message: msg };
+    if (imgs) payload.images = imgs;
     const res = await fetch('/api/teams/' + encodeURIComponent(selectedTeamId) + '/ask', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: msg }),
+      body: JSON.stringify(payload),
     });
     const data = await res.json();
     if (!res.ok) {
@@ -1544,6 +1785,64 @@ async function askAgent() {
   } finally {
     btn.disabled = false;
     btn.textContent = 'Ask';
+  }
+}
+
+function renderSecurityReviewBtn() {
+  const btn = document.getElementById('securityReviewBtn');
+  if (!btn) return;
+  if (!selectedTeamId || !teams[selectedTeamId]) { btn.style.display = 'none'; return; }
+  const phase = teams[selectedTeamId].currentPhase;
+  if (phase !== 'done') { btn.style.display = 'none'; return; }
+
+  btn.style.display = '';
+  const state = securityReviewState[selectedTeamId] || { status: 'idle' };
+
+  btn.className = 'btn btn-security-review';
+  btn.disabled = false;
+
+  if (state.status === 'running') {
+    btn.classList.add('running');
+    btn.disabled = true;
+    btn.textContent = 'Reviewing...';
+  } else if (state.status === 'passed') {
+    btn.classList.add('passed');
+    btn.textContent = 'Security: Passed';
+  } else if (state.status === 'concerns') {
+    btn.classList.add('concerns');
+    btn.textContent = 'Security: Concerns Found';
+  } else {
+    btn.textContent = 'Final Security Review';
+  }
+}
+
+async function runSecurityReview() {
+  if (!selectedTeamId) return;
+
+  const state = securityReviewState[selectedTeamId] || { status: 'idle' };
+  if (state.status === 'running') return;
+
+  // Allow re-run with confirmation if already reviewed
+  if (state.status === 'passed' || state.status === 'concerns') {
+    if (!confirm('Security review already completed. Run again?')) return;
+  }
+
+  securityReviewState[selectedTeamId] = { status: 'running' };
+  renderSecurityReviewBtn();
+
+  try {
+    const res = await fetch('/api/teams/' + encodeURIComponent(selectedTeamId) + '/security-review', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) {
+      showNotification('Security review failed: ' + (data.error || 'Unknown error'), 'error');
+      securityReviewState[selectedTeamId] = { status: 'idle' };
+      renderSecurityReviewBtn();
+    }
+    // Actual result comes via SSE
+  } catch (err) {
+    showNotification('Network error: ' + err.message, 'error');
+    securityReviewState[selectedTeamId] = { status: 'idle' };
+    renderSecurityReviewBtn();
   }
 }
 

@@ -125,6 +125,10 @@ export class DashboardServer {
       this.broadcast('feedback', { teamId, ...feedback });
     });
 
+    this.orchestrator.on('security-review', (teamId, data) => {
+      this.broadcast('security-review', { teamId, ...data });
+    });
+
     this.orchestrator.on('shutdown', () => {
       this.broadcast('shutdown', {});
       for (const client of this.sseClients) {
@@ -206,6 +210,12 @@ export class DashboardServer {
       return;
     }
 
+    const secReviewMatch = pathname.match(/^\/api\/teams\/([^/]+)\/security-review$/);
+    if (secReviewMatch && method === 'POST') {
+      this.handleSecurityReview(decodeURIComponent(secReviewMatch[1]), res);
+      return;
+    }
+
     if (method === 'POST' && pathname === '/api/teams') {
       this.handleCreateTeam(req, res);
       return;
@@ -272,7 +282,7 @@ export class DashboardServer {
   ): Promise<void> {
     try {
       const body = JSON.parse(await this.readBody(req));
-      const { name, projectPath, task } = body;
+      const { name, projectPath, task, images } = body;
 
       if (!name || !projectPath) {
         this.sendJSON(res, { error: 'name and projectPath are required' }, 400);
@@ -282,7 +292,7 @@ export class DashboardServer {
       const state = this.orchestrator.createTeam(name, projectPath);
 
       if (task) {
-        this.orchestrator.assignTask(name, task);
+        this.orchestrator.assignTask(name, task, images);
       }
 
       this.sendJSON(res, state.snapshot, 201);
@@ -298,14 +308,14 @@ export class DashboardServer {
   ): Promise<void> {
     try {
       const body = JSON.parse(await this.readBody(req));
-      const { description } = body;
+      const { description, images } = body;
 
       if (!description) {
         this.sendJSON(res, { error: 'description is required' }, 400);
         return;
       }
 
-      this.orchestrator.assignTask(teamId, description);
+      this.orchestrator.assignTask(teamId, description, images);
       this.sendJSON(res, { ok: true });
     } catch (err: any) {
       this.sendJSON(res, { error: err.message }, 400);
@@ -375,7 +385,7 @@ export class DashboardServer {
   ): Promise<void> {
     try {
       const body = JSON.parse(await this.readBody(req));
-      const { message } = body;
+      const { message, images } = body;
 
       if (!message) {
         this.sendJSON(res, { error: 'message is required' }, 400);
@@ -383,7 +393,28 @@ export class DashboardServer {
       }
 
       // Fire and forget — response comes via SSE feedback events
-      this.orchestrator.sendMessage(teamId, message).catch(() => {
+      this.orchestrator.sendMessage(teamId, message, images).catch(() => {
+        // Errors are emitted as feedback events
+      });
+      this.sendJSON(res, { ok: true });
+    } catch (err: any) {
+      this.sendJSON(res, { error: err.message }, 400);
+    }
+  }
+
+  private handleSecurityReview(
+    teamId: string,
+    res: http.ServerResponse
+  ): void {
+    try {
+      const status = this.orchestrator.getTeamStatus(teamId);
+      if (!status) {
+        this.sendJSON(res, { error: `Team "${teamId}" not found` }, 404);
+        return;
+      }
+
+      // Fire and forget — results come via SSE security-review events
+      this.orchestrator.runSecurityReview(teamId).catch(() => {
         // Errors are emitted as feedback events
       });
       this.sendJSON(res, { ok: true });

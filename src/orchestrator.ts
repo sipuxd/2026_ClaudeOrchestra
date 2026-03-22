@@ -74,6 +74,7 @@ export interface OrchestratorEvents {
   'feedback-response': [teamId: string, feedbackId: string, value: string];
   'agent-task': [teamId: string, instance: RoleInstance, subtask: string];
   'tick': [teamId: string];
+  'security-review': [teamId: string, data: { status: string; result?: string }];
   'shutdown': [];
 }
 

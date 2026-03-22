@@ -39,10 +39,22 @@ class PromptChannel {
   private waiter: ((value: IteratorResult<SDKUserMessage>) => void) | null = null;
   private closed = false;
 
-  push(prompt: string): void {
+  push(prompt: string, images?: Array<{ media_type: string; data: string }>): void {
+    let content: string | Array<{ type: string; [key: string]: any }>;
+    if (images && images.length > 0) {
+      content = [
+        { type: 'text', text: prompt },
+        ...images.map(img => ({
+          type: 'image' as const,
+          source: { type: 'base64' as const, media_type: img.media_type, data: img.data },
+        })),
+      ];
+    } else {
+      content = prompt;
+    }
     const msg: SDKUserMessage = {
       type: 'user',
-      message: { role: 'user', content: prompt },
+      message: { role: 'user', content },
       parent_tool_use_id: null,
       session_id: '',
     };
@@ -241,7 +253,7 @@ class AgentSession {
    * Send a message to this agent and wait for the complete response.
    * Returns the full accumulated text from the agent's turn.
    */
-  async send(message: string): Promise<string> {
+  async send(message: string, images?: Array<{ media_type: string; data: string }>): Promise<string> {
     if (this._closed) {
       throw new Error(`AgentSession "${this.name}" is closed`);
     }
@@ -250,7 +262,7 @@ class AgentSession {
       this.pendingReject = reject;
       this.accumulated = '';
       this.activityLog = '';
-      this.channel.push(message);
+      this.channel.push(message, images);
     });
   }
 
@@ -395,6 +407,8 @@ interface PipelineTeamContext {
   pipelineRunning: boolean;
   /** Pending blocking feedback requests awaiting user response */
   pendingFeedback: Map<string, { resolve: (value: string) => void; feedback: FeedbackPayload }>;
+  /** Active final security review session (if running) */
+  securityReviewSession?: AgentSession;
 }
 
 // --- PipelineOrchestrator ---
@@ -459,6 +473,9 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
     // Add .claude-orchestra/ to the project's .gitignore if not present
     this.ensureGitignore(resolvedProjectPath);
+
+    // Ensure we're on a dev branch — create one if on main
+    this.ensureDevBranch(resolvedProjectPath);
 
     const limits: LoopLimits = {
       ...DEFAULT_LOOP_LIMITS,
@@ -544,7 +561,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
   // --- Task Assignment ---
 
-  assignTask(teamId: string, taskDescription: string): void {
+  assignTask(teamId: string, taskDescription: string, images?: Array<{ media_type: string; data: string }>): void {
     if (this.shuttingDown) {
       throw new Error('Orchestrator is shutting down');
     }
@@ -556,6 +573,12 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     // Clean up previous sessions if re-assigning after completion
     if (ctx.sessions.length > 0) {
       this.closeSessions(ctx);
+    }
+
+    // Clean up any running security review
+    if (ctx.securityReviewSession && !ctx.securityReviewSession.closed) {
+      ctx.securityReviewSession.close();
+      ctx.securityReviewSession = undefined;
     }
 
     // Reset from terminal state for re-launch
@@ -591,9 +614,9 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     // Launch the pipeline in the background
     ctx.pipelineRunning = true;
     if (complexity === 'simple') {
-      this.runSimplePipeline(teamId, ctx, taskDescription);
+      this.runSimplePipeline(teamId, ctx, taskDescription, images);
     } else {
-      this.runStandardPipeline(teamId, ctx, taskDescription);
+      this.runStandardPipeline(teamId, ctx, taskDescription, images);
     }
   }
 
@@ -701,6 +724,88 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     return GitOps.pushAndMerge(ctx.state.snapshot.projectPath);
   }
 
+  // --- Final Security Review (user-initiated) ---
+
+  /**
+   * Spawn a fresh agent to perform a comprehensive security review
+   * of all changes on the current branch vs main. Results stream
+   * to the Security-1 panel and a security-review event is emitted.
+   */
+  async runSecurityReview(teamId: string): Promise<void> {
+    const ctx = this.teams.get(teamId);
+    if (!ctx) throw new Error(`Team "${teamId}" not found`);
+    if (ctx.pipelineRunning) throw new Error('Cannot run security review while pipeline is running');
+
+    // Close any previous security review session
+    if (ctx.securityReviewSession && !ctx.securityReviewSession.closed) {
+      ctx.securityReviewSession.close();
+    }
+
+    const cwd = ctx.state.snapshot.projectPath;
+
+    // Get the full branch diff
+    const diffResult = GitOps.diff(cwd);
+    if (!diffResult.success) {
+      this.emit('security-review', teamId, { status: 'concerns', result: `Failed to get diff: ${diffResult.output}` });
+      return;
+    }
+    if (!diffResult.output.trim()) {
+      this.emit('security-review', teamId, { status: 'passed', result: 'No changes to review — branch is identical to main.' });
+      return;
+    }
+
+    this.emit('security-review', teamId, { status: 'running' });
+    this.emit('agent-output', teamId, 'Security-1' as any, '[Security Review] Starting comprehensive review...');
+
+    try {
+      const systemPrompt = this.loadRolePrompt('security-review.claude.md');
+      const session = new AgentSession('SecurityReview', systemPrompt, {
+        model: this.models[Role.Security],
+        cwd,
+        effort: 'high' as any,
+        maxTurns: 15,
+        onProgress: (text: string) => {
+          this.emit('agent-progress', teamId, 'Security-1' as any, text);
+        },
+      });
+      ctx.securityReviewSession = session;
+
+      // Truncate large diffs to avoid exceeding context
+      const MAX_DIFF_CHARS = 80_000;
+      let diffText = diffResult.output;
+      if (diffText.length > MAX_DIFF_CHARS) {
+        diffText = diffText.substring(0, MAX_DIFF_CHARS) +
+          '\n\n[DIFF TRUNCATED — use `git diff main...HEAD` via Bash to see the full diff]';
+      }
+
+      const response = await session.send(
+        'Review the following git diff for security concerns. Analyze every change.\n\n' + diffText
+      );
+
+      // Parse verdict from response
+      const upper = response.toUpperCase();
+      const hasConcerns = upper.includes('CONCERNS') && !upper.startsWith('**PASSED');
+      const status = hasConcerns ? 'concerns' : 'passed';
+
+      this.emit('agent-output', teamId, 'Security-1' as any, response);
+      this.emit('security-review', teamId, { status, result: response });
+
+      session.close();
+      ctx.securityReviewSession = undefined;
+    } catch (err: any) {
+      this.emit('security-review', teamId, { status: 'idle' });
+      this.emit('feedback', teamId, {
+        id: randomUUID(),
+        type: 'error' as any,
+        title: 'Security review failed',
+        message: err.message || 'Unknown error',
+        blocking: false,
+        timestamp: new Date().toISOString(),
+      });
+      ctx.securityReviewSession = undefined;
+    }
+  }
+
   // --- Private: .gitignore Management ---
 
   private ensureGitignore(projectPath: string): void {
@@ -719,6 +824,29 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     // Append the entry
     const separator = content.length > 0 && !content.endsWith('\n') ? '\n' : '';
     fs.writeFileSync(gitignorePath, content + separator + entry + '\n', 'utf-8');
+  }
+
+  // --- Private: Dev Branch Setup ---
+
+  private ensureDevBranch(projectPath: string): void {
+    const current = GitOps.currentBranch(projectPath);
+    if (current !== 'main') return; // already on a non-main branch
+
+    const { execSync } = require('node:child_process');
+    try {
+      // Check if local dev branch already exists
+      execSync('git rev-parse --verify dev', { cwd: projectPath, stdio: 'pipe' });
+      // dev exists locally, just check it out
+      execSync('git checkout dev', { cwd: projectPath, stdio: 'pipe' });
+    } catch {
+      // No local dev branch — create it and push to origin
+      execSync('git checkout -b dev', { cwd: projectPath, stdio: 'pipe' });
+      try {
+        execSync('git push -u origin dev', { cwd: projectPath, stdio: 'pipe' });
+      } catch {
+        // Push may fail if no remote — that's fine, local dev is created
+      }
+    }
   }
 
   // --- Private: Session Management ---
@@ -762,7 +890,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   private async runSimplePipeline(
     teamId: string,
     ctx: PipelineTeamContext,
-    task: string
+    task: string,
+    images?: Array<{ media_type: string; data: string }>
   ): Promise<void> {
     const startTime = Date.now();
 
@@ -779,7 +908,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       this.emit('agent-output', teamId, 'Worker-1' as any, `[Pipeline] Starting simple task...`);
 
       // Send task to worker and wait for result
-      const result = await worker.send(task);
+      const result = await worker.send(task, images);
       const simpleDisplay = result.trim() || worker.lastActivityLog || '(no text output)';
       this.emit('agent-output', teamId, 'Worker-1' as any, simpleDisplay);
 
@@ -795,7 +924,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   private async runStandardPipeline(
     teamId: string,
     ctx: PipelineTeamContext,
-    task: string
+    task: string,
+    images?: Array<{ media_type: string; data: string }>
   ): Promise<void> {
     const startTime = Date.now();
     const cwd = ctx.state.snapshot.projectPath;
@@ -856,7 +986,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
               `[Pipeline] Worker-1 implementing...`);
 
             const w1Result = await worker1.send(
-              `You are Worker-1. ${workerInstruction}`
+              `You are Worker-1. ${workerInstruction}`,
+              images
             );
             // Use activity log as fallback display when text result is empty (most work is tool_use)
             const w1Display = w1Result.trim() || worker1.lastActivityLog || '(no text output)';
@@ -1097,7 +1228,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   // --- User Q&A ---
 
   /** Send a user question to a warm agent session and emit the response as feedback */
-  async sendMessage(teamId: string, message: string): Promise<void> {
+  async sendMessage(teamId: string, message: string, images?: Array<{ media_type: string; data: string }>): Promise<void> {
     const ctx = this.teams.get(teamId);
     if (!ctx) throw new Error(`Team "${teamId}" not found`);
     if (ctx.pipelineRunning) throw new Error('Cannot ask while pipeline is running');
@@ -1126,7 +1257,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
     const response = await liveSession.send(
       `USER QUESTION (not a new task — just answer this question about ` +
-      `the work you just completed):\n\n${message}`
+      `the work you just completed):\n\n${message}`,
+      images
     );
 
     this.emit('agent-output', teamId, instance, response);

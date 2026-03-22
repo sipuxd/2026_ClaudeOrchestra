@@ -88,6 +88,7 @@ export interface FeedbackPayload {
   timestamp: string;
   sourceAgent?: string;
   highlightTerms?: string[];
+  detail?: string;
 }
 
 // --- Per-team runtime context ---

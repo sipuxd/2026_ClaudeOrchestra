@@ -1105,7 +1105,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
               // GAPS_FOUND — send Worker-1 back to fix
               this.notifyUser(teamId, 'info', 'Requirements Gap',
                 `Worker-2 found unmet requirements (pass ${verifyPass}) — Worker-1 is fixing them.`,
-                'Worker-2', ['\\[ \\]', 'NOT implemented', 'GAPS_FOUND']);
+                undefined, undefined, w2Result.substring(0, 4000));
 
               this.emit('agent-task', teamId, 'Worker-1' as any, `Fixing gaps (attempt ${verifyPass})`);
               this.emit('agent-output', teamId, 'Worker-1' as any,
@@ -1251,7 +1251,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     title: string,
     message: string,
     sourceAgent?: string,
-    highlightTerms?: string[]
+    highlightTerms?: string[],
+    detail?: string
   ): void {
     this.emit('feedback', teamId, {
       id: randomUUID(),
@@ -1262,6 +1263,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       timestamp: new Date().toISOString(),
       sourceAgent,
       highlightTerms,
+      detail,
     });
   }
 

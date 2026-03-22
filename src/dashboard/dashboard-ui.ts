@@ -111,6 +111,16 @@ ${CSS}
   </div>
 </div>
 
+<div class="modal-overlay" id="detailModal" style="display:none" onclick="if(event.target===this)hideDetailModal()">
+  <div class="modal" style="max-width:700px">
+    <h3 id="detailModalTitle"></h3>
+    <pre class="detail-modal-content" id="detailModalContent"></pre>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="hideDetailModal()">Close</button>
+    </div>
+  </div>
+</div>
+
 <div class="notification-area" id="notificationArea"></div>
 
 <script>
@@ -1159,6 +1169,21 @@ body {
 
 .modal textarea { resize: vertical; }
 
+.detail-modal-content {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 14px;
+  color: #c9d1d9;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 0.82rem;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
 .modal-task-actions {
   display: flex;
   justify-content: flex-end;
@@ -1276,15 +1301,6 @@ body {
 }
 .feedback-item.clickable:hover {
   background: #1c2128;
-}
-
-.highlight-line {
-  background: rgba(210, 153, 34, 0.25);
-  border-left: 2px solid #d29922;
-  padding-left: 6px;
-  margin-left: -8px;
-  display: inline-block;
-  width: calc(100% + 8px);
 }
 
 @keyframes feedback-slide {
@@ -1690,6 +1706,13 @@ function selectTeam(teamId) {
   renderTeamDetail();
   document.getElementById('noSelection').style.display = 'none';
   document.getElementById('teamDetail').style.display = 'block';
+
+  // Auto-open side panel if there's pending blocking feedback
+  const items = feedbackItems[teamId] || [];
+  const hasBlocking = items.some(i => i.blocking);
+  if (hasBlocking && !sidePanelOpen) {
+    toggleSidePanel();
+  }
 }
 
 function renderTeamDetail() {
@@ -1805,15 +1828,13 @@ function renderSidePanelContent() {
         + '</div>';
     }
     const timeAgo = formatTimeAgo(item.timestamp);
-    const clickable = item.sourceAgent ? ' clickable' : '';
-    const termsStr = (item.highlightTerms || []).join('|');
-    const dataAttrs = item.sourceAgent
-      ? ' data-agent="' + escapeHtml(item.sourceAgent) + '" data-terms="' + escapeHtml(termsStr) + '"'
-      : '';
+    const hasDetail = !!item.detail;
+    const clickable = hasDetail ? ' clickable' : '';
+    const dataAttrs = hasDetail ? ' data-detail-idx="' + idx + '"' : '';
     return '<div class="feedback-item ' + (item.type || 'info') + clickable + '"' + dataAttrs + '>'
       + '<span class="feedback-icon">' + icon + '</span>'
       + '<div class="feedback-content">'
-      + '<div class="feedback-title">' + escapeHtml(item.title) + (item.sourceAgent ? ' <span style="font-size:0.7rem;color:#58a6ff">\\u2192 ' + escapeHtml(item.sourceAgent) + '</span>' : '') + '</div>'
+      + '<div class="feedback-title">' + escapeHtml(item.title) + (hasDetail ? ' <span style="font-size:0.7rem;color:#58a6ff;cursor:pointer">View details</span>' : '') + '</div>'
       + '<div class="feedback-message">' + escapeHtml(item.message) + '</div>'
       + actionsHtml
       + '<div class="feedback-time">' + timeAgo + '</div>'
@@ -1920,58 +1941,19 @@ function renderAgentPanels() {
 function navigateToOverview() {
   currentView = 'overview';
   selectedAgent = null;
-  activeHighlightTerms = null;
   document.getElementById('backBtn').style.display = 'none';
   document.getElementById('agentOverview').style.display = '';
   document.getElementById('agentDetailView').style.display = 'none';
   renderAgentOverview();
 }
 
-let activeHighlightTerms = null;
-
 function navigateToAgent(agent) {
   currentView = 'detail';
   selectedAgent = agent;
-  activeHighlightTerms = null;
   document.getElementById('backBtn').style.display = '';
   document.getElementById('agentOverview').style.display = 'none';
   document.getElementById('agentDetailView').style.display = '';
   renderAgentDetailView(agent);
-}
-
-function viewAgentWithHighlight(agent, termsStr) {
-  activeHighlightTerms = termsStr ? termsStr.split('|') : null;
-  currentView = 'detail';
-  selectedAgent = agent;
-  document.getElementById('backBtn').style.display = '';
-  document.getElementById('agentOverview').style.display = 'none';
-  document.getElementById('agentDetailView').style.display = '';
-  renderAgentDetailView(agent);
-  if (activeHighlightTerms) {
-    setTimeout(() => applyHighlights(), 50);
-  }
-}
-
-function applyHighlights() {
-  if (!activeHighlightTerms || !selectedAgent) return;
-  const outputEl = document.getElementById('detail-output-' + selectedAgent);
-  if (!outputEl) return;
-  const text = outputEl.textContent || '';
-  const lines = text.split('\\n');
-  const regex = new RegExp('(' + activeHighlightTerms.join('|') + ')', 'gi');
-  let firstHighlightIdx = -1;
-  const highlighted = lines.map((line, idx) => {
-    if (regex.test(line)) {
-      if (firstHighlightIdx === -1) firstHighlightIdx = idx;
-      regex.lastIndex = 0;
-      return '<span class="highlight-line">' + escapeHtml(line) + '</span>';
-    }
-    return escapeHtml(line);
-  }).join('\\n');
-  outputEl.innerHTML = highlighted;
-  // Scroll to first highlight
-  const firstHL = outputEl.querySelector('.highlight-line');
-  if (firstHL) firstHL.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
 // --- Overview Cards ---
@@ -2189,6 +2171,16 @@ function showNewTeamModal() {
 function hideNewTeamModal() {
   document.getElementById('newTeamModal').style.display = 'none';
   clearModalImages();
+}
+
+function showDetailModal(title, content) {
+  document.getElementById('detailModalTitle').textContent = title;
+  document.getElementById('detailModalContent').textContent = content;
+  document.getElementById('detailModal').style.display = 'flex';
+}
+
+function hideDetailModal() {
+  document.getElementById('detailModal').style.display = 'none';
 }
 
 async function createTeam() {
@@ -2479,6 +2471,7 @@ setTimeout(() => {
 // --- Keyboard shortcuts ---
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
+    if (document.getElementById('detailModal').style.display === 'flex') { hideDetailModal(); return; }
     if (currentView === 'detail') { navigateToOverview(); return; }
     hideNewTeamModal();
   }
@@ -2502,9 +2495,14 @@ document.addEventListener('click', (e) => {
 document.addEventListener('click', (e) => {
   const item = e.target.closest('.feedback-item.clickable');
   if (!item) return;
-  const agent = item.dataset.agent;
-  const terms = item.dataset.terms;
-  if (agent) viewAgentWithHighlight(agent, terms || '');
+  const idx = item.dataset.detailIdx;
+  if (idx !== undefined) {
+    const items = feedbackItems[selectedTeamId] || [];
+    const feedback = items[parseInt(idx)];
+    if (feedback && feedback.detail) {
+      showDetailModal(feedback.title, feedback.detail);
+    }
+  }
 });
 
 `;

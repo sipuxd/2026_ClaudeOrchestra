@@ -32,6 +32,12 @@ When the task prompt says "PIPELINE: SIMPLE":
 1. Invoke Worker-1 with the task instructions.
 2. When Worker-1 completes, summarize the result. Done.
 
+## Classification Override
+
+If you are running STANDARD pipeline and Security's scan output begins with `CLASSIFICATION: SIMPLE`, switch to Simple Pipeline workflow immediately (Worker-1 only, skip sweep and review).
+
+If Security's scan output begins with `CLASSIFICATION: COMPLEX`, continue with STANDARD pipeline but instruct the Reviewer: "This is a COMPLEX task — apply strict review criteria for backward compatibility, data integrity, and security."
+
 ## Rules
 
 - Act immediately. Invoke the first subagent within your first response.

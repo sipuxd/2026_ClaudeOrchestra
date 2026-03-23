@@ -19,15 +19,54 @@ import { execSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { Query, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
-import { Role } from './roles/role-types.js';
+import { Role, type RoleInstance } from './roles/role-types.js';
 import { AgentState } from './types/index.js';
+import type { AgentMessage } from './router/message-types.js';
 import { TeamState, TeamPhase, type TeamStateData, type LoopLimits, DEFAULT_LOOP_LIMITS } from './state/team-state.js';
 import { StatePersistence } from './state/persistence.js';
 import { Registry } from './registry.js';
 import { GitOps } from './git.js';
 import { classifyComplexity } from './router/complexity-router.js';
 import { randomUUID } from 'node:crypto';
-import type { OrchestratorEvents, FeedbackPayload } from './orchestrator.js';
+
+// --- Orchestrator events (shared interface for all event consumers) ---
+
+export interface OrchestratorEvents {
+  'team-created': [teamId: string];
+  'task-assigned': [teamId: string, description: string];
+  'task-classified': [teamId: string, complexity: string, agentCount: number];
+  'phase-transition': [teamId: string, from: TeamPhase, to: TeamPhase, trigger: string];
+  'task-complete': [teamId: string, phase: TeamPhase, durationMs: number];
+  'message-routed': [teamId: string, message: AgentMessage];
+  'agent-output': [teamId: string, instance: RoleInstance, data: string];
+  'agent-progress': [teamId: string, instance: RoleInstance, text: string];
+  'agent-message': [teamId: string, instance: RoleInstance, message: AgentMessage];
+  'agent-crashed': [teamId: string, instance: RoleInstance, code: number | null];
+  'agent-stderr': [teamId: string, instance: RoleInstance, data: string];
+  'agent-respawned': [teamId: string, instance: RoleInstance];
+  'malformed-output': [teamId: string, instance: RoleInstance, raw: string];
+  'deadlock-detected': [teamId: string];
+  'error': [teamId: string, error: Error];
+  'feedback': [teamId: string, feedback: FeedbackPayload];
+  'feedback-response': [teamId: string, feedbackId: string, value: string];
+  'agent-task': [teamId: string, instance: RoleInstance, subtask: string];
+  'tick': [teamId: string];
+  'security-review': [teamId: string, data: { status: string; result?: string }];
+  'shutdown': [];
+}
+
+export interface FeedbackPayload {
+  id: string;
+  type: 'info' | 'warning' | 'question' | 'decision';
+  title: string;
+  message: string;
+  actions?: Array<{ label: string; value: string }>;
+  blocking?: boolean;
+  timestamp: string;
+  sourceAgent?: string;
+  highlightTerms?: string[];
+  detail?: string;
+}
 import {
   DEFAULT_MODELS,
   DEFAULT_DISALLOWED_TOOLS,
@@ -101,10 +140,17 @@ class PromptChannel {
 export type SecurityVerdict = 'APPROVED' | 'FLAGGED' | 'BLOCKED';
 export type ReviewVerdict = 'APPROVED' | 'REVISION_NEEDED' | 'REJECTED';
 export type VerifyVerdict = 'COMPLETE' | 'GAPS_FOUND';
+export type TaskClassification = 'SIMPLE' | 'STANDARD' | 'COMPLEX';
 
 export interface ParsedVerdict<V extends string> {
   verdict: V;
   details: string;
+}
+
+export function parseClassification(scanText: string): TaskClassification {
+  const match = scanText.match(/^CLASSIFICATION:\s*(SIMPLE|STANDARD|COMPLEX)/im);
+  if (match) return match[1].toUpperCase() as TaskClassification;
+  return 'STANDARD';
 }
 
 export function parseSecurityVerdict(text: string): ParsedVerdict<SecurityVerdict> {
@@ -398,7 +444,7 @@ const DEFAULT_PIPELINE_MAX_TURNS: Record<Role, number> = {
 const DEFAULT_PIPELINE_CONFIG = {
   registryPath: './registry.json',
   logDirectory: './logs',
-  rolesDir: './roles/subagent',
+  rolesDir: './agents',
   maxConcurrentTeams: 5,
 };
 
@@ -414,6 +460,8 @@ interface PipelineTeamContext {
   pendingFeedback: Map<string, { resolve: (value: string) => void; feedback: FeedbackPayload }>;
   /** Active final security review session (if running) */
   securityReviewSession?: AgentSession;
+  /** Whether Security-1 classified the task as COMPLEX */
+  isComplex?: boolean;
 }
 
 // --- PipelineOrchestrator ---
@@ -625,7 +673,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     teamId: string,
     ctx: PipelineTeamContext,
     task: string,
-    complexity: 'simple' | 'standard',
+    complexity: 'simple' | 'standard' | 'complex',
     images?: Array<{ media_type: string; data: string }>
   ): Promise<void> {
     if (this.config.skipRequirements) {
@@ -1022,6 +1070,50 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
           );
 
           this.emit('agent-output', teamId, 'Security-1' as any, scanResult);
+
+          // Check if Security-1 classified this task as simpler than the heuristic thought
+          const classification = parseClassification(scanResult);
+          if (classification === 'SIMPLE') {
+            // Downgrade to simple pipeline — close unused sessions
+            worker2.close();
+            reviewer.close();
+            security.close();
+            ctx.sessions = [worker1];
+
+            // Update state to reflect reclassification
+            ctx.state.setTaskComplexity('simple');
+            ctx.state.transitionAgent('Worker-2' as any, AgentState.Done);
+            ctx.state.transitionAgent('Security-1' as any, AgentState.Done);
+            ctx.state.transitionAgent('Reviewer-1' as any, AgentState.Done);
+            this.emit('task-classified', teamId, 'simple', 1);
+            this.persistence.persist(ctx.state);
+
+            this.emit('agent-output', teamId, 'Security-1' as any,
+              `[Pipeline] Security classified task as SIMPLE — running Worker-1 only.`);
+
+            // Run Worker-1 with scan clearance included
+            const fromPhase2 = ctx.state.currentPhase;
+            this.tryTransitionPhase(ctx.state, teamId, fromPhase2, TeamPhase.Work, 'simple pipeline (reclassified)');
+            this.persistence.persist(ctx.state);
+
+            this.emit('agent-task', teamId, 'Worker-1' as any, 'Implementing task (simple)');
+            const simpleResult = await worker1.send(
+              `TASK: ${task}\n\n` +
+              requirementsBlock +
+              `SECURITY CLEARANCE:\n${scanResult}\n\n` +
+              `Implement the assigned work within the cleared scope.`,
+              images
+            );
+            const simpleDisplay = simpleResult.trim() || worker1.lastActivityLog || '(no text output)';
+            this.emit('agent-output', teamId, 'Worker-1' as any, simpleDisplay);
+
+            this.completePipeline(teamId, ctx, startTime);
+            return;
+          }
+
+          if (classification === 'COMPLEX') {
+            ctx.isComplex = true;
+          }
         }
 
         // Inner loop: handles REVISION_NEEDED and BLOCKED verdicts
@@ -1190,6 +1282,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
               `Worker-1 summary:\n${workerResults.w1.substring(0, 2000)}\n\n` +
               `Worker-2 summary:\n${workerResults.w2.substring(0, 2000)}\n\n` +
               `Evaluate the quality and correctness of this work. ` +
+              (ctx.isComplex ? `This is a COMPLEX task — apply strict review criteria for backward compatibility, data integrity, and security. ` : '') +
               `Begin your response with APPROVED, REVISION_NEEDED, or REJECTED.`
             );
 

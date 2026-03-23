@@ -5,28 +5,23 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { Orchestrator, type OrchestraConfig } from './orchestrator.js';
-import { SubagentOrchestrator, type SubagentOrchestraConfig } from './subagent-orchestrator.js';
 import { PipelineOrchestrator, type PipelineOrchestraConfig } from './pipeline-orchestrator.js';
 import { DashboardServer } from './dashboard/index.js';
 import { TeamPhase } from './state/team-state.js';
 import { Role } from './roles/role-types.js';
 import { Logger } from './logger/logger.js';
 
-type AnyOrchestrator = Orchestrator | SubagentOrchestrator | PipelineOrchestrator;
-
 // --- Config Loading ---
 
-function loadConfig(configPath: string): Partial<OrchestraConfig> {
+function loadConfig(configPath: string): Partial<PipelineOrchestraConfig> {
   if (!fs.existsSync(configPath)) return {};
   try {
     const raw = fs.readFileSync(configPath, 'utf-8');
     const parsed = JSON.parse(raw);
-    const config: Partial<OrchestraConfig> = {};
+    const config: Partial<PipelineOrchestraConfig> = {};
 
     if (parsed.engine?.registryPath) config.registryPath = parsed.engine.registryPath;
     if (parsed.engine?.logDirectory) config.logDirectory = parsed.engine.logDirectory;
-    if (parsed.engine?.tickIntervalMs) config.tickIntervalMs = parsed.engine.tickIntervalMs;
     if (parsed.teams?.maxConcurrentTeams) config.maxConcurrentTeams = parsed.teams.maxConcurrentTeams;
     if (parsed.limits?.maxRevisions || parsed.limits?.maxRejections || parsed.limits?.maxTotalBackwardTransitions) {
       config.limits = {
@@ -35,8 +30,6 @@ function loadConfig(configPath: string): Partial<OrchestraConfig> {
         maxTotalBackwardTransitions: parsed.limits.maxTotalBackwardTransitions ?? 5,
       };
     }
-    if (parsed.limits?.maxRespawnsPerAgent) config.maxRespawns = parsed.limits.maxRespawnsPerAgent;
-    if (parsed.limits?.maxMalformedRetries) config.maxMalformedRetries = parsed.limits.maxMalformedRetries;
     if (parsed.models) {
       config.models = {};
       for (const [role, model] of Object.entries(parsed.models)) {
@@ -63,8 +56,6 @@ function loadConfig(configPath: string): Partial<OrchestraConfig> {
         config.maxTurns[role as Role] = turns as number;
       }
     }
-    if (parsed.maxBudgetUsd) config.maxBudgetUsd = parsed.maxBudgetUsd;
-
     return config;
   } catch {
     return {};
@@ -159,7 +150,6 @@ ${colors.bold}Commands:${colors.reset}
   recover                              Recover teams from persisted state
 
 ${colors.bold}Flags:${colors.reset}
-  --mode <legacy|subagent|pipeline>  Orchestration mode (default: legacy)
   --port <n>                 Dashboard port (default: 3460)
   --registry <path>          Registry file path (default: ./registry.json)
   --tick-interval <ms>       Main loop interval (default: 1000)
@@ -168,7 +158,7 @@ ${colors.bold}Flags:${colors.reset}
 `);
 }
 
-function showStatus(orchestrator: AnyOrchestrator, teamId: string): void {
+function showStatus(orchestrator: PipelineOrchestrator, teamId: string): void {
   const status = orchestrator.getTeamStatus(teamId);
   if (!status) {
     logError(`Team "${teamId}" not found`);
@@ -203,7 +193,7 @@ ${colors.bold}Agents:${colors.reset}`);
   console.log();
 }
 
-function showList(orchestrator: AnyOrchestrator): void {
+function showList(orchestrator: PipelineOrchestrator): void {
   const teams = orchestrator.getAllTeams();
   if (teams.length === 0) {
     console.log('No active teams.');
@@ -221,17 +211,8 @@ function showList(orchestrator: AnyOrchestrator): void {
   console.log();
 }
 
-// --- Helper: recover teams across all orchestrator types ---
-
-function recoverTeams(orchestrator: AnyOrchestrator): string[] {
-  if (orchestrator instanceof Orchestrator) {
-    return orchestrator.recover();
-  } else if (orchestrator instanceof SubagentOrchestrator) {
-    return orchestrator.recover();
-  } else if (orchestrator instanceof PipelineOrchestrator) {
-    return orchestrator.recover();
-  }
-  return [];
+function recoverTeams(orchestrator: PipelineOrchestrator): string[] {
+  return orchestrator.recover();
 }
 
 // --- Main ---
@@ -251,9 +232,8 @@ async function main(): Promise<void> {
   const fileConfig = loadConfig(configPath);
 
   // Apply CLI flag overrides
-  const config: Partial<OrchestraConfig> = { ...fileConfig };
+  const config: Partial<PipelineOrchestraConfig> = { ...fileConfig };
   if (parsed.flags['--registry']) config.registryPath = parsed.flags['--registry'];
-  if (parsed.flags['--tick-interval']) config.tickIntervalMs = parseInt(parsed.flags['--tick-interval'], 10);
   if (parsed.flags['--max-teams']) config.maxConcurrentTeams = parseInt(parsed.flags['--max-teams'], 10);
   if (parsed.flags['--model-supervisor']) {
     config.models = config.models ?? {};
@@ -274,42 +254,19 @@ async function main(): Promise<void> {
 
   // Resolve rolesDir relative to CWD
   if (!config.rolesDir) {
-    config.rolesDir = path.resolve('roles');
+    config.rolesDir = path.resolve('agents');
   }
 
-  // Select orchestration mode
-  const mode = parsed.flags['--mode'] ?? 'legacy';
-  let orchestrator: AnyOrchestrator;
-
-  if (mode === 'pipeline') {
-    const pipelineConfig: Partial<PipelineOrchestraConfig> = {
-      registryPath: config.registryPath,
-      rolesDir: path.resolve('roles/subagent'),
-      maxConcurrentTeams: config.maxConcurrentTeams,
-      models: config.models,
-      disallowedTools: config.disallowedTools,
-      maxTurns: config.maxTurns,
-      limits: config.limits,
-    };
-    orchestrator = new PipelineOrchestrator(pipelineConfig);
-    log(`${colors.green}Mode: pipeline${colors.reset} (deterministic code-driven orchestration)`);
-  } else if (mode === 'subagent') {
-    const subagentConfig: Partial<SubagentOrchestraConfig> = {
-      registryPath: config.registryPath,
-      rolesDir: path.resolve('roles/subagent'),
-      maxConcurrentTeams: config.maxConcurrentTeams,
-      models: config.models,
-      disallowedTools: config.disallowedTools,
-      maxTurns: config.maxTurns,
-      maxBudgetUsd: config.maxBudgetUsd,
-      limits: config.limits,
-    };
-    orchestrator = new SubagentOrchestrator(subagentConfig);
-    log(`${colors.purple}Mode: subagent${colors.reset} (SDK-native subagent orchestration)`);
-  } else {
-    orchestrator = new Orchestrator(config);
-    log(`${colors.dim}Mode: legacy${colors.reset} (multi-process orchestration)`);
-  }
+  // Create pipeline orchestrator
+  const orchestrator = new PipelineOrchestrator({
+    registryPath: config.registryPath,
+    rolesDir: path.resolve('agents'),
+    maxConcurrentTeams: config.maxConcurrentTeams,
+    models: config.models,
+    disallowedTools: config.disallowedTools,
+    maxTurns: config.maxTurns,
+    limits: config.limits,
+  });
 
   // Create and attach structured logger
   const logDir = config.logDirectory ?? './logs';
@@ -318,8 +275,7 @@ async function main(): Promise<void> {
     logDirectory: logDir,
     teamsDirectory: path.join(logDir, 'teams'),
   });
-  // Logger.attach() expects Orchestrator but both emit compatible events
-  logger.attach(orchestrator as Orchestrator);
+  logger.attach(orchestrator);
 
   // Signal handling
   let shutdownRequested = false;
@@ -371,14 +327,7 @@ async function main(): Promise<void> {
 
       orchestrator.assignTask(teamId, description);
 
-      // Start the main loop (no-op for subagent/pipeline modes)
-      if (orchestrator instanceof Orchestrator) {
-        log(`${colors.bold}Main loop started${colors.reset} (tick every ${config.tickIntervalMs ?? 1000}ms). Press Ctrl+C to stop.`);
-      } else if (orchestrator instanceof PipelineOrchestrator) {
-        log(`${colors.bold}Pipeline started${colors.reset}. Press Ctrl+C to stop.`);
-      } else {
-        log(`${colors.bold}Subagent query started${colors.reset}. Press Ctrl+C to stop.`);
-      }
+      log(`${colors.bold}Pipeline started${colors.reset}. Press Ctrl+C to stop.`);
       orchestrator.start();
 
       // Auto-exit when task reaches terminal state
@@ -392,12 +341,7 @@ async function main(): Promise<void> {
       });
 
       // Keep process alive until task completes or Ctrl+C
-      await new Promise<void>(() => {
-        // Legacy: process stays alive via tick interval timer.
-        // Subagent: process stays alive via SDK query async generator.
-        // Pipeline: process stays alive via SDK query async generators.
-        // Exit is handled by task-complete or signal handlers.
-      });
+      await new Promise<void>(() => {});
       break;
     }
 
@@ -431,12 +375,6 @@ async function main(): Promise<void> {
     }
 
     case 'dashboard': {
-      // Dashboard mode requires pipeline orchestrator
-      if (mode !== 'pipeline') {
-        logError('Dashboard requires --mode pipeline');
-        process.exit(1);
-      }
-
       const port = parseInt(parsed.flags['--port'] ?? '3460', 10);
 
       // Recover existing teams
@@ -444,7 +382,7 @@ async function main(): Promise<void> {
 
       // Start dashboard server
       const dashboard = new DashboardServer({
-        orchestrator: orchestrator as PipelineOrchestrator,
+        orchestrator,
         port,
       });
 

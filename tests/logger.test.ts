@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { Logger, LogLevel, type LogEntry } from '../src/logger/logger.js';
-import { Orchestrator } from '../src/orchestrator.js';
+import { PipelineOrchestrator } from '../src/pipeline-orchestrator.js';
 import { TeamPhase } from '../src/state/team-state.js';
 
 let tmpDir: string;
@@ -224,11 +224,14 @@ describe('Logger', () => {
 
       const projDir = path.join(tmpDir, 'proj');
       fs.mkdirSync(projDir, { recursive: true });
-      const orchestrator = new Orchestrator({
+      const rolesDir = path.join(tmpDir, 'roles');
+      fs.mkdirSync(rolesDir, { recursive: true });
+      fs.writeFileSync(path.join(rolesDir, 'worker.claude.md'), '# Worker');
+      fs.writeFileSync(path.join(rolesDir, 'security.claude.md'), '# Security');
+      fs.writeFileSync(path.join(rolesDir, 'reviewer.claude.md'), '# Reviewer');
+      const orchestrator = new PipelineOrchestrator({
         registryPath: path.join(tmpDir, 'registry.json'),
-        rolesDir: path.join(tmpDir, 'roles'),
-        claudeBin: 'echo',
-        spawnArgs: ['mock'],
+        rolesDir,
       });
 
       logger.attach(orchestrator);
@@ -253,11 +256,14 @@ describe('Logger', () => {
 
       const projDir = path.join(tmpDir, 'proj2');
       fs.mkdirSync(projDir, { recursive: true });
-      const orchestrator = new Orchestrator({
+      const rolesDir = path.join(tmpDir, 'roles');
+      fs.mkdirSync(rolesDir, { recursive: true });
+      fs.writeFileSync(path.join(rolesDir, 'worker.claude.md'), '# Worker');
+      fs.writeFileSync(path.join(rolesDir, 'security.claude.md'), '# Security');
+      fs.writeFileSync(path.join(rolesDir, 'reviewer.claude.md'), '# Reviewer');
+      const orchestrator = new PipelineOrchestrator({
         registryPath: path.join(tmpDir, 'registry2.json'),
-        rolesDir: path.join(tmpDir, 'roles'),
-        claudeBin: 'echo',
-        spawnArgs: ['mock'],
+        rolesDir,
       });
 
       logger.attach(orchestrator);
@@ -280,11 +286,14 @@ describe('Logger', () => {
         terminal: false,
       });
 
-      const orchestrator = new Orchestrator({
+      const rolesDir = path.join(tmpDir, 'roles');
+      fs.mkdirSync(rolesDir, { recursive: true });
+      fs.writeFileSync(path.join(rolesDir, 'worker.claude.md'), '# Worker');
+      fs.writeFileSync(path.join(rolesDir, 'security.claude.md'), '# Security');
+      fs.writeFileSync(path.join(rolesDir, 'reviewer.claude.md'), '# Reviewer');
+      const orchestrator = new PipelineOrchestrator({
         registryPath: path.join(tmpDir, 'registry3.json'),
-        rolesDir: path.join(tmpDir, 'roles'),
-        claudeBin: 'echo',
-        spawnArgs: ['mock'],
+        rolesDir,
       });
 
       logger.attach(orchestrator);

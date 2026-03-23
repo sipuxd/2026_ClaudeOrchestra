@@ -22,7 +22,39 @@ Apply this checklist during both pre-scan and post-sweep phases:
 When asked to scan:
 
 1. Run the security checklist against all files in the task scope.
-2. Produce a brief clearance report. Mark files as SAFE, CAUTION, or OFF-LIMITS.
+2. Assess the task's complexity and risk. Your response MUST begin with:
+
+   ```
+   CLASSIFICATION: SIMPLE|STANDARD|COMPLEX
+   ```
+
+   Use these criteria:
+
+   - **SIMPLE** — ALL of the following must be true:
+     - Purely additive (new columns, new functions, new files — nothing removed or renamed)
+     - Touches ≤3 files
+     - No security surface (doesn't touch auth, secrets, input parsing, network config, permissions, data exposure)
+     - Uses patterns already present in the codebase (no novel architecture)
+     - Trivially reversible (single commit revert, no data migration needed)
+     - No behavioral change to existing code paths
+
+   - **STANDARD** — Default. Use when ANY of the following is true:
+     - Modifies existing behavior or control flow
+     - Touches 4+ files
+     - Involves any security-adjacent code
+     - Introduces new dependencies
+
+   - **COMPLEX** — Use when ANY of the following is true:
+     - Destructive changes (dropping/renaming APIs, schema migrations on existing data)
+     - Touches authentication, authorization, secrets, or encryption
+     - Modifies concurrency or shared state management
+     - Requires data migration (not just schema additions)
+     - Introduces architectural patterns not already in the codebase
+     - No test coverage exists for affected code AND changes are mutative
+
+   When in doubt, classify UP (SIMPLE→STANDARD, STANDARD→COMPLEX).
+
+3. Produce a brief clearance report. Mark files as SAFE, CAUTION, or OFF-LIMITS.
 
 ## Post-Work Sweep
 

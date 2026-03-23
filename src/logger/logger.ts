@@ -7,7 +7,7 @@ import * as path from 'node:path';
 import { Role, type RoleInstance } from '../roles/role-types.js';
 import { TeamPhase } from '../state/team-state.js';
 import type { AgentMessage } from '../router/message-types.js';
-import type { Orchestrator } from '../orchestrator.js';
+import type { PipelineOrchestrator } from '../pipeline-orchestrator.js';
 
 // --- Log Levels ---
 
@@ -248,7 +248,7 @@ export class Logger {
   /**
    * Wire all orchestrator events to structured log output.
    */
-  attach(orchestrator: Orchestrator): void {
+  attach(orchestrator: PipelineOrchestrator): void {
     orchestrator.on('team-created', (teamId) => {
       this.info('team_created', `Team created: ${teamId}`, { teamId });
     });

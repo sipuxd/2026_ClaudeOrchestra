@@ -175,6 +175,7 @@ export class DashboardServer {
     if (method === 'GET' && pathname === '/events') return this.serveSSE(req, res);
     if (method === 'GET' && pathname === '/api/teams') return this.handleGetTeams(res);
     if (method === 'GET' && pathname === '/api/registry') return this.handleGetRegistry(res);
+    if (method === 'GET' && pathname === '/api/browse') { this.handleBrowseDirectory(url.searchParams.get('path'), res); return; }
 
     // /api/teams/:id patterns — decode URI component for team names with spaces/special chars
     const teamMatch = pathname.match(/^\/api\/teams\/([^/]+)$/);
@@ -556,6 +557,46 @@ ${fileListHtml}
   }
 
   // --- Helpers ---
+
+  private async handleBrowseDirectory(dirPath: string | null, res: http.ServerResponse): Promise<void> {
+    try {
+      const target = dirPath || process.env.HOME || '/';
+      const resolved = path.resolve(target);
+
+      // Security: block traversal outside real directories
+      if (!fs.existsSync(resolved)) {
+        this.sendJSON(res, { error: 'Directory not found' }, 404);
+        return;
+      }
+
+      const stat = fs.statSync(resolved);
+      if (!stat.isDirectory()) {
+        this.sendJSON(res, { error: 'Not a directory' }, 400);
+        return;
+      }
+
+      const entries = fs.readdirSync(resolved, { withFileTypes: true });
+      const dirs: { name: string; path: string; isGitRepo: boolean }[] = [];
+
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        if (entry.name.startsWith('.')) continue; // skip hidden dirs
+        const fullPath = path.join(resolved, entry.name);
+        const isGitRepo = fs.existsSync(path.join(fullPath, '.git'));
+        dirs.push({ name: entry.name, path: fullPath, isGitRepo });
+      }
+
+      dirs.sort((a, b) => a.name.localeCompare(b.name));
+
+      this.sendJSON(res, {
+        current: resolved,
+        parent: path.dirname(resolved) !== resolved ? path.dirname(resolved) : null,
+        directories: dirs,
+      });
+    } catch (err: any) {
+      this.sendJSON(res, { error: err.message }, 500);
+    }
+  }
 
   private readBody(req: http.IncomingMessage): Promise<string> {
     return new Promise<string>((resolve, reject) => {

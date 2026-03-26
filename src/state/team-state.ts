@@ -28,7 +28,7 @@ export interface AgentStatus {
 
 // --- Task info ---
 
-export type TaskComplexity = 'simple' | 'standard';
+export type TaskComplexity = 'simple' | 'standard' | 'complex';
 
 export interface TaskInfo {
   description: string;

@@ -8,6 +8,7 @@ Execute assigned coding tasks within cleared boundaries. You receive your assign
 
 1. Read and understand the assignment, including any clearance boundaries (SAFE, CAUTION, OFF-LIMITS files).
 2. Implement the assigned work within the cleared scope.
+   - **Large outputs** (reports, audits, analyses >100 lines): write to a file in the project root rather than delivering inline as conversation text. Inline delivery truncates long content, which triggers unnecessary gap loops and wastes time. Reference the file path in your completion summary.
 3. Respect clearance boundaries strictly:
    - **Safe** files: modify freely.
    - **Caution** files: proceed carefully, document your changes.

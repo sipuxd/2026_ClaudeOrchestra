@@ -139,7 +139,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => {
 });
 
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
-import { PipelineOrchestrator, parseSecurityVerdict, parseReviewVerdict, parseVerifyVerdict } from '../src/pipeline-orchestrator.js';
+import { PipelineOrchestrator, parseSecurityVerdict, parseReviewVerdict, parseVerifyVerdict, parseClassification } from '../src/pipeline-orchestrator.js';
 
 describe('PipelineOrchestrator', () => {
   let tmpDir: string;
@@ -868,6 +868,45 @@ describe('PipelineOrchestrator', () => {
     it('handles case insensitivity', () => {
       const result = parseVerifyVerdict('gaps_found — missing tests');
       expect(result.verdict).toBe('GAPS_FOUND');
+    });
+  });
+
+  // --- parseClassification ---
+
+  describe('parseClassification', () => {
+    it('parses SIMPLE', () => {
+      const result = parseClassification('CLASSIFICATION: SIMPLE\n\n## Clearance Report...');
+      expect(result).toBe('SIMPLE');
+    });
+
+    it('parses STANDARD', () => {
+      const result = parseClassification('CLASSIFICATION: STANDARD\n\nFiles scanned...');
+      expect(result).toBe('STANDARD');
+    });
+
+    it('parses COMPLEX', () => {
+      const result = parseClassification('CLASSIFICATION: COMPLEX\n\nThis task touches auth...');
+      expect(result).toBe('COMPLEX');
+    });
+
+    it('defaults to STANDARD when missing', () => {
+      const result = parseClassification('All files are safe. No issues found.');
+      expect(result).toBe('STANDARD');
+    });
+
+    it('handles case insensitivity', () => {
+      const result = parseClassification('classification: simple\n\nReport...');
+      expect(result).toBe('SIMPLE');
+    });
+
+    it('finds classification mid-text', () => {
+      const result = parseClassification('Some preamble\nCLASSIFICATION: COMPLEX\n\nDetails...');
+      expect(result).toBe('COMPLEX');
+    });
+
+    it('handles extra whitespace', () => {
+      const result = parseClassification('CLASSIFICATION:   SIMPLE\n\nReport...');
+      expect(result).toBe('SIMPLE');
     });
   });
 });

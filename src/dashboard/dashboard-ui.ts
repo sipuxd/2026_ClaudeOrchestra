@@ -65,7 +65,7 @@ ${CSS}
     <div class="controls-bar" id="controlsBar">
       <div class="controls-actions" id="controlsActions">
         <button class="btn btn-danger" id="stopBtn" onclick="stopCurrentTeam()">Stop</button>
-        <button class="btn btn-security-review" id="securityReviewBtn" onclick="runSecurityReview()" style="display:none">Final Security Review</button>
+        <button class="btn btn-security-review" id="securityReviewBtn" onclick="handleSecurityReviewClick()" style="display:none">Final Security Review</button>
         <button class="btn btn-merge" id="pushMergeBtn" onclick="pushAndMerge()" style="display:none">Push &amp; Merge to Main</button>
         <button class="btn btn-preview" id="previewBtn" onclick="previewProject()" style="display:none">Preview</button>
       </div>
@@ -116,6 +116,7 @@ ${CSS}
     <h3 id="detailModalTitle"></h3>
     <pre class="detail-modal-content" id="detailModalContent"></pre>
     <div class="modal-actions">
+      <span id="detailModalExtra"></span>
       <button class="btn btn-ghost" onclick="hideDetailModal()">Close</button>
     </div>
   </div>
@@ -1488,8 +1489,8 @@ evtSource.addEventListener('agent-output', (e) => {
   const { teamId, instance, text } = JSON.parse(e.data);
   if (!agentOutputs[teamId]) agentOutputs[teamId] = {};
   agentOutputs[teamId][instance] = text;
-  // [Pipeline] and [Q&A] prefixes are status messages — agent is still working
-  const isStatus = text.startsWith('[Pipeline]') || text.startsWith('[Q&A]');
+  // [Pipeline], [Q&A], and [Security Review] prefixes are status messages — agent is still working
+  const isStatus = text.startsWith('[Pipeline]') || text.startsWith('[Q&A]') || text.startsWith('[Security Review]');
   // Clear streaming text when final output arrives (not status messages)
   if (!isStatus) {
     if (agentStreaming[teamId]) agentStreaming[teamId][instance] = '';
@@ -1513,6 +1514,10 @@ evtSource.addEventListener('agent-progress', (e) => {
       const st = panel.querySelector('.agent-status');
       if (st) { st.className = 'agent-status streaming'; st.textContent = 'working...'; }
       panel.classList.add('streaming');
+    }
+    // Re-render overview cards during security review so progress bar updates
+    if (instance === 'Security-1' && (securityReviewState[teamId] || {}).status === 'running' && currentView === 'overview') {
+      renderAgentOverview();
     }
   }
 });
@@ -1565,7 +1570,23 @@ evtSource.addEventListener('security-review', (e) => {
   const data = JSON.parse(e.data);
   const { teamId, status, result } = data;
   securityReviewState[teamId] = { status, result: result || '' };
-  if (teamId === selectedTeamId) renderSecurityReviewBtn();
+  if (status === 'running') {
+    // Start a fresh timer for the security review
+    taskStartTimes[teamId] = Date.now();
+    startTimingInterval(teamId);
+    // Clear Security-1 streaming/output so it shows as active again
+    if (agentStreaming[teamId]) agentStreaming[teamId]['Security-1'] = '';
+    if (agentOutputs[teamId]) delete agentOutputs[teamId]['Security-1'];
+  } else if (status === 'passed' || status === 'concerns' || status === 'idle') {
+    stopTimingInterval(teamId);
+    // Clear streaming state for Security-1
+    if (agentStreaming[teamId]) agentStreaming[teamId]['Security-1'] = '';
+  }
+  if (teamId === selectedTeamId) {
+    renderSecurityReviewBtn();
+    renderAgentOverview();
+    if (status !== 'running') renderTiming(Date.now() - (taskStartTimes[teamId] || Date.now()));
+  }
 });
 
 // --- Image paste/drop/file handlers ---
@@ -1969,6 +1990,13 @@ function getAgentProgress(agent) {
   const isStreaming = streamText.length > 0;
   const isActive = hasText || isStreaming;
 
+  // Security-1 is re-running during security review — not done yet
+  const secReviewRunning = agent === 'Security-1' && (securityReviewState[selectedTeamId] || {}).status === 'running';
+  if (secReviewRunning) {
+    if (!isActive) return 10;
+    return Math.min(90, Math.max(10, Math.floor((streamText.length / 3000) * 90)));
+  }
+
   // Agent has final output and is no longer streaming — it's done
   if (hasText && !isStreaming) return 100;
   // Entire pipeline done
@@ -1987,6 +2015,8 @@ function renderAgentOverview() {
   const complexity = teams[selectedTeamId]?.currentTask?.complexity;
   const isSimple = complexity === 'simple';
 
+  const secReviewRunning = (securityReviewState[selectedTeamId] || {}).status === 'running';
+
   container.innerHTML = AGENTS.map(agent => {
     const skipped = isSimple && agent !== 'Worker-1';
     const color = AGENT_COLORS[agent] || '#8b949e';
@@ -1994,8 +2024,10 @@ function renderAgentOverview() {
     const streamText = streams[agent] || '';
     const hasText = text.length > 0;
     const isStreaming = streamText.length > 0;
-    const isActive = hasText || isStreaming;
-    const agentDone = (hasText && !isStreaming) || (isDone && hasText);
+    // Security-1 is active (not done) while security review is running
+    const isSecReviewing = agent === 'Security-1' && secReviewRunning;
+    const isActive = hasText || isStreaming || isSecReviewing;
+    const agentDone = isSecReviewing ? false : ((hasText && !isStreaming) || (isDone && hasText));
 
     if (skipped) {
       return '<div class="agent-card skipped" style="--agent-color:' + color + ';opacity:0.4;cursor:default">'
@@ -2009,7 +2041,7 @@ function renderAgentOverview() {
     }
 
     const dotClass = agentDone ? 'done' : (isActive ? 'active' : '');
-    const statusText = agentDone ? 'Done' : (isActive ? 'Working...' : 'IDLE');
+    const statusText = agentDone ? 'DONE' : (isSecReviewing ? 'REVIEWING' : (isActive ? 'Working...' : 'IDLE'));
     const statusColor = agentDone ? '#7ee787' : (isActive ? color : '#484f58');
     const progress = getAgentProgress(agent);
     const cardClass = 'agent-card' + (isActive && !agentDone ? ' streaming' : '');
@@ -2042,10 +2074,11 @@ function renderAgentDetailView(agent) {
   const isDone = ['done', 'errored', 'cancelled'].includes(phase);
   const hasText = text.length > 0;
   const isStreaming = streamText.length > 0;
-  const isActive = hasText || isStreaming;
-  const agentDone = (hasText && !isStreaming) || (isDone && hasText);
+  const isSecReviewing = agent === 'Security-1' && (securityReviewState[selectedTeamId] || {}).status === 'running';
+  const isActive = hasText || isStreaming || isSecReviewing;
+  const agentDone = isSecReviewing ? false : ((hasText && !isStreaming) || (isDone && hasText));
   const dotClass = agentDone ? 'done' : (isActive ? 'active' : '');
-  const statusText = agentDone ? 'DONE' : (isActive ? 'Working...' : 'IDLE');
+  const statusText = agentDone ? 'DONE' : (isSecReviewing ? 'REVIEWING' : (isActive ? 'Working...' : 'IDLE'));
   const statusClass = agentDone ? 'done' : (isActive ? 'streaming' : '');
   const streamVisible = isStreaming ? 'visible' : '';
   const contentHtml = '<div class="agent-detail-output" id="detail-output-' + agent + '">' + escapeHtml(truncateOutput(text)) + '</div>'
@@ -2173,9 +2206,10 @@ function hideNewTeamModal() {
   clearModalImages();
 }
 
-function showDetailModal(title, content) {
+function showDetailModal(title, content, extraHtml) {
   document.getElementById('detailModalTitle').textContent = title;
   document.getElementById('detailModalContent').textContent = content;
+  document.getElementById('detailModalExtra').innerHTML = extraHtml || '';
   document.getElementById('detailModal').style.display = 'flex';
 }
 
@@ -2336,16 +2370,25 @@ function renderSecurityReviewBtn() {
   }
 }
 
+function handleSecurityReviewClick() {
+  if (!selectedTeamId) return;
+  const state = securityReviewState[selectedTeamId] || { status: 'idle' };
+  // If review has results, show them in the detail modal
+  if ((state.status === 'passed' || state.status === 'concerns') && state.result) {
+    const title = state.status === 'passed' ? 'Security Review: Passed' : 'Security Review: Concerns Found';
+    showDetailModal(title, state.result,
+      '<button class="btn btn-security-review" onclick="hideDetailModal();runSecurityReview()">Re-run Review</button>');
+    return;
+  }
+  // Otherwise, run the review
+  runSecurityReview();
+}
+
 async function runSecurityReview() {
   if (!selectedTeamId) return;
 
   const state = securityReviewState[selectedTeamId] || { status: 'idle' };
   if (state.status === 'running') return;
-
-  // Allow re-run with confirmation if already reviewed
-  if (state.status === 'passed' || state.status === 'concerns') {
-    if (!confirm('Security review already completed. Run again?')) return;
-  }
 
   securityReviewState[selectedTeamId] = { status: 'running' };
   renderSecurityReviewBtn();

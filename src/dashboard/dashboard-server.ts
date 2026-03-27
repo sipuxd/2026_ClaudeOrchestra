@@ -7,6 +7,7 @@
 import * as http from 'node:http';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { execFile } from 'node:child_process';
 import type { PipelineOrchestrator } from '../pipeline-orchestrator.js';
 import type { RoleInstance } from '../roles/role-types.js';
 import { buildDashboardHTML } from './dashboard-ui.js';
@@ -175,6 +176,7 @@ export class DashboardServer {
     if (method === 'GET' && pathname === '/events') return this.serveSSE(req, res);
     if (method === 'GET' && pathname === '/api/teams') return this.handleGetTeams(res);
     if (method === 'GET' && pathname === '/api/registry') return this.handleGetRegistry(res);
+    if (method === 'POST' && pathname === '/api/pick-directory') { this.handlePickDirectory(res); return; }
 
     // /api/teams/:id patterns — decode URI component for team names with spaces/special chars
     const teamMatch = pathname.match(/^\/api\/teams\/([^/]+)$/);
@@ -556,6 +558,21 @@ ${fileListHtml}
   }
 
   // --- Helpers ---
+
+  private handlePickDirectory(res: http.ServerResponse): void {
+    const script = 'POSIX path of (choose folder with prompt "Select project folder")';
+    execFile('osascript', ['-e', script], { timeout: 60000 }, (err, stdout) => {
+      if (err) {
+        // User cancelled the dialog or timeout
+        this.sendJSON(res, { cancelled: true, path: null });
+        return;
+      }
+      const selected = stdout.trim();
+      // Remove trailing slash from osascript output
+      const cleanPath = selected.endsWith('/') ? selected.slice(0, -1) : selected;
+      this.sendJSON(res, { cancelled: false, path: cleanPath });
+    });
+  }
 
   private readBody(req: http.IncomingMessage): Promise<string> {
     return new Promise<string>((resolve, reject) => {

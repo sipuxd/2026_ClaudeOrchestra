@@ -95,7 +95,13 @@ ${CSS}
     <label>Team Name</label>
     <input type="text" id="modalName" placeholder="my-app" autocomplete="off" />
     <label>Project Path</label>
-    <input type="text" id="modalPath" placeholder="/Users/you/Projects/my-app" autocomplete="off" />
+    <div class="path-picker">
+      <div class="path-picker-display" id="modalPathDisplay" onclick="pickProjectFolder()">
+        <span class="path-picker-placeholder" id="modalPathText">Click to select project folder...</span>
+      </div>
+      <button class="btn btn-ghost path-picker-btn" onclick="pickProjectFolder()" type="button">Browse</button>
+    </div>
+    <input type="hidden" id="modalPath" />
     <label>Task Description</label>
     <div id="modalImagePreviewStrip" class="image-preview-strip" style="display:none"></div>
     <textarea id="modalTask" placeholder="Build a... (paste or drop images)" rows="4"></textarea>
@@ -1205,6 +1211,41 @@ body {
   min-height: 20px;
 }
 
+/* --- Path Picker --- */
+.path-picker {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+  align-items: stretch;
+}
+
+.path-picker-display {
+  flex: 1;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: #c9d1d9;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 0.85rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  min-height: 40px;
+  transition: border-color 0.15s;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.path-picker-display:hover { border-color: #58a6ff; }
+
+.path-picker-placeholder { color: #484f58; }
+
+.path-picker-display.has-path .path-picker-placeholder { color: #c9d1d9; }
+
+.path-picker-btn { flex-shrink: 0; }
+
 /* --- Feedback Bar --- */
 .feedback-bar {
   display: flex;
@@ -2203,7 +2244,34 @@ function showNewTeamModal() {
 
 function hideNewTeamModal() {
   document.getElementById('newTeamModal').style.display = 'none';
+  document.getElementById('modalPathDisplay').classList.remove('has-path');
+  document.getElementById('modalPathText').textContent = 'Click to browse for project folder...';
   clearModalImages();
+}
+
+// --- Native Folder Picker ---
+async function pickProjectFolder() {
+  const display = document.getElementById('modalPathDisplay');
+  const textEl = document.getElementById('modalPathText');
+  const prevText = textEl.textContent;
+  textEl.textContent = 'Opening Finder...';
+
+  try {
+    const res = await fetch('/api/pick-directory', { method: 'POST' });
+    const data = await res.json();
+
+    if (data.cancelled || !data.path) {
+      textEl.textContent = prevText === 'Opening Finder...' ? 'Click to select project folder...' : prevText;
+      return;
+    }
+
+    document.getElementById('modalPath').value = data.path;
+    display.classList.add('has-path');
+    textEl.textContent = data.path;
+  } catch (err) {
+    textEl.textContent = 'Click to select project folder...';
+    display.classList.remove('has-path');
+  }
 }
 
 function showDetailModal(title, content, extraHtml) {

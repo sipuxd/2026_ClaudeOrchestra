@@ -96,10 +96,10 @@ ${CSS}
     <input type="text" id="modalName" placeholder="my-app" autocomplete="off" />
     <label>Project Path</label>
     <div class="path-picker">
-      <div class="path-picker-display" id="modalPathDisplay" onclick="openBrowseModal()">
-        <span class="path-picker-placeholder" id="modalPathText">Click to browse for project folder...</span>
+      <div class="path-picker-display" id="modalPathDisplay" onclick="pickProjectFolder()">
+        <span class="path-picker-placeholder" id="modalPathText">Click to select project folder...</span>
       </div>
-      <button class="btn btn-ghost path-picker-btn" onclick="openBrowseModal()" type="button">Browse</button>
+      <button class="btn btn-ghost path-picker-btn" onclick="pickProjectFolder()" type="button">Browse</button>
     </div>
     <input type="hidden" id="modalPath" />
     <label>Task Description</label>
@@ -124,22 +124,6 @@ ${CSS}
     <div class="modal-actions">
       <span id="detailModalExtra"></span>
       <button class="btn btn-ghost" onclick="hideDetailModal()">Close</button>
-    </div>
-  </div>
-</div>
-
-<div class="modal-overlay" id="browseModal" style="display:none" onclick="if(event.target===this)hideBrowseModal()">
-  <div class="modal browse-modal">
-    <h3>Select Project Folder</h3>
-    <div class="browse-breadcrumb" id="browseBreadcrumb"></div>
-    <div class="browse-list" id="browseList"></div>
-    <div class="browse-selected" id="browseSelected" style="display:none">
-      <span class="browse-selected-icon">&#128193;</span>
-      <span class="browse-selected-path" id="browseSelectedPath"></span>
-    </div>
-    <div class="modal-actions">
-      <button class="btn btn-ghost" onclick="hideBrowseModal()">Cancel</button>
-      <button class="btn btn-primary" id="browseSelectBtn" onclick="confirmBrowseSelection()" disabled>Select</button>
     </div>
   </div>
 </div>
@@ -1262,109 +1246,6 @@ body {
 
 .path-picker-btn { flex-shrink: 0; }
 
-/* --- Browse Modal --- */
-.browse-modal { width: 560px; }
-
-.browse-breadcrumb {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  padding: 8px 12px;
-  background: #0d1117;
-  border: 1px solid #30363d;
-  border-radius: 8px;
-  margin-bottom: 8px;
-  font-size: 0.8rem;
-  color: #8b949e;
-  overflow-x: auto;
-  white-space: nowrap;
-}
-
-.browse-crumb {
-  cursor: pointer;
-  color: #58a6ff;
-  padding: 2px 4px;
-  border-radius: 4px;
-}
-
-.browse-crumb:hover { background: #1f2937; }
-
-.browse-sep { color: #484f58; margin: 0 1px; }
-
-.browse-list {
-  background: #0d1117;
-  border: 1px solid #30363d;
-  border-radius: 8px;
-  max-height: 340px;
-  overflow-y: auto;
-  margin-bottom: 12px;
-}
-
-.browse-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 9px 14px;
-  cursor: pointer;
-  border-bottom: 1px solid #21262d;
-  font-size: 0.88rem;
-  color: #c9d1d9;
-  transition: background 0.1s;
-}
-
-.browse-item:last-child { border-bottom: none; }
-
-.browse-item:hover { background: #1f2937; }
-
-.browse-item.selected { background: #1a3a5c; }
-
-.browse-item-icon { font-size: 1.1rem; flex-shrink: 0; }
-
-.browse-item-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-.browse-item-badge {
-  font-size: 0.65rem;
-  padding: 2px 6px;
-  border-radius: 4px;
-  background: #1f6feb33;
-  color: #58a6ff;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.3px;
-}
-
-.browse-item-back { color: #8b949e; font-style: italic; }
-
-.browse-selected {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 14px;
-  background: #0d1117;
-  border: 1px solid #1f6feb;
-  border-radius: 8px;
-  margin-bottom: 12px;
-  font-family: 'SF Mono', 'Fira Code', monospace;
-  font-size: 0.82rem;
-  color: #58a6ff;
-}
-
-.browse-selected-icon { font-size: 1.2rem; }
-
-.browse-loading {
-  text-align: center;
-  padding: 40px;
-  color: #484f58;
-  font-size: 0.9rem;
-}
-
-.browse-empty {
-  text-align: center;
-  padding: 30px;
-  color: #484f58;
-  font-size: 0.85rem;
-}
-
 /* --- Feedback Bar --- */
 .feedback-bar {
   display: flex;
@@ -2368,117 +2249,29 @@ function hideNewTeamModal() {
   clearModalImages();
 }
 
-// --- Browse Modal ---
-let browseSelectedDir = null;
-
-async function openBrowseModal() {
-  browseSelectedDir = null;
-  document.getElementById('browseSelectBtn').disabled = true;
-  document.getElementById('browseSelected').style.display = 'none';
-  document.getElementById('browseModal').style.display = 'flex';
-  // Start from home directory or existing selection
-  const existing = document.getElementById('modalPath').value;
-  await loadBrowseDirectory(existing || '');
-}
-
-function hideBrowseModal() {
-  document.getElementById('browseModal').style.display = 'none';
-}
-
-async function loadBrowseDirectory(dirPath) {
-  const listEl = document.getElementById('browseList');
-  listEl.innerHTML = '<div class="browse-loading">Loading...</div>';
+// --- Native Folder Picker ---
+async function pickProjectFolder() {
+  const display = document.getElementById('modalPathDisplay');
+  const textEl = document.getElementById('modalPathText');
+  const prevText = textEl.textContent;
+  textEl.textContent = 'Opening Finder...';
 
   try {
-    const url = '/api/browse' + (dirPath ? '?path=' + encodeURIComponent(dirPath) : '');
-    const res = await fetch(url);
+    const res = await fetch('/api/pick-directory', { method: 'POST' });
     const data = await res.json();
 
-    if (!res.ok) {
-      listEl.innerHTML = '<div class="browse-empty">' + escapeHtml(data.error || 'Failed to load') + '</div>';
+    if (data.cancelled || !data.path) {
+      textEl.textContent = prevText === 'Opening Finder...' ? 'Click to select project folder...' : prevText;
       return;
     }
 
-    renderBrowseBreadcrumb(data.current);
-
-    listEl.innerHTML = '';
-
-    // Parent directory link
-    if (data.parent) {
-      const parentEl = document.createElement('div');
-      parentEl.className = 'browse-item browse-item-back';
-      parentEl.innerHTML = '<span class="browse-item-icon">&#128281;</span><span class="browse-item-name" style="color:#8b949e;font-style:italic">..</span>';
-      parentEl.addEventListener('click', () => loadBrowseDirectory(data.parent));
-      listEl.appendChild(parentEl);
-    }
-
-    if (data.directories.length === 0 && !data.parent) {
-      listEl.innerHTML = '<div class="browse-empty">No subdirectories found</div>';
-      return;
-    }
-
-    for (const dir of data.directories) {
-      const itemEl = document.createElement('div');
-      itemEl.className = 'browse-item';
-      itemEl.dataset.path = dir.path;
-      itemEl.innerHTML = '<span class="browse-item-icon">' + (dir.isGitRepo ? '&#128230;' : '&#128193;') + '</span>'
-        + '<span class="browse-item-name">' + escapeHtml(dir.name) + '</span>'
-        + (dir.isGitRepo ? '<span class="browse-item-badge">git</span>' : '');
-      itemEl.addEventListener('click', () => selectBrowseItem(itemEl, dir.path));
-      itemEl.addEventListener('dblclick', () => loadBrowseDirectory(dir.path));
-      listEl.appendChild(itemEl);
-    }
+    document.getElementById('modalPath').value = data.path;
+    display.classList.add('has-path');
+    textEl.textContent = data.path;
   } catch (err) {
-    listEl.innerHTML = '<div class="browse-empty">Error: ' + escapeHtml(err.message) + '</div>';
+    textEl.textContent = 'Click to select project folder...';
+    display.classList.remove('has-path');
   }
-}
-
-function renderBrowseBreadcrumb(currentPath) {
-  const el = document.getElementById('browseBreadcrumb');
-  el.innerHTML = '';
-
-  const rootCrumb = document.createElement('span');
-  rootCrumb.className = 'browse-crumb';
-  rootCrumb.textContent = '/ ';
-  rootCrumb.addEventListener('click', () => loadBrowseDirectory('/'));
-  el.appendChild(rootCrumb);
-
-  const parts = currentPath.split('/').filter(Boolean);
-  let accumulated = '';
-  for (let i = 0; i < parts.length; i++) {
-    accumulated += '/' + parts[i];
-
-    const sep = document.createElement('span');
-    sep.className = 'browse-sep';
-    sep.innerHTML = '&#8250;';
-    el.appendChild(sep);
-
-    const crumb = document.createElement('span');
-    crumb.className = 'browse-crumb';
-    crumb.textContent = parts[i];
-    const crumbPath = accumulated;
-    crumb.addEventListener('click', () => loadBrowseDirectory(crumbPath));
-    el.appendChild(crumb);
-  }
-}
-
-function selectBrowseItem(el, dirPath) {
-  // Deselect previous
-  document.querySelectorAll('.browse-item.selected').forEach(function(e) { e.classList.remove('selected'); });
-  el.classList.add('selected');
-  browseSelectedDir = dirPath;
-  document.getElementById('browseSelected').style.display = 'flex';
-  document.getElementById('browseSelectedPath').textContent = dirPath;
-  document.getElementById('browseSelectBtn').disabled = false;
-}
-
-function confirmBrowseSelection() {
-  if (!browseSelectedDir) return;
-  document.getElementById('modalPath').value = browseSelectedDir;
-  const display = document.getElementById('modalPathDisplay');
-  display.classList.add('has-path');
-  document.getElementById('modalPathText').textContent = browseSelectedDir;
-  hideBrowseModal();
 }
 
 function showDetailModal(title, content, extraHtml) {
@@ -2789,7 +2582,6 @@ setTimeout(() => {
 // --- Keyboard shortcuts ---
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
-    if (document.getElementById('browseModal').style.display === 'flex') { hideBrowseModal(); return; }
     if (document.getElementById('detailModal').style.display === 'flex') { hideDetailModal(); return; }
     if (currentView === 'detail') { navigateToOverview(); return; }
     hideNewTeamModal();

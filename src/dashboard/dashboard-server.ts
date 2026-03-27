@@ -7,6 +7,7 @@
 import * as http from 'node:http';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { execFile } from 'node:child_process';
 import type { PipelineOrchestrator } from '../pipeline-orchestrator.js';
 import type { RoleInstance } from '../roles/role-types.js';
 import { buildDashboardHTML } from './dashboard-ui.js';
@@ -175,7 +176,7 @@ export class DashboardServer {
     if (method === 'GET' && pathname === '/events') return this.serveSSE(req, res);
     if (method === 'GET' && pathname === '/api/teams') return this.handleGetTeams(res);
     if (method === 'GET' && pathname === '/api/registry') return this.handleGetRegistry(res);
-    if (method === 'GET' && pathname === '/api/browse') { this.handleBrowseDirectory(url.searchParams.get('path'), res); return; }
+    if (method === 'POST' && pathname === '/api/pick-directory') { this.handlePickDirectory(res); return; }
 
     // /api/teams/:id patterns — decode URI component for team names with spaces/special chars
     const teamMatch = pathname.match(/^\/api\/teams\/([^/]+)$/);
@@ -558,44 +559,19 @@ ${fileListHtml}
 
   // --- Helpers ---
 
-  private async handleBrowseDirectory(dirPath: string | null, res: http.ServerResponse): Promise<void> {
-    try {
-      const target = dirPath || process.env.HOME || '/';
-      const resolved = path.resolve(target);
-
-      // Security: block traversal outside real directories
-      if (!fs.existsSync(resolved)) {
-        this.sendJSON(res, { error: 'Directory not found' }, 404);
+  private handlePickDirectory(res: http.ServerResponse): void {
+    const script = 'POSIX path of (choose folder with prompt "Select project folder")';
+    execFile('osascript', ['-e', script], { timeout: 60000 }, (err, stdout) => {
+      if (err) {
+        // User cancelled the dialog or timeout
+        this.sendJSON(res, { cancelled: true, path: null });
         return;
       }
-
-      const stat = fs.statSync(resolved);
-      if (!stat.isDirectory()) {
-        this.sendJSON(res, { error: 'Not a directory' }, 400);
-        return;
-      }
-
-      const entries = fs.readdirSync(resolved, { withFileTypes: true });
-      const dirs: { name: string; path: string; isGitRepo: boolean }[] = [];
-
-      for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
-        if (entry.name.startsWith('.')) continue; // skip hidden dirs
-        const fullPath = path.join(resolved, entry.name);
-        const isGitRepo = fs.existsSync(path.join(fullPath, '.git'));
-        dirs.push({ name: entry.name, path: fullPath, isGitRepo });
-      }
-
-      dirs.sort((a, b) => a.name.localeCompare(b.name));
-
-      this.sendJSON(res, {
-        current: resolved,
-        parent: path.dirname(resolved) !== resolved ? path.dirname(resolved) : null,
-        directories: dirs,
-      });
-    } catch (err: any) {
-      this.sendJSON(res, { error: err.message }, 500);
-    }
+      const selected = stdout.trim();
+      // Remove trailing slash from osascript output
+      const cleanPath = selected.endsWith('/') ? selected.slice(0, -1) : selected;
+      this.sendJSON(res, { cancelled: false, path: cleanPath });
+    });
   }
 
   private readBody(req: http.IncomingMessage): Promise<string> {

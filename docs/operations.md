@@ -1,164 +1,81 @@
 # ClaudeOrchestra — Operations
 
-> Source of truth for health checks, graceful shutdown, signal
-> handling, resource management, structured logging, and
-> observability.
+> Source of truth for health monitoring, graceful shutdown,
+> signal handling, resource management, structured logging,
+> and observability.
 >
 > **Cross-references:**
 > - [State Machine](./state-machine.md) — timeout values,
 >   error states
-> - [Architecture](./architecture.md) — agent lifecycle
+> - [Architecture](./architecture.md) — pipeline topology
 > - [Implementation Plan](../implementation-plan.md) — build
 >   milestones
 
 ---
 
-## Health Checks
+## Health Monitoring
 
-### Agent Health Model
+### Pipeline-Driven Model
 
-Each agent's health is determined by three signals:
+ClaudeOrchestra does NOT use a tick-based health check loop.
+The pipeline is sequential and deterministic — the engine
+knows exactly which agent is active at any point because it
+drives the conversation directly via SDK `query()` calls.
 
-| Signal | Method | Interval |
-|--------|--------|----------|
-| **Process alive** | PID check (`kill(pid, 0)`) | Every tick (1s) |
-| **Responsive** | Message activity tracking | Continuous |
-| **Output valid** | JSON parse success rate | Per message |
+Health is monitored implicitly:
 
-### Process Health
+| Signal | Method | When |
+|--------|--------|------|
+| **Session alive** | SDK query resolves or rejects | Per prompt |
+| **Response valid** | Verdict parser succeeds | Per agent response |
+| **Pipeline progress** | Phase transitions occur | Per step |
 
-The spawner monitors each agent's child process:
+### Error Detection
 
-- **Alive check:** On every `tick()`, verify the PID is still
-  running via `kill(pid, 0)` (signal 0 = check existence).
-- **Exit detection:** Listen for the `exit` event on the child
-  process. Log exit code and signal.
-- **Crash detection:** If a process exits unexpectedly (exit
-  code !== 0), mark the agent as `errored`.
+Errors are detected when:
 
-### Responsiveness
+1. **SDK query rejects** — agent session crashed or timed out.
+   The pipeline catches the error, marks the team as `errored`,
+   and surfaces it to the dashboard.
+2. **Verdict parse fails** — agent response doesn't contain
+   a recognizable verdict. Review verdict defaults to
+   `REVISION_NEEDED` (conservative). Security and verify
+   verdicts fail explicitly.
+3. **Loop limits exceeded** — backward transitions exceed
+   configured maximums. The state machine throws a
+   `TransitionError` and the pipeline transitions to `errored`.
 
-An agent is considered "responsive" if it has produced output
-(stdout data) within the silence threshold:
+### Dashboard Observability
 
-| Role | Silence Threshold | During Phase |
-|------|------------------|--------------|
-| Worker | 5 minutes | Work |
-| Worker | 2 minutes | Pre-Work (should respond quickly) |
-| Security Agent | 3 minutes | Any active phase |
-| Supervisor | 3 minutes | Any phase |
-| Reviewer | 5 minutes | Review |
+The pipeline emits events for real-time dashboard updates via
+SSE:
 
-**Action on silence exceeded:**
-1. Supervisor sends `check-in` to silent Workers.
-2. For non-Worker roles, log a warning.
-3. If silence persists for 2x the threshold, mark agent as
-   potentially unhealthy and surface to human as `high`
-   priority.
-4. If silence persists for 3x the threshold, mark agent as
-   `errored`.
-
-### Output Validity
-
-Track the ratio of valid to malformed messages per agent:
-
-- **Healthy:** 0-1 malformed messages in last 10
-- **Warning:** 2 malformed messages in last 10
-- **Unhealthy:** 3+ consecutive malformed messages → agent
-  marked as `errored`
-
-See [Roles & JTBD — Output Format Enforcement](./roles-and-jtbd.md#agent-output-format-enforcement)
-for the retry protocol on malformed output.
+- `agent-output` — raw agent response text
+- `agent-progress` — streaming progress during long operations
+- `agent-task` — current subtask label for each agent
+- `phase-transition` — phase changes with trigger description
+- `feedback` — notifications and blocking questions
+- `error` — pipeline failures
 
 ---
 
-## Crash Recovery
-
-### Agent Crash Recovery
-
-When an agent process crashes (exits unexpectedly):
-
-1. **Detect:** Spawner receives `exit` event with non-zero
-   code.
-2. **Log:** Record crash details — exit code, signal, last
-   stdout/stderr output.
-3. **Assess:** Check respawn budget:
-   - Each agent gets **3 respawn attempts** per task.
-   - If budget exhausted, mark agent as `errored` and
-     escalate to human.
-4. **Respawn:** If budget allows:
-   a. Spawn a new CLI instance with the same CLAUDE.md and
-      environment variables.
-   b. Inject a **recovery prompt** summarizing:
-      - The current task and phase
-      - The agent's last known state
-      - Recent messages from its inbox (last 5)
-      - What the agent was working on (from last
-        `progress-update` or similar)
-   c. Set agent state to `active`.
-   d. Decrement respawn budget.
-5. **Resume:** The respawned agent continues from the
-   recovery prompt. It does not have the previous instance's
-   context window — it starts fresh with the recovery summary.
-
-### Engine Crash Recovery
-
-If the orchestrator process itself crashes:
-
-1. **On restart:** The engine scans `data/teams/` for
-   existing team directories.
-2. **For each team with `state.json`:**
-   a. Read the persisted state.
-   b. If `currentPhase` is a non-terminal state (not `done`,
-      `cancelled`, or `errored`):
-      - Check if agent PIDs are still alive.
-      - For alive agents: attempt to reconnect (may not be
-        possible if stdin pipe is broken — in that case,
-        terminate and respawn).
-      - For dead agents: respawn with recovery prompts.
-      - Resume the `tick()` loop.
-   c. If `currentPhase` is terminal: skip (team is finished).
-3. **Message bus recovery:**
-   - Clean up orphaned temp files (`.tmp-*`).
-   - Rebuild the deduplication set from existing messages.
-   - Process any unacknowledged messages in inboxes.
-
-### Data Recovery Priority
-
-| Data | Recovery Method | Reliability |
-|------|----------------|-------------|
-| Team phase | Read from `state.json` | High (forced write on transitions) |
-| Loop counters | Read from `state.json` | High (written with phase) |
-| Agent states | Read from `state.json` | Medium (may be up to 1s stale) |
-| Pending messages | Scan inbox directories | High (individual files on disk) |
-| Agent context | Lost — reconstructed via recovery prompt | Low (summarized, not exact) |
-| In-flight work | Depends on Claude Code CLI | Variable (CLI may have written files) |
-
----
-
-## Graceful Shutdown Protocol
+## Shutdown Protocol
 
 ### Engine Shutdown (SIGTERM / SIGINT)
 
 When the orchestrator receives a termination signal:
 
 1. **Signal handler fires** — set a `shuttingDown` flag.
-2. **Stop accepting new tasks** — reject any `create-team`
-   or `assign-task` calls.
-3. **For each active team:**
-   a. Persist current `state.json` (forced, synchronous
-      write).
-   b. Send each agent a **shutdown prompt** via stdin:
-      "The orchestrator is shutting down. Please finish your
-      current operation and save your progress. You will be
-      terminated shortly."
-   c. Wait up to **5 seconds** for agents to finish.
-   d. Send `SIGTERM` to each agent process.
-   e. Wait up to **3 seconds** for graceful exit.
-   f. Send `SIGKILL` to any agents still running.
+2. **Stop accepting new tasks** — reject any new team
+   creation or task assignment.
+3. **Close all agent sessions:**
+   a. Close each `PromptChannel` (signals SDK to stop).
+   b. Abort any in-flight `query()` calls.
+   c. Persist final `state.json` for each team.
 4. **Clean up:**
    - Flush all log buffers.
    - Close file handles.
+   - Stop the HTTP dashboard server.
    - Exit with code 0.
 
 ### Team Shutdown (Single Team)
@@ -167,33 +84,17 @@ When `terminateTeam(teamId)` is called:
 
 1. Set team phase to the appropriate terminal state
    (`cancelled` if mid-task, `done` if task complete).
-2. Send shutdown prompt to each agent (same as above).
-3. Follow the same SIGTERM → wait → SIGKILL sequence.
-4. Archive all messages to `messages/archive/`.
-5. Persist final `state.json`.
-6. Remove the team from the active team list.
-
-### Agent Shutdown (Single Agent)
-
-When a single agent needs to be terminated (e.g., to respawn):
-
-1. Send a shutdown prompt via stdin.
-2. Wait 3 seconds.
-3. Send SIGTERM.
-4. Wait 2 seconds.
-5. Send SIGKILL if still alive.
-6. Update agent state in team state store.
+2. Close all agent sessions for the team.
+3. Persist final `state.json`.
+4. Remove the team from the active team map.
 
 ### Signal Handling
-
-Register handlers for:
 
 | Signal | Action |
 |--------|--------|
 | `SIGTERM` | Graceful shutdown (full protocol above) |
 | `SIGINT` (Ctrl+C) | Same as SIGTERM |
-| `SIGINT` x2 (double Ctrl+C) | Immediate SIGKILL all agents, exit |
-| `SIGHUP` | Ignore (daemon mode) or graceful shutdown |
+| `SIGINT` x2 (double Ctrl+C) | Immediate force exit |
 
 ```typescript
 let shutdownRequested = false;
@@ -201,8 +102,6 @@ let shutdownRequested = false;
 process.on('SIGTERM', gracefulShutdown);
 process.on('SIGINT', () => {
   if (shutdownRequested) {
-    // Second Ctrl+C — force kill
-    forceKillAll();
     process.exit(1);
   }
   shutdownRequested = true;
@@ -218,22 +117,19 @@ process.on('SIGINT', () => {
 
 | Resource | Limit | Rationale |
 |----------|-------|-----------|
-| Max concurrent teams | 5 | Each team = 5 agents = 5 child processes. 25 processes is a reasonable ceiling for a dev machine. |
-| Max agents total | 25 | 5 teams x 5 agents |
-| Max open file descriptors | System default (~256 on macOS) | May need `ulimit -n` increase for 3+ teams |
+| Max concurrent teams | 5 | Each team = up to 4 SDK sessions. 20 sessions is a reasonable ceiling. |
+| Max agent sessions total | 20 | 5 teams x 4 agents |
 
 If the user attempts to create a team beyond the limit, the
-engine rejects with a clear error message suggesting they
-terminate an existing team first.
+engine rejects with a clear error message.
 
 ### Filesystem Usage
 
 | Directory | Growth Pattern | Cleanup |
 |-----------|---------------|---------|
-| `messages/inbox/{agent}/` | Grows during task, cleared on acknowledge | Automatic |
-| `messages/archive/` | Grows indefinitely per task | Manual (or per-team on termination) |
-| `reports/` | Grows during task | Manual |
+| `.claude-orchestra/teams/{id}/` | Per-team runtime data | Automatic on team termination |
 | `state.json` | Fixed size, overwritten | Automatic |
+| `registry.json` (engine repo) | Grows with team count | Manual |
 
 **Disk space monitoring:** The engine checks available disk
 space on startup. If less than 100 MB is available, log a
@@ -254,13 +150,9 @@ machine parsing).
   "timestamp": "ISO-8601",
   "level": "info | warn | error | debug",
   "teamId": "team-uuid",
-  "phase": "pre-work | work | handoff | review",
-  "roleSource": "Worker",
-  "roleSourceInstance": "Worker-1",
-  "roleTarget": "Supervisor",
-  "messageId": "msg-uuid",
-  "flag": "progress-update",
-  "event": "message_sent | message_received | phase_transition | agent_spawned | agent_errored | timeout | deadlock | ...",
+  "phase": "pre_work | work | handoff | review",
+  "role": "Worker-1",
+  "event": "phase_transition | agent_output | verdict_parsed | pipeline_complete | ...",
   "message": "Human-readable description",
   "data": {}
 }
@@ -272,11 +164,11 @@ Terminal output uses role-specific colors for scanability:
 
 | Role | Color | ANSI Code |
 |------|-------|-----------|
-| Supervisor | Blue | `\x1b[34m` |
-| Worker | Green | `\x1b[32m` |
+| Worker-1 | Green | `\x1b[32m` |
+| Worker-2 | Green | `\x1b[32m` |
 | Security | Red | `\x1b[31m` |
 | Reviewer | Yellow/Amber | `\x1b[33m` |
-| Human/System | Purple | `\x1b[35m` |
+| System | Purple | `\x1b[35m` |
 | Error | Bright Red | `\x1b[91m` |
 
 ### Event Types
@@ -285,37 +177,36 @@ Terminal output uses role-specific colors for scanability:
 |-------|-------|-------------|
 | `team_created` | info | New team initialized |
 | `task_assigned` | info | Task assigned to team |
-| `agent_spawned` | info | CLI instance started |
-| `agent_errored` | error | Agent crashed or malformed output |
-| `agent_respawned` | warn | Agent respawned after crash |
-| `message_sent` | debug | Message written to inbox |
-| `message_received` | debug | Message read from inbox |
-| `message_malformed` | warn | Agent produced unparseable output |
+| `task_classified` | info | Complexity classification result |
 | `phase_transition` | info | Team moved to new phase |
-| `timeout_warning` | warn | Message or phase timeout approaching |
-| `timeout_exceeded` | error | Timeout limit reached |
-| `deadlock_detected` | error | All agents blocked |
+| `agent_output` | debug | Agent response text |
+| `agent_progress` | debug | Streaming progress text |
+| `verdict_parsed` | info | Security/review/verify verdict extracted |
+| `pipeline_complete` | info | Task finished successfully |
+| `pipeline_error` | error | Pipeline failed |
 | `loop_limit_reached` | error | Revision/rejection max exceeded |
+| `feedback_sent` | info | Notification sent to dashboard |
+| `feedback_blocking` | info | Blocking question sent, pipeline paused |
+| `feedback_response` | info | User responded to blocking question |
 | `shutdown_initiated` | info | Graceful shutdown started |
-| `health_check_failed` | warn | Agent unresponsive |
-| `validation_error` | warn | Invalid message rejected |
+| `auto_commit` | info | Git auto-commit at checkpoint |
 
 ### Log Files
 
 | File | Contents | Rotation |
 |------|----------|----------|
-| `data/logs/orchestra.log` | All events, JSON format | Rotate at 10 MB |
-| `data/logs/orchestra.error.log` | Error events only | Rotate at 5 MB |
-| `data/teams/{team-id}/team.log` | Team-specific events | Per task, no rotation |
+| `orchestra.log` | All events, JSON format | Rotate at 10 MB |
+| `orchestra.error.log` | Error events only | Rotate at 5 MB |
+| Per-team logs | Team-specific events | Per task, no rotation |
 
 ### Log Levels
 
 | Level | When to Use |
 |-------|-------------|
-| `debug` | Individual message sends/receives, internal state changes |
-| `info` | Phase transitions, team creation, task assignment, agent lifecycle |
-| `warn` | Timeouts approaching, malformed output, health check concerns, validation errors |
-| `error` | Crashes, deadlocks, loop limits, timeouts exceeded, unrecoverable failures |
+| `debug` | Agent output, streaming progress, internal state |
+| `info` | Phase transitions, team creation, task assignment, verdicts, auto-commits |
+| `warn` | Conservative verdict defaults, reclassification |
+| `error` | Pipeline failures, loop limits, SDK errors |
 
 ---
 
@@ -330,43 +221,22 @@ overrides for common settings.
 ```json
 {
   "engine": {
-    "tickIntervalMs": 1000,
-    "dataDirectory": "./data",
-    "logDirectory": "./data/logs"
+    "dataDirectory": ".claude-orchestra",
+    "logDirectory": ".claude-orchestra/logs"
   },
   "teams": {
     "maxConcurrentTeams": 5
   },
   "models": {
-    "Supervisor": "claude-sonnet-4-6",
-    "Worker": "claude-haiku-4-5",
+    "Worker": "claude-opus-4-6",
     "Security": "claude-opus-4-6",
-    "Reviewer": "claude-sonnet-4-6"
-  },
-  "timeouts": {
-    "messageDefault": 180000,
-    "phasePre_work": 900000,
-    "phaseWork": 3600000,
-    "phaseHandoff": 600000,
-    "phaseReview": 900000,
-    "silenceWorker": 300000,
-    "silenceSecurity": 180000,
-    "silenceSupervisor": 180000,
-    "silenceReviewer": 300000
+    "Reviewer": "claude-opus-4-6"
   },
   "limits": {
     "maxRevisions": 3,
     "maxRejections": 2,
     "maxTotalBackwardTransitions": 5,
-    "maxRespawnsPerAgent": 3,
-    "maxMalformedRetries": 3
-  },
-  "context": {
-    "freshContextOnRevision": true,
-    "maxInboxMessagesInjected": 10,
-    "maxThreadMessagesInjected": 5,
-    "messageContentMaxChars": 8000,
-    "messageTotalMaxBytes": 16384
+    "maxVerifyPasses": 2
   },
   "costBudget": {
     "warningThreshold": 10,
@@ -380,9 +250,7 @@ overrides for common settings.
 | Flag | Config Path | Description |
 |------|------------|-------------|
 | `--data-dir <path>` | `engine.dataDirectory` | Data directory location |
-| `--tick-interval <ms>` | `engine.tickIntervalMs` | Main loop interval |
 | `--max-teams <n>` | `teams.maxConcurrentTeams` | Max concurrent teams |
-| `--model-supervisor <id>` | `models.Supervisor` | Supervisor model |
 | `--model-worker <id>` | `models.Worker` | Worker model |
 | `--model-security <id>` | `models.Security` | Security model |
 | `--model-reviewer <id>` | `models.Reviewer` | Reviewer model |
@@ -393,6 +261,6 @@ overrides for common settings.
 
 | Variable | Description | Required |
 |----------|-------------|----------|
-| `ANTHROPIC_API_KEY` | API key for Claude models | Yes |
+| `ANTHROPIC_API_KEY` | API key for Claude models | Yes (unless using Claude Max) |
 | `CLAUDE_ORCHESTRA_LOG_LEVEL` | Override log level (debug/info/warn/error) | No (default: info) |
 | `CLAUDE_ORCHESTRA_CONFIG` | Path to config file | No (default: ./orchestra.config.json) |

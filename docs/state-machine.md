@@ -1,14 +1,12 @@
 # ClaudeOrchestra — Workflow State Machine
 
 > Source of truth for all workflow states, transitions,
-> preconditions, timeouts, loop limits, error handling,
-> cancellation, and deadlock detection.
+> preconditions, loop limits, and error handling.
 >
 > **Cross-references:**
-> - [Message Contract](./message-contract.md) — transitions
->   are triggered by messages
-> - [Operations](./operations.md) — timeout values, health
->   check integration
+> - [Architecture](./architecture.md) — pipeline topology
+> - [Operations](./operations.md) — health monitoring,
+>   shutdown protocol
 
 ---
 
@@ -16,25 +14,28 @@
 
 ```mermaid
 stateDiagram-v2
-    [*] --> pre_work : task assigned
+    [*] --> pre_work : task assigned (standard)
+    [*] --> work : task assigned (simple)
 
-    pre_work --> work : clearance received + workers accepted
-    pre_work --> errored : timeout / agent failure
+    pre_work --> work : security scan complete
+    pre_work --> work : security reclassifies as SIMPLE
+    pre_work --> errored : SDK error / loop limit
     pre_work --> cancelled : human cancels
 
-    work --> handoff : all workers complete
-    work --> errored : timeout / agent failure
+    work --> handoff : workers complete (standard)
+    work --> done : worker complete (simple)
+    work --> errored : SDK error / loop limit
     work --> cancelled : human cancels
 
-    handoff --> review : security approved
-    handoff --> work : security blocked → revision
-    handoff --> errored : timeout / agent failure
+    handoff --> review : security APPROVED/FLAGGED
+    handoff --> work : security BLOCKED → revision
+    handoff --> errored : SDK error / loop limit
     handoff --> cancelled : human cancels
 
-    review --> done : reviewer approved
-    review --> work : reviewer revise
-    review --> pre_work : reviewer rejected
-    review --> errored : timeout / agent failure
+    review --> done : reviewer APPROVED
+    review --> work : reviewer REVISION_NEEDED
+    review --> pre_work : reviewer REJECTED
+    review --> errored : SDK error / loop limit
     review --> cancelled : human cancels
 
     done --> [*]
@@ -50,11 +51,11 @@ stateDiagram-v2
 
 | State | Description |
 |-------|-------------|
-| `pre_work` | Supervisor received task, Security scanning, planning in progress |
-| `work` | Workers executing, Supervisor directing |
-| `handoff` | Workers done, Security sweeping completed output |
+| `pre_work` | Security Agent scanning project, producing clearance report |
+| `work` | Worker-1 implementing, Worker-2 verifying requirements |
+| `handoff` | Security Agent sweeping completed output |
 | `review` | Reviewer evaluating security-cleared work |
-| `done` | Task approved by Reviewer, all agents idle |
+| `done` | Task approved, sessions kept alive for Q&A |
 | `errored` | Unrecoverable failure, requires human intervention |
 | `cancelled` | Task cancelled by human orchestrator |
 
@@ -63,11 +64,35 @@ stateDiagram-v2
 `done`, `cancelled`, and `errored` (if not retried) are
 terminal states. When a team reaches a terminal state:
 
-1. All agent processes are sent a termination signal
-   (see [Operations — Graceful Shutdown](./operations.md#graceful-shutdown-protocol))
-2. Final `state.json` is persisted
-3. Message bus inboxes are archived (not deleted)
-4. Team is marked inactive in the orchestrator
+1. Final `state.json` is persisted
+2. Agent sessions are kept alive (done) or closed (errored/
+   cancelled)
+3. Team is marked inactive in the orchestrator
+
+---
+
+## Two Pipeline Paths
+
+### Simple Pipeline
+
+For tasks classified as simple by the heuristic router or
+reclassified as SIMPLE by Security during pre-scan:
+
+```
+Work → Done
+```
+
+Only Worker-1 participates. No Security sweep, no Review.
+
+### Standard Pipeline
+
+For tasks classified as standard or complex:
+
+```
+PreWork → Work → Handoff → Review → Done
+```
+
+All 4 agents participate. Supports backward transitions.
 
 ---
 
@@ -78,306 +103,184 @@ the team's phase state.
 
 | State | Description |
 |-------|-------------|
-| `spawning` | CLI process starting up |
-| `active` | Executing work or processing messages |
-| `idle` | Waiting for work (role not needed in current phase) |
-| `blocked` | Cannot proceed, waiting on another agent or human |
-| `waiting` | Sent a message with `requiresResponse: true`, awaiting reply |
-| `done` | Completed current phase's work |
-| `errored` | Process crashed, output malformed, or timeout exceeded |
+| `Spawning` | SDK session initializing |
+| `Active` | Processing a prompt or executing work |
+| `Idle` | Waiting for the pipeline to reach this agent's step |
+| `Blocked` | Cannot proceed (loop limit, SDK error) |
+| `Waiting` | Awaiting a response (used for blocking feedback) |
+| `Done` | Completed current work |
+| `Errored` | Session crashed or produced invalid output |
 
 ### Valid Agent State Transitions
 
 ```
-spawning → active | errored
-active   → idle | blocked | waiting | done | errored
-idle     → active | errored
-blocked  → active (when unblocked) | errored
-waiting  → active (when response received) | errored (timeout)
-done     → active (next phase begins) | idle
-errored  → spawning (respawn attempt)
+Spawning → Active | Errored
+Active   → Idle | Blocked | Waiting | Done | Errored
+Idle     → Active | Errored
+Blocked  → Active (when unblocked) | Errored
+Waiting  → Active (when response received) | Errored
+Done     → Active (next step) | Idle
+Errored  → Spawning (session recreated)
 ```
 
 ---
 
 ## Phase Transitions
 
-### Pre-Work → Work
+### PreWork → Work
 
-**Preconditions (ALL must be true):**
-1. Security Agent has sent `clearance-report` to Supervisor
-2. Supervisor has sent `task-assignment` to all Workers
-3. All Workers have sent `task-accepted` to Supervisor
+**Trigger:** Security Agent's scan response is parsed.
 
-**Triggered by:** Last Worker's `task-accepted` message
-processed.
-
-**Engine actions on transition:**
+**Engine actions:**
+- Parse classification (SIMPLE/STANDARD/COMPLEX)
+- If SIMPLE: downgrade to simple pipeline, close unused
+  sessions, skip to Work → Done
+- If STANDARD/COMPLEX: proceed to Work with all agents
 - Update team phase to `work`
-- Set Worker states to `active`
-- Log phase transition event
 
-### Work → Handoff
+### Work → Handoff (Standard Pipeline)
 
-**Preconditions (ALL must be true):**
-1. All Workers have sent `task-complete` to Supervisor
-2. No Workers are in `blocked` state
+**Trigger:** Worker-1 completes implementation AND Worker-2
+completes verification (or max verify passes reached).
 
-**Triggered by:** Last Worker's `task-complete` message
-processed.
-
-**Engine actions on transition:**
+**Engine actions:**
+- Auto-commit: `WIP: work phase complete`
 - Update team phase to `handoff`
-- Set Worker states to `done`
-- Supervisor sends `sweep-request` to Security Agent
-- Set Security Agent state to `active`
+- Send sweep request to Security with worker summaries
+
+### Work → Done (Simple Pipeline)
+
+**Trigger:** Worker-1 completes implementation.
+
+**Engine actions:**
+- Update team phase to `done`
+- Emit `task-complete` event
 
 ### Handoff → Review (Security Approved)
 
-**Preconditions:**
-1. Security Agent has sent `handoff-clearance` with verdict
-   `APPROVED` or `FLAGGED`
+**Trigger:** Security Agent responds with `APPROVED` or
+`FLAGGED` verdict.
 
-**Triggered by:** `handoff-clearance` message with approved/
-flagged verdict.
-
-**Engine actions on transition:**
+**Engine actions:**
+- Auto-commit: `WIP: security sweep passed`
 - Update team phase to `review`
-- Set Security Agent state to `done`
-- Supervisor sends `review-request` to Reviewer
-- Set Reviewer state to `active`
+- Send review request to Reviewer with task context and
+  worker summaries
 
 ### Handoff → Work (Security Blocked)
 
-**Preconditions:**
-1. Security Agent has sent `handoff-clearance` with verdict
-   `BLOCKED`
-2. Revision loop count has not exceeded maximum
+**Trigger:** Security Agent responds with `BLOCKED` verdict.
 
-**Triggered by:** `handoff-clearance` message with blocked
-verdict.
-
-**Engine actions on transition:**
-- Increment revision loop counter
-- Check against max loop limit (see Loop Limits)
+**Engine actions:**
+- Increment revision loop counter (auto, via state machine)
+- Check against max loop limits (throws if exceeded)
 - Update team phase to `work`
-- Supervisor sends `revision-request` to affected Workers
-  with Security's feedback
-- Set Worker states to `active`
-- Set Security Agent state to `idle`
+- Notify dashboard (non-blocking warning)
+- Re-run Worker-1 with updated constraints, then Worker-2
 
 ### Review → Done (Approved)
 
-**Preconditions:**
-1. Reviewer has sent `review-approved` to Supervisor
+**Trigger:** Reviewer responds with `APPROVED` verdict.
 
-**Triggered by:** `review-approved` message.
-
-**Engine actions on transition:**
+**Engine actions:**
+- Auto-commit with task description (first 72 chars)
 - Update team phase to `done`
-- Set all agent states to `done`
-- Persist final state
-- Initiate graceful shutdown of all agent processes
+- Keep sessions alive for Q&A
+- Emit `task-complete` event
 
-### Review → Work (Revise)
+### Review → Work (Revision Needed)
 
-**Preconditions:**
-1. Reviewer has sent `review-revise` to Supervisor
-2. Revision loop count has not exceeded maximum
+**Trigger:** Reviewer responds with `REVISION_NEEDED` verdict.
 
-**Triggered by:** `review-revise` message.
-
-**Engine actions on transition:**
+**Engine actions:**
 - Increment revision loop counter
-- Check against max loop limit
+- Check against max loop limits
 - Update team phase to `work`
-- Supervisor routes Reviewer feedback to appropriate Workers
-  via `revision-request`
-- Set Worker states to `active`
-- Set Reviewer state to `idle`
+- Notify dashboard (non-blocking info)
+- Re-run Worker-1 with reviewer feedback, then Worker-2
 
-### Review → Pre-Work (Rejected)
+### Review → PreWork (Rejected)
 
-**Preconditions:**
-1. Reviewer has sent `review-rejected` to Supervisor
-2. Rejection count has not exceeded maximum
+**Trigger:** Reviewer responds with `REJECTED` verdict.
 
-**Triggered by:** `review-rejected` message.
-
-**Engine actions on transition:**
+**Engine actions:**
 - Increment rejection counter
 - Check against max rejection limit
 - Update team phase to `pre_work`
-- Supervisor re-plans from scratch
-- Workers receive new assignments
-- Security Agent re-scans
+- Notify dashboard (non-blocking warning)
+- Restart pipeline from Security scan
 
 ### Any Phase → Errored
 
 **Triggered by:**
-- Timeout exceeded (see Timeouts below)
-- Agent retry count exceeded (3 consecutive malformed outputs)
-- Agent process crash with no remaining respawn attempts
-- Deadlock detected (see Deadlock Detection)
+- SDK `query()` rejects (session crash)
+- Loop limit exceeded (`TransitionError` thrown)
+- Unhandled exception in pipeline
 
-**Engine actions on transition:**
+**Engine actions:**
 - Update team phase to `errored`
-- Log the error with full context
-- Surface to human orchestrator as `critical` priority
-- Do NOT terminate agent processes — human may want to
-  inspect the state
+- Close all agent sessions
+- Emit `error` event for dashboard
+- Surface to human as critical notification
 
 ### Any Phase → Cancelled
 
-**Triggered by:** Human orchestrator cancels via dashboard
-or CLI command.
+**Triggered by:** Human orchestrator cancels via dashboard.
 
-**Engine actions on transition:**
+**Engine actions:**
 - Update team phase to `cancelled`
-- Send termination signal to all agent processes
+- Close all agent sessions
 - Persist final state
-- Archive all messages
-
----
-
-## Timeouts
-
-All timeouts are configurable. Defaults are provided below.
-
-### Per-Message Timeouts
-
-These apply to messages with `requiresResponse: true`.
-
-| Message Flag | Default Timeout | Escalation |
-|-------------|----------------|------------|
-| `scan-request` | 5 minutes | Supervisor notified, then human at 10 min |
-| `task-assignment` | 3 minutes | Supervisor notified (Worker not responding) |
-| `clearance-request` | 3 minutes | Worker blocked, Supervisor notified |
-| `sweep-request` | 5 minutes | Supervisor notified, then human at 10 min |
-| `review-request` | 10 minutes | Supervisor notified, then human at 15 min |
-| `check-in` | 2 minutes | Agent marked as potentially unhealthy |
-| All other `requiresResponse: true` | 3 minutes | Supervisor notified |
-
-### Per-Phase Timeouts
-
-These are hard limits on how long a team can remain in a phase.
-
-| Phase | Default Timeout | Escalation |
-|-------|----------------|------------|
-| `pre_work` | 15 minutes | Human notified, then `errored` at 20 min |
-| `work` | 60 minutes | Human notified, then `errored` at 90 min |
-| `handoff` | 10 minutes | Human notified, then `errored` at 15 min |
-| `review` | 15 minutes | Human notified, then `errored` at 20 min |
-
-### Timeout Escalation Protocol
-
-1. **Warning** — at the default timeout, log a warning and
-   surface to the human orchestrator as `high` priority.
-2. **Critical** — at 1.5x the default timeout, surface as
-   `critical` priority.
-3. **Error** — at 2x the default timeout, transition the
-   team to `errored` state.
-
-The human can extend a timeout via the dashboard by
-acknowledging the warning (resets the timer for another full
-cycle).
-
-### Silence Detection
-
-Independent of message timeouts, the engine monitors each
-agent for "silence" — no messages sent or received within a
-configurable window:
-
-| Role | Silence Threshold | Action |
-|------|------------------|--------|
-| Worker (during work phase) | 5 minutes | Supervisor sends `check-in` |
-| Security Agent (during scan/sweep) | 3 minutes | Log warning |
-| All agents | 10 minutes | Agent health check triggered |
 
 ---
 
 ## Loop Limits
 
 Revision and rejection loops are bounded to prevent infinite
-cycling.
+cycling. The state machine enforces these automatically.
 
 ### Revision Loop (Handoff → Work or Review → Work)
 
 - **Default maximum:** 3 revisions per task
-- **Counter:** Incremented each time the team transitions
-  from `handoff` → `work` or `review` → `work`
-- **At limit:** Team transitions to `errored` with message:
-  "Maximum revision count (3) exceeded. Escalating to human."
-- **Configurable:** Via `maxRevisions` in team configuration
+- **Counter:** Incremented automatically by `transitionPhase()`
+  on backward transitions to Work
+- **At limit:** `TransitionError` thrown, pipeline catches it
+  and transitions to `errored`
+- **Configurable:** Via `maxRevisions` in loop limits config
 
-### Rejection Loop (Review → Pre-Work)
+### Rejection Loop (Review → PreWork)
 
 - **Default maximum:** 2 rejections per task
-- **Counter:** Incremented each time the team transitions
-  from `review` → `pre_work`
-- **At limit:** Team transitions to `errored` with message:
-  "Maximum rejection count (2) exceeded. Escalating to human."
-- **Configurable:** Via `maxRejections` in team configuration
+- **Counter:** Incremented automatically on backward
+  transitions to PreWork
+- **At limit:** Same as revision — `TransitionError` → errored
 
 ### Combined Limit
 
-- **Total loop budget:** 5 total backward transitions per
-  task (revisions + rejections combined)
-- **Purpose:** Even if individual limits aren't hit, the
-  combined limit catches pathological patterns where the task
-  oscillates between different failure modes.
-- **At limit:** Same as individual — transition to `errored`.
+- **Total backward transitions:** 5 per task (revisions +
+  rejections combined)
+- **Purpose:** Catches pathological patterns where the task
+  oscillates between different failure modes
+- **At limit:** Same as individual limits
 
----
+### Verification Loop (Worker-2 re-checks)
 
-## Deadlock Detection
+- **Maximum:** 2 passes per Work phase entry
+- **Scope:** Internal to the Work phase, does NOT increment
+  the revision counter
+- **At limit:** Proceeds to Security sweep regardless of
+  Worker-2's verdict
 
-A deadlock occurs when no agent can make progress because
-each is waiting on another.
+### Default Loop Limits
 
-### Definition
-
-The system is deadlocked when ALL of these are true:
-1. No agent in the team is in `active` state
-2. At least one agent is in `waiting` or `blocked` state
-3. No messages with `status: pending` exist in any inbox
-   (nothing to process)
-4. No timeout has expired (which would break the deadlock
-   via escalation)
-
-### Detection Mechanism
-
-The orchestrator's `tick()` loop checks for deadlock on every
-iteration:
-
-```
-function isDeadlocked(team: TeamState): boolean {
-  const hasActiveAgent = team.agents.some(
-    a => a.state === 'active'
-  );
-  const hasWaitingAgent = team.agents.some(
-    a => a.state === 'waiting' || a.state === 'blocked'
-  );
-  const hasPendingMessages = messageBus.getPending(
-    team.teamId
-  ).length > 0;
-
-  return !hasActiveAgent && hasWaitingAgent && !hasPendingMessages;
+```typescript
+{
+  maxRevisions: 3,
+  maxRejections: 2,
+  maxTotalBackwardTransitions: 5,
+  maxVerifyPasses: 2   // per Work phase entry
 }
 ```
-
-### Resolution
-
-1. Log the deadlock with all agent states and last messages.
-2. Surface to human orchestrator as `critical` priority.
-3. If the deadlock persists for 2 consecutive `tick()` cycles
-   (to avoid false positives from timing), transition to
-   `errored`.
-
-The human can resolve by:
-- Manually sending a message to unblock an agent
-- Cancelling the task
-- Restarting the phase
 
 ---
 
@@ -393,21 +296,33 @@ The `state.json` file for each team captures:
   "teamName": "my-project",
   "projectPath": "/path/to/project",
   "currentPhase": "work",
+  "complexity": "standard",
   "agents": {
-    "Supervisor-1": {
-      "role": "Supervisor",
-      "state": "active",
-      "currentJob": "Monitoring worker progress",
-      "lastMessageAt": "ISO-8601",
-      "pid": 12345
+    "Worker-1": {
+      "role": "Worker",
+      "state": "Active",
+      "pid": null
     },
-    "Worker-1": { "..." : "..." },
-    "Worker-2": { "..." : "..." },
-    "Security-1": { "..." : "..." },
-    "Reviewer-1": { "..." : "..." }
+    "Worker-2": {
+      "role": "Worker",
+      "state": "Active",
+      "pid": null
+    },
+    "Security-1": {
+      "role": "Security",
+      "state": "Done",
+      "pid": null
+    },
+    "Reviewer-1": {
+      "role": "Reviewer",
+      "state": "Idle",
+      "pid": null
+    }
   },
   "currentTask": {
     "description": "Add user authentication with JWT",
+    "complexity": "standard",
+    "requirements": "...",
     "assignedAt": "ISO-8601"
   },
   "counters": {
@@ -422,35 +337,24 @@ The `state.json` file for each team captures:
 
 ### Persistence Strategy
 
-- **Debounced writes:** State changes are batched. Writes
-  occur at most once per second (configurable).
-- **Forced writes:** Phase transitions always force an
-  immediate write (not debounced) because phase state is
-  critical for recovery.
-- **Atomic writes:** Same temp file + rename pattern as
-  the message bus (see
-  [Message Contract — Atomic Writes](./message-contract.md#atomic-writes)).
+- **Forced writes on phase transitions** — every phase change
+  triggers an immediate `state.json` write.
+- **Atomic writes** — temp file + rename pattern for
+  crash safety.
+- **Debounced writes** — agent state changes are batched
+  (at most once per second) except during transitions.
 
-### What Survives a Crash
+### Runtime Data Structure
 
-| Data | Survives? | How |
-|------|-----------|-----|
-| Team phase | Yes | Persisted in `state.json` on every transition |
-| Agent states | Partially | Last persisted snapshot (may be up to 1s stale) |
-| Messages in inboxes | Yes | Each is a separate file on disk |
-| Messages in transit | No | Partially written messages are cleaned up on restart |
-| Loop counters | Yes | Persisted in `state.json` |
-| Agent PIDs | Stale | PIDs from crashed processes, used for cleanup on restart |
+```
+{project-root}/
+├── .claude-orchestra/
+│   └── teams/{team-id}/
+│       ├── state.json
+│       └── (future: reports, logs)
+```
 
-### Recovery on Startup
-
-When the engine starts and finds existing team data:
-
-1. Read `state.json` to recover team phase and counters.
-2. Scan inbox directories to reconstruct pending messages.
-3. Clean up orphaned temp files (`.tmp-*`).
-4. Check if agent PIDs from `state.json` are still alive:
-   - If alive: reconnect (agent continued running).
-   - If dead: respawn with the same CLAUDE.md and a recovery
-     prompt summarizing the last known state.
-5. Resume the `tick()` loop from the recovered state.
+The `.claude-orchestra/` directory is added to `.gitignore`
+automatically. Runtime data lives in the target project,
+NOT in the engine repo. The engine repo maintains only a
+`registry.json` mapping team IDs to project paths.

@@ -69,8 +69,9 @@ SDK options per agent:
 | Role | Instance(s) | Default Model | Default Effort | Default Max Turns | Disallowed Tools |
 |------|-------------|---------------|----------------|-------------------|------------------|
 | Worker | Worker-1, Worker-2 | claude-opus-4-6 | high | 50 | (none — full access) |
-| Security | Security-1 | claude-opus-4-6 | low | 5 | Write, Edit, Bash |
-| Reviewer | Reviewer-1 | claude-opus-4-6 | low | 5 | Write, Edit, Bash |
+| Security | Security-1 | claude-opus-4-6 | medium | 20 | Write, Edit, Bash |
+| Reviewer | Reviewer-1 | claude-opus-4-6 | medium | 20 | Write, Edit, Bash |
+| Security Review | (on-demand) | claude-opus-4-6 | high | 15 | Write, Edit, Bash |
 
 All models and settings are configurable per role via `orchestra.config.json` or CLI flags.
 
@@ -112,11 +113,11 @@ Before the pipeline starts, a disposable `query()` session extracts a numbered r
 
 ### Step 1: Security Scan (Phase: `pre_work`)
 
-**Agent**: Security-1 | **Prompt file**: `agents/security.claude.md`
+**Agent**: Security-1 | **Prompt file**: `agents/security.agent.md`
 
 The Security agent receives a `PRE-WORK SCAN REQUEST` with the task description, approved requirements, and project path. It must:
 
-1. Run the 8-point security checklist (hardcoded secrets, injection, auth, data exposure, dependencies, path traversal, SSRF, crypto)
+1. Run the 10-point security checklist (hardcoded secrets, injection, auth, data exposure, dependencies, path traversal, SSRF, crypto, prompt injection, supply chain)
 2. Begin response with `CLASSIFICATION: SIMPLE|STANDARD|COMPLEX` — this can override the heuristic classifier
 3. Produce a clearance report categorizing files as SAFE/CAUTION/OFF-LIMITS
 
@@ -131,7 +132,7 @@ The Security agent receives a `PRE-WORK SCAN REQUEST` with the task description,
 ### Step 2: Build — Worker-1 Implements + Worker-2 Verifies (Phase: `work`)
 
 **Worker-1** receives: task description, approved requirements, security clearance report, revision feedback (if retry).
-- Prompt file: `agents/worker.claude.md`
+- Prompt file: `agents/worker.agent.md`
 - Implements the full task within cleared boundaries
 - Large outputs (>100 lines) must be written to files, not inline
 
@@ -168,7 +169,7 @@ Receives a `POST-WORK SWEEP REQUEST` with task, requirements, and Worker summari
 
 ### Step 4: Code Review (Phase: `review`)
 
-**Agent**: Reviewer-1 | **Prompt file**: `agents/reviewer.claude.md`
+**Agent**: Reviewer-1 | **Prompt file**: `agents/reviewer.agent.md`
 
 Receives task, requirements, Worker summaries. If `isComplex`, gets extra instruction for strict criteria. Must begin response with `APPROVED`, `REVISION_NEEDED`, or `REJECTED`.
 
@@ -275,59 +276,7 @@ interface TeamStateData {
 
 ---
 
-## Message System
-
-### Filesystem-Based Message Bus (`src/router/message-bus.ts`)
-
-Built for the original Supervisor-based architecture. Still present in codebase but **not used by the PipelineOrchestrator** (which calls agents directly via `AgentSession.send()`). Retained for potential future use.
-
-**Key design**:
-- Messages are JSON files written to `{project}/.claude-orchestra/teams/{teamId}/messages/inbox/{instance}/`
-- Atomic writes via temp-file + `fs.renameSync()`
-- Deduplication by messageId (in-memory Set, rebuilt on init)
-- Multicast: `roleTargetInstance: null` → message written to all instances of that role
-- Chronological sort via filename format: `{timestamp}-{messageId}.json`
-
-### Message Schema (`src/router/message-types.ts`)
-
-```typescript
-interface AgentMessage {
-  messageId: `msg-${string}`;
-  threadId: `thread-${string}`;
-  timestamp: string;               // ISO-8601
-  roleSource: Role;
-  roleSourceInstance: RoleInstance;
-  roleTarget: Role;
-  roleTargetInstance: RoleInstance | null;
-  flag: MessageFlag;               // Enum per role pair
-  priority: 'low' | 'normal' | 'high' | 'critical';
-  phase: Phase;                    // pre-work | work | handoff | review
-  content: string;                 // Max 8,000 chars
-  references: string[];            // Max 20 entries
-  requiresResponse: boolean;
-  status: 'pending' | 'acknowledged' | 'resolved';
-}
-```
-
-Total message size limit: 16 KB.
-
-### Flag Validation Matrix (`src/router/flag-enums.ts`)
-
-28 valid flags across 9 role-pair routes:
-
-| Route | Flags |
-|---|---|
-| Supervisor → Worker | task-assignment, direction-change, pause, resume, check-in, revision-request |
-| Worker → Supervisor | task-accepted, progress-update, task-complete, blocked, needs-guidance, scope-concern, anomaly-detected |
-| Supervisor → Security | scan-request, sweep-request, escalation-query |
-| Security → Supervisor | clearance-report, handoff-clearance, security-alert, escalation-response |
-| Worker → Security | clearance-request |
-| Security → Worker | clearance-granted, clearance-denied |
-| Supervisor → Reviewer | review-request |
-| Reviewer → Supervisor | review-approved, review-revise, review-rejected |
-| Worker → Worker | sync-request, sync-response, heads-up |
-
-Self-sends blocked except Worker → Worker.
+## Agent Communication
 
 ### AgentProcess (`src/spawner/agent-process.ts`)
 
@@ -367,6 +316,7 @@ Built-in Node.js `http` server. No Express, no frameworks.
 | GET | `/preview/:id` | Auto-redirect to newest HTML file in project |
 | GET | `/preview/:id?browse` | File browser for project HTML files |
 | GET | `/preview/:id/:file` | Serve specific file from project (path traversal protected) |
+| POST | `/api/pick-directory` | Native OS directory picker (macOS Finder dialog) |
 
 **SSE Events** (13 event types):
 
@@ -386,7 +336,7 @@ Built-in Node.js `http` server. No Express, no frameworks.
 | `security-review` | `{ teamId, status, result? }` |
 | `shutdown` | `{}` |
 
-### UI (`src/dashboard/dashboard-ui.ts` — 2,551 lines)
+### UI (`src/dashboard/dashboard-ui.ts` — ~2,619 lines)
 
 Single-file HTML/CSS/JS generated by `buildDashboardHTML()`. Dark theme (GitHub dark style).
 
@@ -442,10 +392,7 @@ Engine repo (2026_ClaudeOrchestra/)
 Target project repos (e.g., /Users/me/my-app/)
 ├── .claude-orchestra/         ← Auto-gitignored
 │   └── teams/{teamId}/
-│       ├── state.json         ← TeamState (debounced writes, forced on phase transitions)
-│       └── messages/          ← Message bus directories (created but unused in pipeline mode)
-│           ├── inbox/{instance}/
-│           └── archive/
+│       └── state.json         ← TeamState (debounced writes, forced on phase transitions)
 └── (project files)
 ```
 
@@ -488,34 +435,30 @@ All git commands have 30-second timeout.
 
 ## Agent Prompt Files
 
-### `agents/worker.claude.md`
+### `agents/worker.agent.md`
 - Worker-1: implements code, fixes gaps from Worker-2
 - Worker-2: requirements verifier only, never modifies code
 - Decision Transparency: must explain reasoning for every choice
 - Constraints: respect clearance boundaries, don't touch off-limits files
 
-### `agents/security.claude.md`
-- 8-point security checklist
+### `agents/security.agent.md`
+- 10-point security checklist
 - Pre-scan: must output `CLASSIFICATION: SIMPLE|STANDARD|COMPLEX`
 - Post-sweep: must begin with `APPROVED|FLAGGED|BLOCKED`
 - "Be fast. Do NOT read every line — scan for patterns."
 - Does NOT evaluate code quality
 
-### `agents/reviewer.claude.md`
+### `agents/reviewer.agent.md`
 - "Rapid quality gate" — spot-check 2-3 key files
 - Must begin with `APPROVED|REVISION_NEEDED|REJECTED`
 - "Default to APPROVED if the work reasonably addresses the task"
 - Does NOT evaluate security
 
-### `agents/security-review.claude.md`
+### `agents/security-review.agent.md`
 - Final security review (user-initiated, post-completion)
 - Thorough (unlike scan/sweep which are fast)
 - Analyzes `git diff main...HEAD`
 - Outputs `PASSED` or `CONCERNS` with detailed findings
-
-### `agents/supervisor.claude.md`
-- Retained from subagent architecture but **not used in pipeline mode**
-- Dispatcher pattern: invoke subagents in order
 
 ---
 
@@ -574,8 +517,8 @@ Commands:
   },
   "efforts": {
     "Worker": "high",
-    "Security": "low",
-    "Reviewer": "low"
+    "Security": "medium",
+    "Reviewer": "medium"
   },
   "disallowedTools": {
     "Security": ["Write", "Edit", "Bash"],
@@ -583,8 +526,8 @@ Commands:
   },
   "maxTurns": {
     "Worker": 50,
-    "Security": 5,
-    "Reviewer": 5
+    "Security": 20,
+    "Reviewer": 20
   }
 }
 ```
@@ -605,25 +548,21 @@ Commands:
 
 ## Testing
 
-**392 tests across 13 test files** — all passing.
+**204 tests across 7 test files** — all passing.
 
-| Test File | Tests | What It Covers |
-|---|---|---|
-| `message-bus.test.ts` | 30 | Send, receive, dedup, multicast, atomic writes, temp file cleanup, thread retrieval, pending tracking |
-| `message-contract.test.ts` | 45 | Schema validation for all 12 fields, size limits, flag validation matrix |
-| `team-state.test.ts` | — | Phase transitions (valid/invalid), agent state transitions, loop counters, limits |
-| `phase-controller.test.ts` | — | Phase evaluation per phase, transition emission, error handling |
-| `complexity-router.test.ts` | 20 | Keyword detection, word count threshold, simple vs standard classification |
-| `pipeline-orchestrator.test.ts` | 51 | Full pipeline (scan→build→verify→sweep→review→done), security BLOCKED loops, revision loops, rejection loops, loop limit enforcement, simple pipeline, reclassification, requirements extraction |
-| `dashboard-server.test.ts` | 22 | HTTP routes, SSE streaming, team CRUD, task assignment, push-merge |
-| `git.test.ts` | 19 | Commit, push, merge, pushAndMerge workflow, branch checkout, merge failure recovery |
-| `registry.test.ts` | — | CRUD operations, atomic writes, duplicate handling |
-| `logger.test.ts` | — | Structured logging, terminal output, file output, rotation |
+| Test File | What It Covers |
+|---|---|
+| `complexity-router.test.ts` | Keyword detection, word count threshold, simple vs standard classification |
+| `dashboard-server.test.ts` | HTTP routes, SSE streaming, team CRUD, task assignment, push-merge |
+| `git.test.ts` | Commit, push, merge, pushAndMerge workflow, branch checkout, merge failure recovery |
+| `logger.test.ts` | Structured logging, terminal output, file output, rotation |
+| `pipeline-orchestrator.test.ts` | Full pipeline (scan→build→verify→sweep→review→done), security BLOCKED loops, revision loops, rejection loops, loop limit enforcement, simple pipeline, reclassification, requirements extraction |
+| `registry.test.ts` | CRUD operations, atomic writes, duplicate handling |
+| `team-state.test.ts` | Phase transitions (valid/invalid), agent state transitions, loop counters, limits |
 
 ```bash
-npm test              # Run all 392 tests
+npm test              # Run all tests
 npm run test:watch    # Watch mode
-npm run test:integration  # Integration tests only
 ```
 
 ---
@@ -633,62 +572,52 @@ npm run test:integration  # Integration tests only
 ```
 2026_ClaudeOrchestra/
 ├── src/
-│   ├── index.ts                          # CLI entry point (439 lines)
+│   ├── index.ts                          # CLI entry point (433 lines)
 │   ├── pipeline-orchestrator.ts          # Core engine: AgentSession, verdict parsers,
-│   │                                     #   pipeline loops, feedback, Q&A (1,573 lines)
+│   │                                     #   pipeline loops, feedback, Q&A (1,599 lines)
 │   ├── git.ts                            # Git commit, push, merge operations (163 lines)
-│   ├── registry.ts                       # Registry.json management (103 lines)
+│   ├── registry.ts                       # Registry.json management (102 lines)
 │   │
 │   ├── spawner/
 │   │   ├── agent-process.ts              # AgentProcess: dual-mode (SDK/child_process),
-│   │   │                                 #   PromptChannel, "last message wins" (645 lines)
-│   │   └── agent-spawner.ts              # AgentSpawner: team lifecycle, respawn (349 lines)
+│   │   │                                 #   PromptChannel, "last message wins" (646 lines)
+│   │   ├── agent-spawner.ts              # AgentSpawner: team lifecycle, respawn (330 lines)
+│   │   └── frontmatter-parser.ts         # YAML frontmatter parser for agent files (49 lines)
 │   │
 │   ├── router/
-│   │   ├── message-bus.ts                # Filesystem message routing (405 lines)
-│   │   ├── message-types.ts              # AgentMessage schema + validation (225 lines)
-│   │   ├── flag-enums.ts                 # 28 flags across 9 role-pair routes (168 lines)
-│   │   └── complexity-router.ts          # Heuristic task classifier (55 lines)
-│   │
-│   ├── phases/
-│   │   ├── phase-controller.ts           # State machine: evaluate + apply (148 lines)
-│   │   ├── pre-work.ts                   # Scan phase evaluation (62 lines)
-│   │   ├── work.ts                       # Build phase evaluation (83 lines)
-│   │   ├── handoff.ts                    # Sweep phase evaluation (87 lines)
-│   │   └── review.ts                     # Review phase evaluation (109 lines)
+│   │   └── complexity-router.ts          # Heuristic task classifier (54 lines)
 │   │
 │   ├── state/
-│   │   ├── team-state.ts                 # TeamState: transitions, counters, limits (381 lines)
-│   │   └── persistence.ts                # Debounced filesystem persistence (171 lines)
+│   │   ├── team-state.ts                 # TeamState: transitions, counters, limits (380 lines)
+│   │   └── persistence.ts                # Debounced filesystem persistence (170 lines)
 │   │
 │   ├── dashboard/
-│   │   ├── dashboard-server.ts           # HTTP + SSE server (579 lines)
-│   │   ├── dashboard-ui.ts              # Full SPA: HTML/CSS/JS (2,551 lines)
+│   │   ├── dashboard-server.ts           # HTTP + SSE server (595 lines)
+│   │   ├── dashboard-ui.ts              # Full SPA: HTML/CSS/JS (2,619 lines)
 │   │   └── index.ts                      # Module exports (3 lines)
 │   │
 │   ├── logger/
-│   │   └── logger.ts                     # Structured logging with rotation (600 lines)
+│   │   └── logger.ts                     # Structured logging with rotation (550 lines)
 │   │
 │   ├── roles/
-│   │   └── role-types.ts                 # Role enum, instances, JTBD types (50 lines)
+│   │   └── role-types.ts                 # Role enum, instances, JTBD types (44 lines)
 │   │
 │   └── types/
-│       └── index.ts                      # Phase, Priority, MessageStatus, AgentState enums (46 lines)
+│       └── index.ts                      # Phase, Priority, MessageStatus, AgentState enums (45 lines)
 │
-├── agents/                               # Agent system prompts
-│   ├── worker.claude.md                  # Worker-1 (implement) + Worker-2 (verify)
-│   ├── security.claude.md                # Security scan + sweep
-│   ├── reviewer.claude.md                # Code review verdicts
-│   ├── security-review.claude.md         # Final comprehensive security review
-│   └── supervisor.claude.md              # Supervisor dispatcher (unused in pipeline mode)
+├── agents/                               # Agent system prompts (YAML frontmatter + markdown)
+│   ├── worker.agent.md                  # Worker-1 (implement) + Worker-2 (verify)
+│   ├── security.agent.md                # Security scan + sweep (10-point checklist)
+│   ├── reviewer.agent.md                # Code review verdicts
+│   └── security-review.agent.md         # Final comprehensive security review (on-demand)
 │
-├── tests/                                # 392 tests across 13 files
+├── tests/                                # 204 tests across 7 files
 │   ├── mocks/mock-sdk.ts
 │   └── *.test.ts
 │
 ├── docs/                                 # Design documents
 │   ├── architecture.md
-│   ├── message-contract.md
+│   ├── architecture-decisions/           # ADRs and reference implementations
 │   ├── state-machine.md
 │   ├── roles-and-jtbd.md
 │   ├── context-management.md
@@ -701,7 +630,7 @@ npm run test:integration  # Integration tests only
 └── implementation-plan.md                # 8-milestone build plan
 ```
 
-**Total**: ~7,500 lines of production TypeScript + 2,551 lines of dashboard UI.
+**Total**: ~7,780 lines of production TypeScript (including 2,619 lines of dashboard UI).
 
 ---
 

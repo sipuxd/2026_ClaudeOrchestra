@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Multi-Agent Orchestration — Full Lifecycle</title>
+<title>ClaudeOrchestra — Pipeline Workflow</title>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -17,7 +17,7 @@
     width: 100vw;
   }
 
-  /* ── Top Bar ── */
+  /* -- Top Bar -- */
   .topbar {
     position: fixed;
     top: 0; left: 0; right: 0;
@@ -85,7 +85,7 @@
     margin: 0 4px;
   }
 
-  /* ── Legend ── */
+  /* -- Legend -- */
   .legend {
     position: fixed;
     bottom: 20px;
@@ -116,7 +116,7 @@
     border-radius: 3px;
   }
 
-  /* ── Help tooltip ── */
+  /* -- Help tooltip -- */
   .help-tip {
     position: fixed;
     bottom: 20px;
@@ -142,7 +142,7 @@
     color: #8b949e;
   }
 
-  /* ── Canvas ── */
+  /* -- Canvas -- */
   .canvas-container {
     width: 100vw;
     height: 100vh;
@@ -157,11 +157,11 @@
     transform-origin: 0 0;
     position: relative;
     width: 1400px;
-    min-height: 4200px;
+    min-height: 4800px;
     padding: 40px 60px 80px;
   }
 
-  /* ── Phase Sections ── */
+  /* -- Phase Sections -- */
   .phase-section {
     position: relative;
     margin-bottom: 20px;
@@ -178,17 +178,20 @@
     border-radius: 16px 16px 0 0;
   }
 
-  .phase-prework { background: rgba(74, 144, 217, 0.04); }
-  .phase-prework::before { background: linear-gradient(90deg, #4A90D9, #E8655A); }
+  .phase-classify { background: rgba(155, 89, 182, 0.04); }
+  .phase-classify::before { background: linear-gradient(90deg, #9B59B6, #6C5B7B); }
+
+  .phase-prework { background: rgba(232, 101, 90, 0.04); }
+  .phase-prework::before { background: linear-gradient(90deg, #E8655A, #f47067); }
 
   .phase-work { background: rgba(123, 196, 127, 0.04); }
-  .phase-work::before { background: linear-gradient(90deg, #4A90D9, #7BC47F, #E8655A); }
+  .phase-work::before { background: linear-gradient(90deg, #7BC47F, #7ee787); }
 
   .phase-handoff { background: rgba(232, 101, 90, 0.04); }
-  .phase-handoff::before { background: linear-gradient(90deg, #7BC47F, #4A90D9, #E8655A); }
+  .phase-handoff::before { background: linear-gradient(90deg, #E8655A, #f47067); }
 
   .phase-review { background: rgba(245, 166, 35, 0.04); }
-  .phase-review::before { background: linear-gradient(90deg, #4A90D9, #F5A623); }
+  .phase-review::before { background: linear-gradient(90deg, #F5A623, #f0b844); }
 
   .phase-label {
     font-family: 'JetBrains Mono', monospace;
@@ -211,7 +214,7 @@
     color: #c9d1d9;
   }
 
-  /* ── Nodes ── */
+  /* -- Nodes -- */
   .flow-row {
     display: flex;
     align-items: flex-start;
@@ -225,7 +228,7 @@
     border-radius: 12px;
     padding: 16px 20px;
     min-width: 240px;
-    max-width: 360px;
+    max-width: 400px;
     position: relative;
     border: 1px solid;
     transition: transform 0.2s ease, box-shadow 0.2s ease;
@@ -275,19 +278,19 @@
   }
 
   .node-bullets span::before {
-    content: '›';
+    content: '>';
     position: absolute;
     left: 0;
     color: rgba(255,255,255,0.3);
   }
 
   /* Role colors */
-  .n-supervisor {
+  .n-engine {
     background: rgba(74, 144, 217, 0.1);
     border-color: rgba(74, 144, 217, 0.3);
   }
-  .n-supervisor .node-title { color: #79b8f8; }
-  .n-supervisor .node-flag { background: rgba(74, 144, 217, 0.2); color: #79b8f8; }
+  .n-engine .node-title { color: #79b8f8; }
+  .n-engine .node-flag { background: rgba(74, 144, 217, 0.2); color: #79b8f8; }
 
   .n-worker {
     background: rgba(123, 196, 127, 0.1);
@@ -322,7 +325,6 @@
     min-width: 180px;
     text-align: center;
     border-radius: 12px;
-    transform: rotate(0deg);
   }
   .n-decision .node-title { color: #c49cde; font-size: 13px; }
 
@@ -333,7 +335,7 @@
   }
   .n-done .node-title { color: #7ee787; font-size: 14px; }
 
-  /* ── Arrows ── */
+  /* -- Arrows -- */
   .arrow {
     display: flex;
     align-items: center;
@@ -354,59 +356,8 @@
   }
 
   .arrow-down { flex-direction: column; }
-  .arrow-horizontal { flex-direction: row; }
 
-  .arrow-split {
-    display: flex;
-    align-items: flex-start;
-    justify-content: center;
-    gap: 80px;
-    margin: 8px 0;
-    position: relative;
-  }
-
-  .arrow-split::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    left: 50%;
-    transform: translateX(-50%);
-    width: calc(100% - 200px);
-    height: 1px;
-    background: #484f58;
-  }
-
-  .arrow-branch {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 4px;
-  }
-
-  /* ── Bidirectional flow indicators ── */
-  .bidir-row {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 16px;
-    margin: 12px 0;
-  }
-
-  .bidir-line {
-    flex: 1;
-    max-width: 120px;
-    height: 1px;
-    background: repeating-linear-gradient(90deg, #6e7681 0, #6e7681 6px, transparent 6px, transparent 12px);
-  }
-
-  .bidir-label {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 10px;
-    color: #6e7681;
-    white-space: nowrap;
-  }
-
-  /* ── Loop-back indicators ── */
+  /* -- Loop-back indicators -- */
   .loop-back {
     border: 1px dashed rgba(255,255,255,0.15);
     border-radius: 12px;
@@ -429,7 +380,7 @@
     color: #8b949e;
   }
 
-  /* ── Connector lines ── */
+  /* -- Connector lines -- */
   .connector {
     width: 1px;
     height: 20px;
@@ -437,24 +388,42 @@
     margin: 0 auto;
   }
 
-  .connector-short { height: 12px; }
-
-  /* ── Side flow (runtime clearance) ── */
-  .side-flow {
-    border: 1px dashed rgba(232, 101, 90, 0.3);
+  /* -- Verify loop -- */
+  .verify-loop {
+    border: 1px dashed rgba(123, 196, 127, 0.3);
     border-radius: 12px;
     padding: 20px;
     margin: 16px 0;
-    background: rgba(232, 101, 90, 0.02);
+    background: rgba(123, 196, 127, 0.02);
   }
 
-  .side-flow-label {
+  .verify-loop-label {
     font-family: 'JetBrains Mono', monospace;
     font-size: 10px;
     font-weight: 600;
     letter-spacing: 1px;
     text-transform: uppercase;
-    color: #f47067;
+    color: #7ee787;
+    margin-bottom: 16px;
+    opacity: 0.7;
+  }
+
+  /* -- Simple pipeline callout -- */
+  .simple-callout {
+    border: 1px dashed rgba(155, 89, 182, 0.3);
+    border-radius: 12px;
+    padding: 20px;
+    margin: 16px 0;
+    background: rgba(155, 89, 182, 0.02);
+  }
+
+  .simple-callout-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: #c49cde;
     margin-bottom: 16px;
     opacity: 0.7;
   }
@@ -468,302 +437,350 @@
   }
 
   .phase-connector .connector { height: 32px; }
+
+  /* -- Git checkpoint -- */
+  .git-checkpoint {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin: 12px 0;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px;
+    color: #6e7681;
+  }
+
+  .git-checkpoint .git-icon {
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 4px;
+    padding: 2px 6px;
+    color: #f0b844;
+  }
 </style>
 </head>
 <body>
 
 <div class="topbar">
-  <h1><span>›</span> Multi-Agent Orchestration — <span>Full Lifecycle</span></h1>
+  <h1><span>></span> ClaudeOrchestra — <span>Pipeline Workflow</span></h1>
   <div class="controls">
-    <button id="zoomOut" title="Zoom Out">−</button>
+    <button id="zoomOut" title="Zoom Out">&minus;</button>
     <span class="zoom-label" id="zoomLabel">100%</span>
     <button id="zoomIn" title="Zoom In">+</button>
     <div class="divider"></div>
-    <button id="fitView" title="Fit to View">⊡</button>
-    <button id="resetView" title="Reset Position">↺</button>
+    <button id="fitView" title="Fit to View">&#8865;</button>
+    <button id="resetView" title="Reset Position">&#8634;</button>
   </div>
 </div>
 
 <div class="legend">
-  <div class="legend-item"><div class="legend-dot" style="background:#4A90D9"></div>Supervisor</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#4A90D9"></div>Engine (code)</div>
   <div class="legend-item"><div class="legend-dot" style="background:#7BC47F"></div>Worker</div>
   <div class="legend-item"><div class="legend-dot" style="background:#E8655A"></div>Security</div>
   <div class="legend-item"><div class="legend-dot" style="background:#F5A623"></div>Reviewer</div>
-  <div class="legend-item"><div class="legend-dot" style="background:#9B59B6"></div>Human</div>
-  <div class="legend-item"><div class="legend-dot" style="background:#6C5B7B"></div>Decision</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#9B59B6"></div>Human / Decision</div>
 </div>
 
 <div class="help-tip">
-  <kbd>Scroll</kbd> Zoom &nbsp; <kbd>Drag</kbd> Pan &nbsp; <kbd>+</kbd><kbd>−</kbd> Zoom
+  <kbd>Scroll</kbd> Zoom &nbsp; <kbd>Drag</kbd> Pan &nbsp; <kbd>+</kbd><kbd>&minus;</kbd> Zoom
 </div>
 
 <div class="canvas-container" id="canvasContainer">
 <div class="canvas" id="canvas">
 
-  <!-- ════════════════════════════════════════════ -->
   <!-- ENTRY -->
-  <!-- ════════════════════════════════════════════ -->
   <div class="flow-row">
     <div class="node n-human">
       <div class="node-title">HUMAN ORCHESTRATOR</div>
-      <div class="node-desc">Assigns task to a team via the terminal dashboard</div>
+      <div class="node-desc">Assigns task to a team via the browser dashboard</div>
     </div>
   </div>
 
   <div class="connector"></div>
 
-  <!-- ════════════════════════════════════════════ -->
-  <!-- PHASE 1: PRE-WORK -->
-  <!-- ════════════════════════════════════════════ -->
-  <div class="phase-section phase-prework">
-    <div class="phase-label"><span class="num">01</span> Pre-Work</div>
+  <!-- CLASSIFICATION -->
+  <div class="phase-section phase-classify">
+    <div class="phase-label"><span class="num">00</span> Task Classification</div>
 
     <div class="flow-row">
-      <div class="node n-supervisor">
-        <div class="node-title">SUPERVISOR</div>
-        <div class="node-desc">Receives incoming task and identifies the scope of work</div>
+      <div class="node n-engine">
+        <div class="node-title">PIPELINE ORCHESTRATOR</div>
+        <div class="node-desc">Heuristic complexity classifier analyzes the task description</div>
+        <div class="node-bullets">
+          <span>Word count > 20 = standard</span>
+          <span>Complexity keywords detected = standard</span>
+          <span>Otherwise = simple</span>
+        </div>
       </div>
     </div>
 
-    <div class="arrow arrow-down">↓ <span class="arrow-label">scan-request</span></div>
+    <div class="arrow arrow-down">&darr; <span class="arrow-label">classify</span></div>
+
+    <div class="flow-row" style="gap:40px">
+      <div class="node n-decision">
+        <div class="node-title">SIMPLE</div>
+        <div class="node-desc" style="font-size:12px">Worker-1 only &mdash; skip to Work phase</div>
+      </div>
+      <div class="node n-decision">
+        <div class="node-title">STANDARD</div>
+        <div class="node-desc" style="font-size:12px">Full pipeline &mdash; all 4 agents</div>
+      </div>
+    </div>
+
+    <div class="simple-callout">
+      <div class="simple-callout-label">Simple Pipeline (shortcut)</div>
+      <div class="flow-row">
+        <div class="node n-worker">
+          <div class="node-title">WORKER-1</div>
+          <div class="node-desc">Implements the entire task directly</div>
+        </div>
+        <div style="display:flex;align-items:center;color:#484f58;font-size:24px;padding:0 8px">&rarr;</div>
+        <div class="node n-done">
+          <div class="node-title">DONE</div>
+          <div class="node-desc" style="color:rgba(255,255,255,0.6)">Session kept alive for Q&A</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="phase-connector"><div class="connector"></div></div>
+
+  <!-- PHASE 1: PRE-WORK -->
+  <div class="phase-section phase-prework">
+    <div class="phase-label"><span class="num">01</span> Pre-Work &mdash; Security Scan</div>
+
+    <div class="flow-row">
+      <div class="node n-engine">
+        <div class="node-title">ENGINE SENDS SCAN REQUEST</div>
+        <div class="node-desc">Sends task description and project path to Security-1</div>
+      </div>
+    </div>
+
+    <div class="arrow arrow-down">&darr; <span class="arrow-label">SDK query()</span></div>
 
     <div class="flow-row">
       <div class="node n-security">
-        <div class="node-title">SECURITY AGENT — PRE-SCAN</div>
+        <div class="node-title">SECURITY-1 &mdash; PRE-SCAN</div>
         <div class="node-desc">Scans entire target workspace before any work begins</div>
         <div class="node-bullets">
           <span>Prompt injection patterns in files</span>
           <span>Hardcoded credentials, API keys, secrets</span>
           <span>Dependency integrity validation</span>
           <span>Sensitive area mapping (auth, db, env, crypto)</span>
-          <span>Malicious file influence detection</span>
+          <span>Task complexity classification (SIMPLE/STANDARD/COMPLEX)</span>
         </div>
       </div>
     </div>
 
-    <div class="arrow arrow-down">↓ <span class="arrow-label">clearance-report</span></div>
+    <div class="arrow arrow-down">&darr; <span class="arrow-label">clearance report + classification</span></div>
 
     <div class="flow-row">
-      <div class="node n-supervisor">
-        <div class="node-title">SUPERVISOR — PLANS</div>
-        <div class="node-desc">Analyzes clearance report and determines work plan</div>
-        <div class="node-bullets">
-          <span>Decides: independent or paired workers</span>
-          <span>Assigns clearance boundaries per worker</span>
-          <span>Safe | Caution | Off-limits | Needs Approval</span>
-        </div>
+      <div class="node n-engine">
+        <div class="node-title">ENGINE PARSES CLASSIFICATION</div>
+        <div class="node-desc">Security can reclassify: if SIMPLE, downgrades to simple pipeline. If COMPLEX, enables strict review.</div>
       </div>
     </div>
   </div>
 
   <div class="phase-connector"><div class="connector"></div></div>
 
-  <!-- ════════════════════════════════════════════ -->
   <!-- PHASE 2: WORK -->
-  <!-- ════════════════════════════════════════════ -->
   <div class="phase-section phase-work">
-    <div class="phase-label"><span class="num">02</span> Work</div>
+    <div class="phase-label"><span class="num">02</span> Work &mdash; Implementation + Verification</div>
 
     <div class="flow-row">
-      <div class="node n-supervisor">
-        <div class="node-title">SUPERVISOR — ASSIGNS</div>
-        <div class="node-desc">Distributes task assignments with clearance boundaries attached</div>
-        <div class="node-flag">flag: task-assignment</div>
+      <div class="node n-engine">
+        <div class="node-title">ENGINE SENDS TASK TO WORKER-1</div>
+        <div class="node-desc">Task + approved requirements + security clearance boundaries</div>
       </div>
     </div>
 
-    <div class="arrow arrow-down">↓</div>
+    <div class="arrow arrow-down">&darr; <span class="arrow-label">SDK query()</span></div>
 
     <div class="flow-row">
       <div class="node n-worker">
-        <div class="node-title">WORKER-1</div>
-        <div class="node-desc">Executes assigned work within cleared scope</div>
-        <div class="node-flag">progress-update → Supervisor</div>
-      </div>
-      <div class="node n-worker">
-        <div class="node-title">WORKER-2</div>
-        <div class="node-desc">Executes assigned work within cleared scope</div>
-        <div class="node-flag">progress-update → Supervisor</div>
+        <div class="node-title">WORKER-1 &mdash; IMPLEMENTS</div>
+        <div class="node-desc">Executes assigned work within cleared scope. Writes code, creates files, runs commands.</div>
       </div>
     </div>
 
-    <!-- Worker sync -->
-    <div class="bidir-row">
-      <div class="bidir-line"></div>
-      <div class="bidir-label">sync-request · sync-response · heads-up</div>
-      <div class="bidir-line"></div>
-    </div>
+    <div class="arrow arrow-down">&darr; <span class="arrow-label">implementation result</span></div>
 
-    <!-- Supervisor monitoring -->
-    <div class="flow-row">
-      <div class="node n-supervisor" style="max-width:500px">
-        <div class="node-title">SUPERVISOR — MONITORS</div>
-        <div class="node-desc">Actively manages workers throughout the work phase</div>
-        <div class="node-bullets">
-          <span>check-in → Workers if silent</span>
-          <span>direction-change → Workers if plan adjusts</span>
-          <span>Mediates paired worker divergence</span>
-          <span>Receives: blocked, anomaly-detected, needs-guidance</span>
-        </div>
-      </div>
-    </div>
-
-    <!-- Runtime clearance side flow -->
-    <div class="side-flow">
-      <div class="side-flow-label">⚡ Runtime Clearance Loop (triggered when worker hits unchecked scope)</div>
+    <!-- Verification loop -->
+    <div class="verify-loop">
+      <div class="verify-loop-label">Requirements Verification Loop (max 2 passes)</div>
 
       <div class="flow-row">
-        <div class="node n-worker" style="min-width:180px">
-          <div class="node-title">WORKER</div>
-          <div class="node-desc">Hits something outside cleared scope — stops</div>
-          <div class="node-flag">clearance-request →</div>
-        </div>
-
-        <div style="display:flex;align-items:center;color:#484f58;font-size:24px;padding:0 8px">→</div>
-
-        <div class="node n-security">
-          <div class="node-title">SECURITY AGENT — RUNTIME</div>
-          <div class="node-desc">Evaluates against same threat criteria from pre-scan</div>
+        <div class="node n-worker">
+          <div class="node-title">WORKER-2 &mdash; VERIFIES</div>
+          <div class="node-desc">Checks Worker-1's output against task requirements. Read-only &mdash; never modifies code.</div>
           <div class="node-bullets">
-            <span>Monitors for scope creep</span>
+            <span>Outputs checklist: [x] met, [ ] unmet</span>
+            <span>Verdict: COMPLETE or GAPS_FOUND</span>
           </div>
         </div>
       </div>
 
-      <div class="arrow arrow-down">↓</div>
+      <div class="arrow arrow-down">&darr; <span class="arrow-label">verdict</span></div>
 
       <div class="flow-row" style="gap:40px">
         <div class="node n-decision">
-          <div class="node-title">clearance-granted</div>
-          <div class="node-desc" style="font-size:12px">Worker proceeds</div>
+          <div class="node-title">COMPLETE</div>
+          <div class="node-desc" style="font-size:12px">All requirements met &mdash; proceed to sweep</div>
         </div>
         <div class="node n-decision">
-          <div class="node-title">clearance-denied</div>
-          <div class="node-desc" style="font-size:12px">Worker sends scope-concern → Supervisor</div>
+          <div class="node-title">GAPS_FOUND</div>
+          <div class="node-desc" style="font-size:12px">Worker-1 fixes gaps, Worker-2 re-verifies</div>
         </div>
       </div>
+
+      <div class="loop-back">
+        <span class="loop-icon">&larrhk;</span>
+        <span class="loop-text">GAPS_FOUND: Worker-1 fixes unmet requirements, Worker-2 re-checks (max 2 passes)</span>
+      </div>
+    </div>
+
+    <div class="git-checkpoint">
+      <span class="git-icon">git</span> Auto-commit: "WIP: work phase complete"
     </div>
   </div>
 
   <div class="phase-connector"><div class="connector"></div></div>
 
-  <!-- ════════════════════════════════════════════ -->
   <!-- PHASE 3: HANDOFF -->
-  <!-- ════════════════════════════════════════════ -->
   <div class="phase-section phase-handoff">
-    <div class="phase-label"><span class="num">03</span> Handoff</div>
+    <div class="phase-label"><span class="num">03</span> Handoff &mdash; Security Sweep</div>
 
     <div class="flow-row">
-      <div class="node n-worker" style="min-width:180px">
-        <div class="node-title">WORKER-1</div>
-        <div class="node-flag">task-complete + summary</div>
-      </div>
-      <div class="node n-worker" style="min-width:180px">
-        <div class="node-title">WORKER-2</div>
-        <div class="node-flag">task-complete + summary</div>
+      <div class="node n-engine">
+        <div class="node-title">ENGINE SENDS SWEEP REQUEST</div>
+        <div class="node-desc">Sends task + Worker-1 and Worker-2 summaries to Security-1</div>
       </div>
     </div>
 
-    <div class="arrow arrow-down">↓ <span class="arrow-label">task-complete</span></div>
-
-    <div class="flow-row">
-      <div class="node n-supervisor">
-        <div class="node-title">SUPERVISOR — VERIFIES</div>
-        <div class="node-desc">Confirms work addresses original task before sending to Security</div>
-        <div class="node-flag">sweep-request →</div>
-      </div>
-    </div>
-
-    <div class="arrow arrow-down">↓ <span class="arrow-label">sweep-request</span></div>
+    <div class="arrow arrow-down">&darr; <span class="arrow-label">SDK query()</span></div>
 
     <div class="flow-row">
       <div class="node n-security">
-        <div class="node-title">SECURITY AGENT — POST-WORK SWEEP</div>
+        <div class="node-title">SECURITY-1 &mdash; POST-WORK SWEEP</div>
         <div class="node-desc">Validates all completed output before it reaches the Reviewer</div>
         <div class="node-bullets">
           <span>Prompt injection in new/modified files</span>
           <span>Accidentally committed secrets or credentials</span>
           <span>Unauthorized dependencies added</span>
-          <span>Behavioral drift from malicious file influence</span>
-          <span>Scope adherence — only touches cleared areas</span>
+          <span>Scope adherence &mdash; only touches cleared areas</span>
         </div>
       </div>
     </div>
 
-    <div class="arrow arrow-down">↓ <span class="arrow-label">handoff-clearance</span></div>
+    <div class="arrow arrow-down">&darr; <span class="arrow-label">verdict</span></div>
 
     <div class="flow-row" style="gap:40px">
       <div class="node n-decision">
-        <div class="node-title">APPROVED</div>
-        <div class="node-desc" style="font-size:12px">Proceed to Review →</div>
+        <div class="node-title">APPROVED / FLAGGED</div>
+        <div class="node-desc" style="font-size:12px">Proceed to Review</div>
       </div>
       <div class="node n-decision">
-        <div class="node-title">BLOCKED / FLAGGED</div>
-        <div class="node-desc" style="font-size:12px">Supervisor routes issues back to Workers</div>
+        <div class="node-title">BLOCKED</div>
+        <div class="node-desc" style="font-size:12px">Retry Work phase with updated constraints</div>
       </div>
     </div>
 
     <div class="loop-back">
-      <span class="loop-icon">↩</span>
-      <span class="loop-text">BLOCKED → Supervisor sends revision-request → Workers → Re-enter Work Phase</span>
+      <span class="loop-icon">&larrhk;</span>
+      <span class="loop-text">BLOCKED: Engine transitions Handoff &rarr; Work (increments revision counter, max 3)</span>
+    </div>
+
+    <div class="git-checkpoint">
+      <span class="git-icon">git</span> Auto-commit: "WIP: security sweep passed" (on APPROVED/FLAGGED)
     </div>
   </div>
 
   <div class="phase-connector"><div class="connector"></div></div>
 
-  <!-- ════════════════════════════════════════════ -->
   <!-- PHASE 4: REVIEW -->
-  <!-- ════════════════════════════════════════════ -->
   <div class="phase-section phase-review">
-    <div class="phase-label"><span class="num">04</span> Review</div>
+    <div class="phase-label"><span class="num">04</span> Review &mdash; Quality Evaluation</div>
 
     <div class="flow-row">
-      <div class="node n-supervisor">
-        <div class="node-title">SUPERVISOR — PACKAGES</div>
-        <div class="node-desc">Bundles security-cleared work with task context for the Reviewer</div>
-        <div class="node-flag">review-request →</div>
+      <div class="node n-engine">
+        <div class="node-title">ENGINE SENDS REVIEW REQUEST</div>
+        <div class="node-desc">Sends task + Worker summaries to Reviewer-1. Strict criteria for COMPLEX tasks.</div>
       </div>
     </div>
 
-    <div class="arrow arrow-down">↓ <span class="arrow-label">review-request</span></div>
+    <div class="arrow arrow-down">&darr; <span class="arrow-label">SDK query()</span></div>
 
     <div class="flow-row">
       <div class="node n-reviewer">
-        <div class="node-title">REVIEWER — EVALUATES</div>
-        <div class="node-desc">Assesses quality only — does NOT evaluate security</div>
+        <div class="node-title">REVIEWER-1 &mdash; EVALUATES</div>
+        <div class="node-desc">Assesses quality only &mdash; does NOT evaluate security</div>
         <div class="node-bullets">
-          <span>Correctness — does it solve the task</span>
-          <span>Code quality — structure, readability, patterns</span>
-          <span>Completeness — gaps, edge cases, tests</span>
-          <span>Integration — fits with broader codebase</span>
+          <span>Correctness &mdash; does it solve the task</span>
+          <span>Code quality &mdash; structure, readability, patterns</span>
+          <span>Completeness &mdash; gaps, edge cases, tests</span>
+          <span>Integration &mdash; fits with broader codebase</span>
         </div>
       </div>
     </div>
 
-    <div class="arrow arrow-down">↓ <span class="arrow-label">verdict</span></div>
+    <div class="arrow arrow-down">&darr; <span class="arrow-label">verdict</span></div>
 
     <div class="flow-row" style="gap:24px">
       <div class="node n-done">
-        <div class="node-title">✓ APPROVED</div>
-        <div class="node-desc" style="color:rgba(255,255,255,0.6)">Task complete — Supervisor closes out</div>
+        <div class="node-title">APPROVED</div>
+        <div class="node-desc" style="color:rgba(255,255,255,0.6)">Pipeline complete &mdash; sessions kept alive for Q&A</div>
       </div>
       <div class="node n-decision">
-        <div class="node-title">REVISE</div>
-        <div class="node-desc" style="font-size:12px">Specific feedback → Supervisor → Workers</div>
+        <div class="node-title">REVISION_NEEDED</div>
+        <div class="node-desc" style="font-size:12px">Retry Work phase with feedback</div>
       </div>
       <div class="node n-decision">
-        <div class="node-title">REJECT</div>
-        <div class="node-desc" style="font-size:12px">Fundamentally off-track → Re-plan</div>
+        <div class="node-title">REJECTED</div>
+        <div class="node-desc" style="font-size:12px">Restart from Pre-Work (full re-plan)</div>
       </div>
     </div>
 
     <div class="loop-back">
-      <span class="loop-icon">↩</span>
-      <span class="loop-text">REVISE → Supervisor routes feedback → Workers → Re-enter Work Phase</span>
+      <span class="loop-icon">&larrhk;</span>
+      <span class="loop-text">REVISION_NEEDED: Engine transitions Review &rarr; Work (increments revision counter, max 3)</span>
     </div>
     <div class="loop-back">
-      <span class="loop-icon">↩↩</span>
-      <span class="loop-text">REJECT → Supervisor re-plans from scratch → Re-enter Pre-Work Phase</span>
+      <span class="loop-icon">&larrhk;&larrhk;</span>
+      <span class="loop-text">REJECTED: Engine transitions Review &rarr; PreWork (increments rejection counter, max 2)</span>
+    </div>
+
+    <div class="git-checkpoint">
+      <span class="git-icon">git</span> Final auto-commit: task description (on APPROVED)
+    </div>
+  </div>
+
+  <div class="phase-connector"><div class="connector"></div></div>
+
+  <!-- DONE -->
+  <div class="flow-row">
+    <div class="node n-done" style="max-width:500px">
+      <div class="node-title">PIPELINE COMPLETE</div>
+      <div class="node-desc" style="color:rgba(255,255,255,0.6)">
+        All agent sessions remain alive for Q&A.
+        Human can Push & Merge from the dashboard.
+      </div>
+    </div>
+  </div>
+
+  <div class="connector"></div>
+
+  <!-- LOOP LIMITS -->
+  <div class="flow-row">
+    <div class="node n-human" style="max-width:600px">
+      <div class="node-title">LOOP LIMITS (enforced by state machine)</div>
+      <div class="node-bullets">
+        <span>Max 3 revisions (Handoff&rarr;Work or Review&rarr;Work)</span>
+        <span>Max 2 rejections (Review&rarr;PreWork)</span>
+        <span>Max 5 total backward transitions</span>
+        <span>Max 2 verification passes per Work phase entry</span>
+        <span>Exceeding any limit &rarr; errored state &rarr; human notified</span>
+      </div>
     </div>
   </div>
 
@@ -783,23 +800,20 @@
   let startX, startY;
 
   function applyTransform() {
-    canvas.style.transform = `translate(${translateX}px, ${translateY}px) scale(${scale})`;
+    canvas.style.transform = 'translate(' + translateX + 'px, ' + translateY + 'px) scale(' + scale + ')';
     zoomLabel.textContent = Math.round(scale * 100) + '%';
   }
 
   function centerCanvas() {
     const cw = container.clientWidth;
-    const ch = container.clientHeight;
     const canvasW = 1400 * scale;
     translateX = Math.max(0, (cw - canvasW) / 2);
     translateY = 0;
     applyTransform();
   }
 
-  // Initial position
   setTimeout(centerCanvas, 50);
 
-  // Zoom with scroll
   container.addEventListener('wheel', function(e) {
     e.preventDefault();
     const rect = container.getBoundingClientRect();
@@ -810,14 +824,12 @@
     const delta = e.deltaY > 0 ? 0.92 : 1.08;
     scale = Math.min(Math.max(scale * delta, 0.2), 3);
 
-    // Zoom toward cursor
     translateX = mouseX - (mouseX - translateX) * (scale / prevScale);
     translateY = mouseY - (mouseY - translateY) * (scale / prevScale);
 
     applyTransform();
   }, { passive: false });
 
-  // Pan with drag
   container.addEventListener('mousedown', function(e) {
     isDragging = true;
     startX = e.clientX - translateX;
@@ -836,22 +848,11 @@
   });
 
   // Touch support
-  let lastTouchDist = 0;
-  let lastTouchX = 0;
-  let lastTouchY = 0;
-
   container.addEventListener('touchstart', function(e) {
     if (e.touches.length === 1) {
       isDragging = true;
       startX = e.touches[0].clientX - translateX;
       startY = e.touches[0].clientY - translateY;
-    } else if (e.touches.length === 2) {
-      isDragging = false;
-      const dx = e.touches[0].clientX - e.touches[1].clientX;
-      const dy = e.touches[0].clientY - e.touches[1].clientY;
-      lastTouchDist = Math.sqrt(dx * dx + dy * dy);
-      lastTouchX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
-      lastTouchY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
     }
   }, { passive: false });
 
@@ -861,24 +862,6 @@
       translateX = e.touches[0].clientX - startX;
       translateY = e.touches[0].clientY - startY;
       applyTransform();
-    } else if (e.touches.length === 2) {
-      const dx = e.touches[0].clientX - e.touches[1].clientX;
-      const dy = e.touches[0].clientY - e.touches[1].clientY;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      const midX = (e.touches[0].clientX + e.touches[1].clientX) / 2;
-      const midY = (e.touches[0].clientY + e.touches[1].clientY) / 2;
-
-      const prevScale = scale;
-      scale = Math.min(Math.max(scale * (dist / lastTouchDist), 0.2), 3);
-
-      const rect = container.getBoundingClientRect();
-      const px = midX - rect.left;
-      const py = midY - rect.top;
-      translateX = px - (px - translateX) * (scale / prevScale);
-      translateY = py - (py - translateY) * (scale / prevScale);
-
-      lastTouchDist = dist;
-      applyTransform();
     }
   }, { passive: false });
 
@@ -886,7 +869,6 @@
     isDragging = false;
   });
 
-  // Button controls
   document.getElementById('zoomIn').addEventListener('click', function() {
     const cw = container.clientWidth / 2;
     const ch = container.clientHeight / 2;
@@ -910,7 +892,7 @@
   document.getElementById('fitView').addEventListener('click', function() {
     const cw = container.clientWidth;
     const ch = container.clientHeight - 56;
-    scale = Math.min(cw / 1400, ch / 4200, 1);
+    scale = Math.min(cw / 1400, ch / 4800, 1);
     centerCanvas();
   });
 
@@ -919,7 +901,6 @@
     centerCanvas();
   });
 
-  // Keyboard shortcuts
   window.addEventListener('keydown', function(e) {
     if (e.key === '=' || e.key === '+') {
       document.getElementById('zoomIn').click();

@@ -1,10 +1,9 @@
 # ClaudeOrchestra — System Architecture
 
-> Source of truth for MAS topology, agent autonomy, authority
-> hierarchy, and coordination patterns.
+> Source of truth for pipeline topology, agent roles, authority
+> model, and coordination patterns.
 >
 > **Cross-references:**
-> - [Message Contract](./message-contract.md) — communication layer
 > - [Roles & JTBD](./roles-and-jtbd.md) — role definitions
 > - [State Machine](./state-machine.md) — workflow model
 > - [Visual Diagram](../orchestration-workflow.html) — interactive
@@ -12,300 +11,233 @@
 
 ---
 
-## Agent Topology
+## Pipeline Architecture
 
-ClaudeOrchestra uses a **fixed 5-agent star topology** per team.
-The Supervisor is the hub. All inter-role communication routes
-through the Supervisor except two sidecar paths:
+ClaudeOrchestra uses a **deterministic, code-driven pipeline**.
+There is no Supervisor LLM — the `PipelineOrchestrator` class
+drives the workflow directly, sending prompts to agents via
+the Claude Agent SDK `query()` API.
 
 ```
-                 ┌──────────┐
-                 │ Reviewer  │
-                 └─────┬─────┘
-                       │
-          ┌────────────┴────────────┐
-          │       SUPERVISOR        │  ← hub
-          └──┬──────┬──────────┬────┘
-             │      │          │
-        ┌────┴─┐ ┌──┴───┐ ┌───┴──────┐
-        │ W-1  │ │ W-2  │ │ Security │
-        └──┬───┘ └──┬───┘ └──────────┘
-           │        │          ▲
-           └────────┴──────────┘
-            direct: clearance-request/response
+PipelineOrchestrator (TypeScript)
+├── Complexity Router (heuristic classification)
+├── Agent Sessions (SDK query() with warm PromptChannel)
+└── Phase Controller (state machine)
+    ↓ manages
+Team State Store
+    ↓ spawns/manages
+Up to 4 Agent Sessions (1 per role)
+```
+
+### Two Pipeline Modes
+
+| Mode | Agents | When |
+|------|--------|------|
+| **Simple** | Worker-1 only | Short task description, no complexity keywords |
+| **Standard** | Security-1, Worker-1, Worker-2, Reviewer-1 | Longer description or complexity keywords detected |
+
+The complexity router (`src/router/complexity-router.ts`)
+classifies tasks heuristically based on description length
+(>20 words = standard) and keyword analysis (e.g., "test",
+"refactor", "implement", "api"). Security-1 can also
+reclassify a standard task to simple during its pre-scan.
+
+### Standard Pipeline Flow
+
+```
+Security-1 (pre-scan)
+    ↓
+Worker-1 (implement) → Worker-2 (verify requirements)
+    ↓                       ↓ gaps found? → Worker-1 fixes (max 2 loops)
+    ↓
+Security-1 (post-sweep)
+    ↓ BLOCKED? → back to Worker-1
+    ↓ APPROVED/FLAGGED ↓
+Reviewer-1 (quality review)
+    ↓ REVISION_NEEDED? → back to Worker-1
+    ↓ REJECTED? → back to Security-1 (full restart)
+    ↓ APPROVED ↓
+Done
+```
+
+### Simple Pipeline Flow
+
+```
+Worker-1 (implement task)
+    ↓
+Done
+```
+
+---
+
+## Agent Topology
+
+ClaudeOrchestra uses up to **4 agent sessions** per team.
+All coordination is handled by the engine code — agents do
+not communicate with each other directly.
+
+```
+         PipelineOrchestrator (code)
+        ┌──────┬──────┬──────────┐
+        │      │      │          │
+   ┌────┴─┐ ┌──┴───┐ ┌┴────────┐ ┌─────────┐
+   │ W-1  │ │ W-2  │ │Security │ │Reviewer │
+   └──────┘ └──────┘ └─────────┘ └─────────┘
 ```
 
 ### Agents Per Team
 
 | Role | Instances | Purpose |
 |------|-----------|---------|
-| Supervisor | 1 | Receives tasks, plans execution, directs workers, coordinates handoffs |
-| Worker | 2 | Execute assigned implementation work within security-cleared boundaries |
-| Security Agent | 1 | Pre-scan, runtime clearance, post-work validation |
-| Reviewer | 1 | Evaluates quality of completed, security-cleared work |
+| Worker-1 | 1 | Implements the assigned task within security-cleared boundaries |
+| Worker-2 | 1 | Verifies Worker-1's output against task requirements (does NOT write code) |
+| Security Agent | 1 | Pre-scan clearance + post-work sweep validation |
+| Reviewer | 1 | Evaluates quality and correctness of security-cleared work |
 
-### Communication Paths
+### Communication Model
 
-| Path | Direction | When |
-|------|-----------|------|
-| Supervisor ↔ Worker | Bidirectional | All phases |
-| Supervisor ↔ Security | Bidirectional | Pre-work, handoff, escalations |
-| Supervisor ↔ Reviewer | Bidirectional | Review phase |
-| Worker → Security | Unidirectional request | Runtime clearance during work |
-| Security → Worker | Unidirectional response | Clearance grant/deny |
-| Worker ↔ Worker | Bidirectional (when paired) | Work phase coordination |
+Agents do **not** communicate with each other. The pipeline
+orchestrator acts as the sole coordinator:
 
-All other paths are **invalid**. Workers never communicate
-directly with the Reviewer. The Reviewer never communicates
-directly with Security. See the
-[flag validation matrix](./message-contract.md#flag-validation-matrix)
-for enforcement rules.
+1. Engine sends a prompt to an agent via SDK `query()`.
+2. Agent processes the prompt and returns a response.
+3. Engine parses the response for verdicts (regex-based).
+4. Engine decides the next step based on the verdict.
+5. Engine sends the next prompt to the next agent.
+
+All agent sessions are created in parallel at pipeline start
+(cold-start latency ~12s happens concurrently). Subsequent
+messages within a warm session are ~2-3s.
 
 ---
 
-## Agent Autonomy Model
-
-Each agent operates as a **semi-autonomous actor**: it has a
-defined role, receives instructions, and executes independently
-within its boundaries. However, autonomy is constrained by role.
-
-### Autonomy Levels Per Role
-
-| Role | Autonomy Level | Description |
-|------|---------------|-------------|
-| Supervisor | **High** | Can plan, assign, reassign, adjust, and close tasks. Cannot override Security clearance decisions. |
-| Worker | **Medium** | Can implement freely within cleared scope. Must stop and request clearance when hitting unchecked areas. Cannot refuse valid task assignments. |
-| Security Agent | **High** | Can block work, deny clearance, flag concerns independently. Cannot be overridden by the Supervisor (see Authority Hierarchy). |
-| Reviewer | **Medium** | Can approve, revise, or reject independently based on quality assessment. Cannot evaluate security. |
-
-### What Agents Can NOT Do
-
-- **Workers** cannot refuse a `task-assignment` from the
-  Supervisor. If a Worker detects a problem with the assignment,
-  it sends `needs-guidance` to the Supervisor rather than
-  refusing.
-- **Workers** cannot proceed on unchecked scope. They must stop
-  and send `clearance-request` to Security.
-- **Reviewers** cannot evaluate security concerns. If a Reviewer
-  notices something security-related, it includes it in feedback
-  as a note, but the Security Agent's clearance is the authority.
-- **Supervisors** cannot override Security Agent decisions (see
-  Authority Hierarchy below).
-
----
-
-## Authority Hierarchy
-
-When agents disagree or produce conflicting directives, the
-following hierarchy resolves the conflict:
+## Authority Model
 
 ### Security Decisions
 
-```
-Human Orchestrator  →  final authority
-      ↑
-Security Agent      →  can block, deny, flag (cannot be overridden by Supervisor)
-      ↑
-Supervisor          →  can request re-evaluation, cannot override
-```
+The Security Agent's verdict is authoritative:
 
-**The Security Agent has veto power on security matters.** If
-the Security Agent issues a `clearance-denied` or a
-`handoff-clearance: BLOCKED`, the Supervisor cannot override it.
-The Supervisor's options are:
+- **APPROVED** — work is clean, proceed to review
+- **FLAGGED** — concerns noted but not blocking, proceed
+- **BLOCKED** — must be resolved, triggers automatic retry
 
-1. **Request re-evaluation** — send `escalation-query` to
-   Security with additional context, asking Security to
-   re-assess.
-2. **Adjust the plan** — modify the work to avoid the
-   blocked area.
-3. **Escalate to human** — if the Supervisor believes
-   Security is wrong, escalate to the human orchestrator
-   for a manual decision.
-
-The Security Agent cannot be overridden programmatically. Only
-the human orchestrator can override a security block, and only
-through the dashboard's attention system.
-
-### Task Decisions
-
-```
-Human Orchestrator  →  final authority
-      ↑
-Supervisor          →  plans, assigns, adjusts, closes
-      ↑
-Worker              →  executes, reports, flags concerns
-```
-
-The Supervisor has full authority over task planning and
-assignment. Workers execute. If a Worker has concerns, it sends
-`needs-guidance` or `scope-concern` — it does not unilaterally
-change the plan.
+A BLOCKED verdict causes an automatic backward transition
+(Handoff → Work). The engine does not override Security.
+If loop limits are exceeded, the pipeline errors and
+escalates to the human.
 
 ### Quality Decisions
 
-```
-Human Orchestrator  →  final authority
-      ↑
-Reviewer            →  approve, revise, reject
-      ↑
-Supervisor          →  packages work for review, routes feedback
-```
+The Reviewer's verdict is authoritative:
 
-The Reviewer's verdict is authoritative on quality. The
-Supervisor routes the verdict but does not overrule it. If the
-Supervisor disagrees with a `review-rejected`, it can re-plan
-and resubmit, but it cannot mark the task as done without
-Reviewer approval.
+- **APPROVED** — task complete
+- **REVISION_NEEDED** — specific changes required, retry Work
+- **REJECTED** — fundamentally off-track, restart from PreWork
 
----
+### Verification Decisions
 
-## Conflict Resolution
+Worker-2's verdict drives the inner verification loop:
 
-### Worker-Worker Conflicts (Paired Mode)
+- **COMPLETE** — all requirements met, proceed to sweep
+- **GAPS_FOUND** — specific requirements missing, Worker-1
+  fixes (max 2 verification passes)
 
-When Workers are paired and produce conflicting implementations
-(e.g., incompatible interface definitions via `sync-response`):
+### Human Authority
 
-1. **Detection:** The Supervisor monitors Worker-Worker messages
-   (`sync-request`, `sync-response`, `heads-up`). The
-   Supervisor does not intervene in every sync exchange, but
-   checks for conflicts when both Workers send `sync-response`
-   messages that reference the same interface or boundary.
-2. **Mediation protocol:**
-   a. Supervisor sends `pause` to both Workers.
-   b. Supervisor reviews both proposals.
-   c. Supervisor picks one, synthesizes a compromise, or
-      redefines the boundary.
-   d. Supervisor sends `direction-change` to both Workers
-      with the resolution.
-   e. Supervisor sends `resume` to both Workers.
-3. **Escalation:** If the Supervisor cannot resolve the
-   conflict (e.g., both approaches are valid but architecturally
-   significant), it escalates to the human orchestrator via a
-   `critical` priority message.
+The human orchestrator has final authority via the dashboard:
 
-### Security-Supervisor Disagreements
-
-When the Supervisor believes Security is being too restrictive:
-
-1. Supervisor sends `escalation-query` to Security with
-   specific reasoning for why the area should be cleared.
-2. Security re-evaluates and responds with
-   `escalation-response` (either maintaining or adjusting
-   its assessment).
-3. If Security maintains its block, the Supervisor must
-   either adjust the plan or escalate to the human
-   orchestrator.
-
-### Reviewer-Supervisor Disagreements
-
-The Supervisor cannot override the Reviewer. If the Supervisor
-believes a `review-rejected` is incorrect:
-
-1. Supervisor re-plans and resubmits (entering Pre-Work again).
-2. If the same work is rejected a second time, the system
-   escalates to the human orchestrator (enforced by the
-   [max revision loop count](./state-machine.md#loop-limits)).
+- Can cancel any task at any time
+- Receives notifications for security blocks, revisions,
+  rejections
+- Can respond to blocking feedback questions
+- Can push and merge completed work via dashboard
 
 ---
 
-## Broadcast and Multicast
+## Agent Sessions
 
-The message contract supports targeted messaging via
-`roleTarget` and `roleTargetInstance`. Two special patterns
-are supported:
+Each agent gets a **warm SDK session** via the Claude Agent
+SDK `query()` call with a `PromptChannel` for streaming input.
 
-### Role-Level Routing (`roleTargetInstance: null`)
+### Session Lifecycle
 
-When `roleTargetInstance` is `null`, the message is delivered
-to **all instances** of the target role. This is a multicast
-to a role group.
+1. **Created** when a task is assigned (all sessions in parallel)
+2. **Warm** throughout the pipeline — subsequent messages reuse
+   the same session (~2-3s vs ~12s cold start)
+3. **Kept alive** after pipeline completion for Q&A
+4. **Closed** when the team is terminated
 
-Use cases:
-- Supervisor sends `pause` to all Workers:
-  `roleTarget: "Worker"`, `roleTargetInstance: null`
-- Supervisor sends `direction-change` to all Workers
+### Session Identity
 
-### Team Broadcast
+Each session is configured with:
+- Role-specific CLAUDE.md system prompt
+- Working directory set to the target project
+- Model selection (configurable, default: all use the same model)
 
-For messages that must reach all agents in a team (e.g., task
-cancellation), the engine handles this at the orchestrator
-level rather than through the message contract. The orchestrator
-sends individual messages to each agent's inbox.
+### Context Management
 
-Events that trigger team broadcast:
-- **Task cancelled** — human orchestrator cancels via dashboard
-- **Team shutdown** — graceful termination initiated
+Sessions accumulate context through:
+1. Their initial CLAUDE.md prompt (role instructions)
+2. Sequential prompts from the engine
+3. Work performed (file reads/writes via Claude Code tools)
 
-These are engine-level operations, not agent-to-agent messages.
-See [Operations](./operations.md#graceful-shutdown-protocol)
-for the shutdown sequence.
+Context is ephemeral to the session. If a session is closed
+and recreated, previous context is lost. The engine provides
+summary context in subsequent prompts to compensate.
 
 ---
 
-## Agent Identity and State
+## Auto-Commits
 
-### Identity (Persistent)
+The engine performs automatic git commits at safety
+checkpoints during the standard pipeline:
 
-An agent's identity is defined by its CLAUDE.md role file and
-environment variables set at spawn time:
+| Checkpoint | Commit Message |
+|-----------|---------------|
+| After Work phase completes | `WIP: work phase complete` |
+| After Security sweep passes | `WIP: security sweep passed` |
+| Pipeline success | First 72 chars of task description |
 
-- `CLAUDE_ORCHESTRA_ROLE` — the role (Supervisor, Worker,
-  Security, Reviewer)
-- `CLAUDE_ORCHESTRA_INSTANCE` — the instance name (Worker-1,
-  Worker-2, etc.)
-- `CLAUDE_ORCHESTRA_TEAM_ID` — the team this agent belongs to
+The engine ensures the project is on a non-main branch
+(`dev` created if needed) and adds `.claude-orchestra/` to
+`.gitignore`.
 
-Identity does not change during an agent's lifetime.
+---
 
-### State (Ephemeral)
+## Feedback System
 
-An agent accumulates context through:
-1. Its initial CLAUDE.md prompt (role instructions)
-2. Messages received via its inbox
-3. Work performed (file reads/writes in the project)
-4. Its own Claude Code CLI context window
+The pipeline supports two feedback patterns for dashboard
+integration:
 
-**Agent state is ephemeral to the CLI instance.** If an agent
-process is terminated and respawned, it loses its accumulated
-context. Recovery relies on:
-- Re-reading inbox history from the filesystem
-- The team's `state.json` capturing what phase/status the
-  agent was in
-- The engine providing a "recovery prompt" that summarizes
-  what the agent was doing before the crash
+### Non-Blocking (Fire-and-Forget)
 
-See [Context Management](./context-management.md) for context
-window strategy and [Operations](./operations.md#crash-recovery)
-for the respawn protocol.
+Notifications that don't pause the pipeline:
+- Requirements gap warnings from Worker-2
+- Security block notifications
+- Revision/rejection notifications
+- Completion summaries
 
-### Agent Lifecycle
+### Blocking (Pause Until Response)
 
-Agents are **ephemeral per task**:
-1. **Spawned** when a task is assigned to a team
-2. **Active** throughout the task's workflow phases
-3. **Terminated** when the task reaches a terminal state
-   (done, cancelled, errored)
-
-Agents are NOT reused across tasks. Each new task spawns fresh
-CLI instances. This avoids context pollution between tasks and
-simplifies the recovery model.
+Questions that halt the pipeline until the user responds:
+- Requirements approval before work begins
+- Any decision that requires human input
 
 ---
 
 ## Multi-Team Coordination
 
-Teams are fully isolated. There is no inter-team communication.
-Each team:
-- Has its own `data/teams/{team-id}/` directory
-- Has its own 5 agent processes
+Teams are fully isolated. There is no inter-team
+communication. Each team:
+
+- Has its own `.claude-orchestra/teams/{team-id}/` directory
+  inside the target project
+- Has its own agent sessions
 - Has its own workflow phase state
 - Operates on its own project path
 
-The orchestrator manages multiple teams concurrently by running
-independent `tick()` loops (or a single loop that iterates
-over all teams). Teams do not share agents, messages, or state.
-
 The human orchestrator is the only entity with cross-team
 visibility, provided by the dashboard.
+
+Sequential teams on the same repo are supported. Parallel
+teams on the same repo are not yet supported.

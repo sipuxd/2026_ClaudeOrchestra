@@ -60,9 +60,9 @@ describe('DashboardServer', () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dashboard-test-'));
     rolesDir = path.join(tmpDir, 'roles');
     fs.mkdirSync(rolesDir, { recursive: true });
-    fs.writeFileSync(path.join(rolesDir, 'worker.claude.md'), '# Worker');
-    fs.writeFileSync(path.join(rolesDir, 'security.claude.md'), '# Security');
-    fs.writeFileSync(path.join(rolesDir, 'reviewer.claude.md'), '# Reviewer');
+    fs.writeFileSync(path.join(rolesDir, 'worker.agent.md'), '# Worker');
+    fs.writeFileSync(path.join(rolesDir, 'security.agent.md'), '# Security');
+    fs.writeFileSync(path.join(rolesDir, 'reviewer.agent.md'), '# Reviewer');
 
     orchestrator = new PipelineOrchestrator({
       registryPath: path.join(tmpDir, 'registry.json'),

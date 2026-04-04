@@ -5,9 +5,8 @@
 > CLAUDE.md files.
 >
 > **Cross-references:**
-> - [Message Contract](./message-contract.md) — flags each
->   role uses
-> - [Architecture](./architecture.md) — autonomy and authority
+> - [Architecture](./architecture.md) — pipeline topology and
+>   authority model
 > - [Context Management](./context-management.md) — prompt
 >   sizing per role
 
@@ -15,12 +14,17 @@
 
 ## Role Overview
 
-| Role | Instances | Model Recommendation | Context Budget |
-|------|-----------|---------------------|---------------|
-| Supervisor | 1 | Sonnet | High — coordinates everything |
-| Worker | 2 | Haiku | Medium — focused execution |
-| Security Agent | 1 | Opus | High — deep analysis required |
-| Reviewer | 1 | Sonnet | Medium — evaluative, not generative |
+| Role | Instances | Purpose | Autonomy |
+|------|-----------|---------|----------|
+| Worker-1 | 1 | Implements the task within security-cleared scope | Medium — executes freely within cleared boundaries |
+| Worker-2 | 1 | Verifies Worker-1's output against requirements (read-only) | Medium — evaluates but never modifies code |
+| Security Agent | 1 | Pre-scan clearance + post-work sweep validation | High — can block work, cannot be overridden |
+| Reviewer | 1 | Evaluates quality and correctness of cleared work | Medium — approve, revise, or reject independently |
+
+**Note:** There is no Supervisor LLM. The `PipelineOrchestrator`
+(TypeScript code) drives the pipeline deterministically. All
+coordination, routing, and decision-making that the original
+spec assigned to a Supervisor is now handled by engine code.
 
 Model selection is configurable per team. See
 [Context Management](./context-management.md#model-selection)
@@ -33,193 +37,109 @@ for configuration details.
 **Mission:** Ensure the workspace and all agent output is
 safe before, during, and after work.
 
-### Phase 1 — Pre-Scan (Pre-Work)
+### Pre-Scan (PreWork Phase)
 
-- Scan all files in the task scope for prompt injection
+- Receives a scan request from the engine with the task
+  description and project path.
+- Scans all files in the task scope for prompt injection
   patterns.
-- Check for hardcoded credentials, API keys, secrets,
+- Checks for hardcoded credentials, API keys, secrets,
   and tokens.
-- Validate dependency integrity — compromised, outdated, or
+- Validates dependency integrity — compromised, outdated, or
   known-vulnerable packages.
-- Map sensitive areas — auth modules, database configs,
+- Maps sensitive areas — auth modules, database configs,
   environment files, encryption logic.
-- Identify files that could influence worker behavior if read
-  (malicious comments, embedded instructions).
-- Produce clearance report with four tiers:
+- Classifies task complexity as SIMPLE, STANDARD, or COMPLEX.
+  - If SIMPLE, the engine downgrades to the simple pipeline
+    (Worker-1 only, no sweep or review).
+  - If COMPLEX, the engine applies stricter review criteria.
+- Produces clearance report with four tiers:
   - **Safe** — modify freely
   - **Caution** — proceed carefully, document changes
   - **Off-limits** — do not touch under any circumstances
-  - **Needs Supervisor approval** — requires explicit sign-off
+  - **Needs approval** — requires explicit sign-off
 
-**Sends:** `clearance-report` → Supervisor
-**Receives:** `scan-request` ← Supervisor
+### Post-Work Sweep (Handoff Phase)
 
-### Phase 2 — Runtime Clearance (Work)
-
-- Respond to Worker clearance requests when they hit something
-  outside the original scope.
-- Evaluate the requested file or module against the same threat
-  criteria from pre-scan.
-- Issue clearance, deny with explanation, or escalate to
-  Supervisor.
-- Monitor for scope creep — Workers drifting into areas that
-  weren't part of the assignment.
-
-**Sends:** `clearance-granted` or `clearance-denied` → Worker
-**Sends:** `security-alert` → Supervisor (if critical)
-**Receives:** `clearance-request` ← Worker
-
-### Phase 3 — Post-Work Validation (Handoff)
-
-- Sweep all completed output before it reaches the Reviewer.
-- Check for prompt injection patterns introduced in new or
+- Receives a sweep request from the engine with Worker-1
+  and Worker-2 summaries.
+- Sweeps all completed output before it reaches the Reviewer.
+- Checks for prompt injection patterns introduced in new or
   modified files.
-- Scan for accidentally committed secrets or credentials.
-- Verify no unauthorized dependencies were added.
-- Detect behavioral drift — did the Worker's output deviate
-  from the task in ways that suggest influence from a malicious
-  file.
-- Confirm scope adherence — the work product only touches what
-  was cleared.
-- Produce handoff clearance:
-  - **Approved** — work is clean, proceed to review
-  - **Flagged** — concerns noted but not blocking, proceed
-    with caution notes
-  - **Blocked** — security issues found, must be resolved
-    before review
-
-**Sends:** `handoff-clearance` → Supervisor
-**Receives:** `sweep-request` ← Supervisor
+- Scans for accidentally committed secrets or credentials.
+- Verifies no unauthorized dependencies were added.
+- Detects scope violations — work product touches areas
+  outside cleared scope.
+- Produces handoff verdict:
+  - **APPROVED** — work is clean, proceed to review
+  - **FLAGGED** — concerns noted but not blocking, proceed
+    with caution
+  - **BLOCKED** — security issues found, must be resolved
+    (triggers automatic retry of Work phase)
 
 ---
 
-## Supervisor
+## Worker-1
 
-**Mission:** Receive tasks, plan execution, direct Workers,
-and ensure work is ready for handoff.
+**Mission:** Implement assigned work within cleared boundaries,
+producing working code that satisfies the task requirements.
 
-### Phase 1 — Task Receipt and Planning (Pre-Work)
+### Implementation (Work Phase)
 
-- Receive the incoming task or assignment.
-- Hand the scope to the Security Agent and wait for the
-  clearance report.
-- Analyze the clearance report and determine the work plan —
-  what gets done, in what order, by whom.
-- Decide whether Workers operate independently on separate
-  pieces or paired on the same problem.
-- Produce task assignments with security clearance boundaries
-  attached — each Worker knows what they can touch and what
-  they can't.
+- Receives the task description, approved requirements (if
+  present), and security clearance report from the engine.
+- Implements the full task within the cleared scope.
+- On revision attempts, receives feedback from previous
+  security sweeps or reviewer evaluations and addresses
+  specific issues.
+- On gap-fix attempts, receives Worker-2's checklist of
+  unmet requirements and implements only the missing items.
 
-**Sends:** `scan-request` → Security
-**Receives:** `clearance-report` ← Security
+### What Worker-1 Does NOT Do
 
-### Phase 2 — Active Direction (Work)
-
-- Assign tasks to Worker-1 and Worker-2.
-- Monitor Worker progress — are they blocked, stuck, going in
-  the wrong direction.
-- Mediate if Workers are paired and diverge.
-- Receive escalations from the Security Agent if a runtime
-  clearance is denied.
-- Make judgment calls — adjust the plan, reassign work, change
-  the pairing model if something isn't working.
-- Ensure Workers aren't going silent — if a Worker hasn't
-  communicated in a while, send `check-in`.
-
-**Sends:** `task-assignment`, `direction-change`, `pause`,
-`resume`, `check-in` → Workers
-**Receives:** `task-accepted`, `progress-update`,
-`task-complete`, `blocked`, `needs-guidance`, `scope-concern`,
-`anomaly-detected` ← Workers
-
-### Phase 3 — Handoff Coordination (Handoff)
-
-- Receive completion signals from Workers.
-- Verify the work addresses the original task before involving
-  Security.
-- Hand completed work to the Security Agent for the post-work
-  sweep.
-- If Security flags issues, route them back to the appropriate
-  Worker with specific instructions.
-- If Security clears the work, package it and hand it to the
-  Reviewer.
-- Provide the Reviewer with context — what was the task, what
-  was the approach, any decisions made along the way.
-
-**Sends:** `sweep-request` → Security
-**Sends:** `revision-request` → Workers (if blocked)
-**Sends:** `review-request` → Reviewer (if cleared)
-**Receives:** `handoff-clearance` ← Security
-
-### Phase 4 — Post-Review (Review)
-
-- Receive the Reviewer's feedback.
-- If revisions needed, route feedback to the appropriate Worker
-  and re-enter the Work phase.
-- If rejected, re-plan from scratch and re-enter Pre-Work.
-- If approved, close out the task.
-
-**Sends:** `revision-request` → Workers (if revise)
-**Receives:** `review-approved`, `review-revise`,
-`review-rejected` ← Reviewer
+- Does not communicate directly with other agents.
+- Does not make routing or coordination decisions.
+- Does not evaluate its own work — that's Worker-2 and
+  Reviewer's job.
 
 ---
 
-## Worker
+## Worker-2
 
-**Mission:** Execute assigned work within cleared boundaries,
-communicate status, and flag unknowns.
+**Mission:** Verify that Worker-1's implementation satisfies
+all task requirements. Acts as an engineering manager —
+reads code, checks requirements, never modifies code.
 
-### Phase 1 — Receive and Understand (Pre-Work)
+### Requirements Verification (Work Phase)
 
-- Receive task assignment from the Supervisor with security
-  clearance boundaries.
-- Understand what files and modules are safe to modify, which
-  require caution, and which are off-limits.
-- Identify ambiguities in the assignment and ask the Supervisor
-  for clarification before starting — not mid-work.
+- Receives the original task, approved requirements, and
+  Worker-1's output summary from the engine.
+- For each requirement, checks whether it is implemented
+  in the code.
+- Outputs a checklist:
+  ```
+  REQUIREMENTS CHECKLIST:
+  - [x] Requirement A — implemented
+  - [ ] Requirement B — NOT implemented (explanation)
+  ```
+- Issues a verdict:
+  - **COMPLETE** — all requirements are met, proceed to sweep
+  - **GAPS_FOUND** — specific requirements are missing,
+    Worker-1 must fix them
 
-**Sends:** `task-accepted` → Supervisor
-**Sends:** `needs-guidance` → Supervisor (if ambiguous)
-**Receives:** `task-assignment` ← Supervisor
+### Verification Loop
 
-### Phase 2 — Execute (Work)
+- If GAPS_FOUND, the engine sends the checklist back to
+  Worker-1 for fixes, then re-runs Worker-2 verification.
+- Maximum 2 verification passes per Work phase entry.
+- After 2 passes, proceeds to Security sweep regardless.
 
-- Implement the assigned work within the cleared scope.
-- If working independently, own the full implementation of
-  the assigned piece.
-- If paired with the other Worker, coordinate on shared
-  interfaces, boundaries, and integration points.
-- If the work requires touching something outside the cleared
-  scope, **stop and request runtime clearance** from the
-  Security Agent. Do not proceed on unchecked areas.
-- Communicate progress to the Supervisor at meaningful
-  milestones — not just at the end.
-- Flag blockers immediately — don't sit on them.
+### What Worker-2 Does NOT Do
 
-**Sends:** `progress-update`, `blocked`, `needs-guidance`,
-`scope-concern`, `anomaly-detected` → Supervisor
-**Sends:** `clearance-request` → Security (if needed)
-**Sends:** `sync-request`, `sync-response`, `heads-up` →
-other Worker (if paired)
-**Receives:** `direction-change`, `pause`, `resume`,
-`check-in` ← Supervisor
-**Receives:** `clearance-granted`, `clearance-denied` ←
-Security
-
-### Phase 3 — Completion Signal (Handoff)
-
-- Signal the Supervisor that the work is done.
-- Provide a summary of what was implemented, what was changed,
-  and any decisions made during execution.
-- Call out anything that felt off — files that seemed unusual,
-  behavior that was unexpected, areas where the implementation
-  required judgment calls.
-- This feeds the Security Agent's post-work sweep with useful
-  context.
-
-**Sends:** `task-complete` → Supervisor
+- Does not modify code — read-only verification.
+- Does not flag code quality, style, or performance issues.
+- Only evaluates against the approved requirements list.
+- Does not communicate directly with other agents.
 
 ---
 
@@ -228,184 +148,101 @@ Security
 **Mission:** Evaluate the quality and correctness of completed,
 security-cleared work.
 
-### Phase 1 — Receive (Review)
+### Review (Review Phase)
 
-- Receive the completed work package from the Supervisor along
-  with task context.
-- Understand the original goal, the approach taken, and any
-  relevant decisions.
-- Confirm that the work has been security-cleared — if it
-  hasn't passed through the Security Agent, reject it back to
-  the Supervisor.
-
-**Receives:** `review-request` ← Supervisor
-
-### Phase 2 — Evaluate
-
-- Assess correctness — does the implementation actually solve
-  the task.
-- Assess code quality — structure, readability,
+- Receives the task description, approved requirements,
+  Worker-1 and Worker-2 summaries from the engine.
+- Assesses correctness — does the implementation solve the task.
+- Assesses code quality — structure, readability,
   maintainability, patterns.
-- Assess completeness — are there gaps, missing edge cases,
+- Assesses completeness — are there gaps, missing edge cases,
   untested paths.
-- Assess integration — does this work fit with the broader
-  codebase without introducing conflicts or regressions.
-- Do **not** evaluate security concerns — that's not this
-  role's job. Trust the Security Agent's clearance.
+- Assesses integration — does this work fit with the broader
+  codebase.
+- For COMPLEX tasks (flagged by Security), applies stricter
+  criteria for backward compatibility, data integrity, and
+  security.
+- Does **not** evaluate security concerns — trusts the
+  Security Agent's clearance.
 
-### Phase 3 — Verdict
+### Verdict
 
-- **Approve** — work is ready, task is complete.
-- **Revise** — work needs changes, provide specific actionable
-  feedback routed back through the Supervisor.
-- **Reject** — work is fundamentally off-track, requires
-  re-planning by the Supervisor.
+- **APPROVED** — work is ready, task is complete.
+- **REVISION_NEEDED** — work needs changes, triggers
+  backward transition to Work phase.
+- **REJECTED** — work is fundamentally off-track, triggers
+  backward transition to PreWork phase (full restart).
 
-**Sends:** `review-approved`, `review-revise`, or
-`review-rejected` → Supervisor
+---
+
+## Verdict Parsing
+
+The engine parses agent responses using regex-based verdict
+detection. Each agent type has its own parser:
+
+### Security Verdict (`parseSecurityVerdict`)
+
+Looks for `APPROVED`, `FLAGGED`, or `BLOCKED` at the start
+of the response. Also parses classification (`SIMPLE`,
+`STANDARD`, `COMPLEX`) from pre-scan results.
+
+### Review Verdict (`parseReviewVerdict`)
+
+1. Checks for explicit prefix (strongest signal).
+2. Scans for pattern keywords (revision/approval/reject).
+3. Defaults to `REVISION_NEEDED` if ambiguous (conservative).
+
+### Verify Verdict (`parseVerifyVerdict`)
+
+Looks for `COMPLETE` or `GAPS_FOUND` in Worker-2's response.
 
 ---
 
 ## CLAUDE.md Prompt Engineering Guidelines
 
 Each role gets a dedicated CLAUDE.md file that instructs the
-Claude Code CLI instance on its identity and behavior. These
-files are the critical interface between the engine and the
-agents.
+Claude Code SDK session on its identity and behavior.
 
 ### Required Sections in Every CLAUDE.md
 
 1. **Identity Block**
    ```markdown
    # Role: {ROLE_NAME}
-   # Instance: {INSTANCE_NAME} (set via $CLAUDE_ORCHESTRA_INSTANCE)
-   # Team: {TEAM_ID} (set via $CLAUDE_ORCHESTRA_TEAM_ID)
+   # Instance: {INSTANCE_NAME}
+   # Team: {TEAM_ID}
    ```
 
 2. **Mission Statement** — one sentence from the JTBD above.
 
-3. **Phase-Specific Instructions** — what to do in each
-   workflow phase, structured as clear directives.
+3. **Phase-Specific Instructions** — what to do when prompted,
+   structured as clear directives.
 
-4. **Communication Protocol** — how to send messages:
-   ```markdown
-   ## How to Send Messages
+4. **Output Format** — how to structure responses so the
+   engine's verdict parser can extract decisions:
+   - Security: Begin response with `APPROVED`, `FLAGGED`,
+     or `BLOCKED`
+   - Reviewer: Begin response with `APPROVED`,
+     `REVISION_NEEDED`, or `REJECTED`
+   - Worker-2: End response with `COMPLETE` or `GAPS_FOUND`
 
-   When you need to communicate with another agent, write a
-   JSON file to their inbox directory.
-
-   Inbox path: data/teams/$CLAUDE_ORCHESTRA_TEAM_ID/messages/inbox/{target-instance}/
-
-   File name: {timestamp}-msg-{uuid}.json
-
-   Use this exact JSON format:
-   ```
-   Followed by the full schema with a concrete example.
-
-5. **How to Check Your Inbox**
-   ```markdown
-   ## Checking Your Inbox
-
-   Your inbox is at:
-   data/teams/$CLAUDE_ORCHESTRA_TEAM_ID/messages/inbox/$CLAUDE_ORCHESTRA_INSTANCE/
-
-   Read all .json files in this directory, sorted by filename
-   (which sorts by timestamp). Process each message according
-   to your role's responsibilities for the given flag.
-
-   After processing a message, move it to:
-   data/teams/$CLAUDE_ORCHESTRA_TEAM_ID/messages/archive/
-   ```
-
-6. **Constraints** — explicit prohibitions per role:
-   - Worker: "Do NOT touch files marked as off-limits in your
-     clearance boundaries."
-   - Worker: "Do NOT proceed on areas outside your cleared
-     scope without receiving clearance-granted from Security."
-   - Reviewer: "Do NOT evaluate security concerns. If you
-     notice something security-related, note it in your
-     feedback but do not block on it."
-   - Security: "Do NOT implement fixes. Your job is to
-     identify and report, not to modify code."
-
-7. **Output Format Examples** — at least 2 concrete few-shot
-   examples of messages this role should produce:
-
-### Few-Shot Example: Worker Progress Update
-
-```json
-{
-  "messageId": "msg-a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-  "threadId": "thread-f0e1d2c3-b4a5-6789-0abc-def123456789",
-  "timestamp": "2026-03-07T15:30:00.000Z",
-  "roleSource": "Worker",
-  "roleSourceInstance": "Worker-1",
-  "roleTarget": "Supervisor",
-  "roleTargetInstance": "Supervisor-1",
-  "flag": "progress-update",
-  "priority": "normal",
-  "phase": "work",
-  "content": "Completed the user model with email validation and password hashing. Moving on to the authentication middleware. Estimated 60% through my assignment.",
-  "references": ["msg-previous-task-assignment-id"],
-  "requiresResponse": false,
-  "status": "pending"
-}
-```
-
-### Few-Shot Example: Security Clearance Report
-
-```json
-{
-  "messageId": "msg-b2c3d4e5-f6a7-8901-bcde-f12345678901",
-  "threadId": "thread-a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-  "timestamp": "2026-03-07T14:15:00.000Z",
-  "roleSource": "Security",
-  "roleSourceInstance": "Security-1",
-  "roleTarget": "Supervisor",
-  "roleTargetInstance": "Supervisor-1",
-  "flag": "clearance-report",
-  "priority": "normal",
-  "phase": "pre-work",
-  "content": "Clearance scan complete.\n\nSAFE: src/components/, src/utils/, tests/\nCAUTION: src/api/routes.ts (contains auth middleware), src/config/\nOFF-LIMITS: .env, .env.production, src/config/secrets.ts\nNEEDS APPROVAL: src/database/migrations/ (schema changes affect production)\n\nNo prompt injection patterns detected. No exposed credentials found. Dependencies are current.",
-  "references": ["msg-scan-request-id"],
-  "requiresResponse": false,
-  "status": "pending"
-}
-```
+5. **Constraints** — explicit prohibitions per role:
+   - Worker-1: "Do NOT touch files marked as off-limits in
+     your clearance boundaries."
+   - Worker-2: "Do NOT modify any code. Verification only."
+   - Reviewer: "Do NOT evaluate security concerns."
+   - Security: "Do NOT implement fixes. Identify and report
+     only."
 
 ### Prompt Size Guidelines
 
 | Role | Target CLAUDE.md Size | Rationale |
 |------|----------------------|-----------|
-| Supervisor | 2,000-3,000 tokens | Complex coordination requires detailed instructions |
-| Worker | 1,500-2,000 tokens | Focused execution, simpler decision tree |
-| Security Agent | 2,500-3,500 tokens | Detailed threat criteria, scan procedures |
-| Reviewer | 1,500-2,000 tokens | Clear evaluation framework, simpler interactions |
+| Worker-1 | 1,500-2,000 tokens | Focused implementation, simpler instructions |
+| Worker-2 | 1,000-1,500 tokens | Narrow scope: checklist verification only |
+| Security Agent | 2,500-3,500 tokens | Detailed threat criteria, scan/sweep procedures |
+| Reviewer | 1,500-2,000 tokens | Clear evaluation framework |
 
 These are targets, not hard limits. The goal is to leave
 sufficient context window budget for actual work. See
 [Context Management](./context-management.md) for full
 context budget breakdown.
-
-### Agent Output Format Enforcement
-
-LLM agents will occasionally produce malformed output. The
-engine handles this through a **retry loop**:
-
-1. Agent writes a file to an inbox.
-2. Engine's `receive()` function attempts to parse the JSON.
-3. If parsing fails:
-   a. Log the malformed output with the agent's roleInstance.
-   b. Delete the malformed file from the inbox.
-   c. Send the agent a corrective prompt: "Your last message
-      was malformed JSON. Please re-send using the exact
-      format specified in your instructions."
-   d. Increment a retry counter for this agent.
-4. If the retry counter exceeds **3 consecutive failures**,
-   mark the agent as `errored` and escalate to the human
-   orchestrator.
-5. The retry counter resets to 0 after any successful message.
-
-This is implemented in the engine, not in the CLAUDE.md. The
-agent is unaware of the retry mechanism — it simply receives
-a corrective prompt.

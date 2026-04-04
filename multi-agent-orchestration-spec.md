@@ -6,8 +6,6 @@
 >
 > - [Architecture](docs/architecture.md) — topology, autonomy,
 >   authority hierarchy, conflict resolution
-> - [Message Contract](docs/message-contract.md) — JSON schema,
->   flag enums, validation, ordering, size limits
 > - [Roles & JTBD](docs/roles-and-jtbd.md) — role definitions,
 >   phase-specific jobs, prompt engineering guidelines
 > - [State Machine](docs/state-machine.md) — workflow states,

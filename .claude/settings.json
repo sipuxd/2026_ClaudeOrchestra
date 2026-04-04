@@ -1,0 +1,104 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(open /Users/josephsip/Documents/__ClaudeOrchestra/2026_ClaudeOrchestra/wireframes.html)",
+      "Bash(curl -sL --max-time 15 \"https://code.claude.com/docs/en/agent-teams\")",
+      "Bash(curl -sL --max-time 15 \"https://docs.anthropic.com/en/docs/claude-code/agent-teams\")",
+      "Bash(curl -sL --max-time 15 \"https://docs.claude.ai/en/docs/claude-code/agent-teams\")",
+      "WebSearch",
+      "Bash(mv agents/reviewer.claude.md agents/reviewer.agent.md)",
+      "Bash(mv agents/security-review.claude.md agents/security-review.agent.md)",
+      "Bash(mv agents/security.claude.md agents/security.agent.md)",
+      "Bash(mv agents/supervisor.claude.md agents/supervisor.agent.md)",
+      "Bash(mv agents/worker.claude.md agents/worker.agent.md)",
+      "Read(//Users/josephsip/Documents/__Agent-Architecture-Stuff/files/**)",
+      "WebFetch(domain:pcoi.ai)",
+      "Bash(grep -n \"^import.*message-bus\\\\|^import.*message-types\\\\|^import.*flag-enums\" /Users/josephsip/Documents/__ClaudeOrchestra/2026_ClaudeOrchestra/tests/*.ts)",
+      "Bash(chmod +x scripts/generate-project-context.sh)",
+      "Bash(bash scripts/generate-project-context.sh)",
+      "WebFetch(domain:genai.owasp.org)",
+      "WebFetch(domain:support.claude.com)",
+      "WebFetch(domain:www.paloaltonetworks.com)",
+      "WebFetch(domain:www.aikido.dev)",
+      "WebFetch(domain:goteleport.com)",
+      "Bash(grep -E \"\\\\.ts$\")",
+      "Bash(grep -E \"\\\\.md$|^d\")",
+      "Bash(ls -1 src/*.ts)",
+      "Bash(grep -n \"effort.*low\\\\|effort.*high\\\\|effort.*medium\" /Users/josephsip/Documents/__ClaudeOrchestra/2026_ClaudeOrchestra/agents/*.md)",
+      "Bash(grep -n \"maxTurns\" /Users/josephsip/Documents/__ClaudeOrchestra/2026_ClaudeOrchestra/agents/*.md)",
+      "Bash(grep -n \"supervisor\\\\|Supervisor\" /Users/josephsip/Documents/__ClaudeOrchestra/2026_ClaudeOrchestra/agents/*.md)",
+      "Bash(grep -n \"disallowedTools:\\\\|disallowed tools\\\\|disallowedTools\" /Users/josephsip/Documents/__ClaudeOrchestra/2026_ClaudeOrchestra/agents/*.md)",
+      "Bash([ ! -f /Users/josephsip/Documents/__ClaudeOrchestra/2026_ClaudeOrchestra/agents/supervisor.agent.md ])",
+      "Bash([ ! -d /Users/josephsip/Documents/__ClaudeOrchestra/2026_ClaudeOrchestra/src/phases ])",
+      "Bash([ ! -f /Users/josephsip/Documents/__ClaudeOrchestra/2026_ClaudeOrchestra/src/router/message-bus.ts ])",
+      "Bash([ ! -f /Users/josephsip/Documents/__ClaudeOrchestra/2026_ClaudeOrchestra/src/router/message-types.ts ])",
+      "Bash([ ! -f /Users/josephsip/Documents/__ClaudeOrchestra/2026_ClaudeOrchestra/src/router/flag-enums.ts ])",
+      "Bash(grep -l \"message-bus\\\\|MessageBus\" /Users/josephsip/Documents/__ClaudeOrchestra/2026_ClaudeOrchestra/src/**/*.ts)",
+      "Bash(git log:*)",
+      "Read(//Users/josephsip/Documents/__ClaudeOrchestra/2026_ClaudeOrchestra/**)",
+      "Bash(open /Users/josephsip/Documents/__ClaudeOrchestra/2026_ClaudeOrchestra/prototypes/portfolio-view.html)",
+      "Bash(mv /Users/josephsip/Documents/__ClaudeOrchestra/2026_ClaudeOrchestra/hooks/tsc.js /Users/josephsip/Documents/__ClaudeOrchestra/2026_ClaudeOrchestra/.claude/hooks/tsc.js)",
+      "Bash(mv /Users/josephsip/Documents/__ClaudeOrchestra/2026_ClaudeOrchestra/scripts/generate-project-context.sh /Users/josephsip/Documents/__ClaudeOrchestra/2026_ClaudeOrchestra/.claude/scripts/generate-project-context.sh)",
+      "Bash(chmod +x /Users/josephsip/Documents/__ClaudeOrchestra/2026_ClaudeOrchestra/.claude/hooks/block-traversal.sh)",
+      "Bash(node /Users/josephsip/Documents/__ClaudeOrchestra/2026_ClaudeOrchestra/.claude/hooks/block-traversal.js)",
+      "Bash(echo \"Exit code: $?\")",
+      "Bash(grep -E \"\\\\.\\(md|MD\\)$\")",
+      "Bash(open http://localhost:3460)",
+      "Bash(npx tsc:*)",
+      "Bash(curl -s http://localhost:3460)",
+      "Bash(node -e ':*)",
+      "Bash(curl -s -N http://localhost:3460/events)",
+      "Bash(kill %1)",
+      "WebFetch(domain:localhost)",
+      "Bash(git add:*)"
+    ],
+    "additionalDirectories": [
+      "/Users/josephsip/Documents/__ClaudeOrchestra/2026_ClaudeOrchestra/src/spawner",
+      "/tmp",
+      "/Users/josephsip/Documents/__ClaudeOrchestra/2026_ClaudeOrchestra/.vscode",
+      "/Users/josephsip/Documents/__ClaudeOrchestra/2026_ClaudeOrchestra/.claude",
+      "/Users/josephsip/Documents/__ClaudeOrchestra/2026_ClaudeOrchestra/.claude/hooks"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/scripts/generate-project-context.sh",
+            "timeout": 15,
+            "statusMessage": "Scanning project..."
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Read|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node $CLAUDE_PROJECT_DIR/.claude/hooks/block-traversal.js",
+            "timeout": 5,
+            "statusMessage": "Validating file path..."
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node $CLAUDE_PROJECT_DIR/.claude/hooks/tsc.js",
+            "timeout": 30,
+            "statusMessage": "Type-checking..."
+          }
+        ]
+      }
+    ]
+  }
+}

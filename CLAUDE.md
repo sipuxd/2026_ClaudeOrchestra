@@ -1,68 +1,85 @@
-# ClaudeOrchestra — Project Instructions
+# CLAUDE.md
 
-## Build Sequence
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-Read `implementation-plan.md` for the full 8-milestone build
-plan. Each milestone has a **Reference** section pointing to
-its source-of-truth document in `docs/`. Build in order. Do
-not skip ahead.
+## What This Is
+
+ClaudeOrchestra is a deterministic multi-agent orchestration engine. It spawns multiple Claude Code agent sessions via the `@anthropic-ai/claude-agent-sdk` and drives them through a fixed pipeline: **Security Scan → Build (Worker-1 implements, Worker-2 verifies) → Security Sweep → Code Review → Done**. No LLM makes routing decisions — pure TypeScript code controls the flow.
+
+A browser dashboard at `localhost:3460` provides real-time visibility via SSE.
+
+## Commands
+
+```bash
+npm run build          # Compile TypeScript (required before running dashboard)
+npm run dashboard      # Start dashboard + engine at localhost:3460
+npm test               # Run all tests (vitest)
+npm run test:watch     # Watch mode
+npx vitest run tests/pipeline-orchestrator.test.ts  # Run a single test file
+```
+
+**Important:** After editing source files, you must `npm run build` before `npm run dashboard` — the dashboard runs from `dist/`.
+
+## Architecture
+
+### Core Pipeline (`src/pipeline-orchestrator.ts`, ~1,570 lines)
+
+The `PipelineOrchestrator` is the brain. It wraps Claude Agent SDK `query()` calls in `AgentSession` objects (warm sessions with `PromptChannel` for streaming input). It:
+- Calls each agent's `send()` sequentially
+- Parses verdicts from agent responses with regex (`parseSecurityVerdict`, `parseVerifyVerdict`, `parseReviewVerdict`)
+- Drives phase transitions deterministically
+- Manages loop-back logic (review → work for revisions, review → pre_work for rejections) with configurable limits
+
+### Agent Roles (4 per team)
+
+| Agent | What it does | Tools it CANNOT use |
+|-------|-------------|-------------------|
+| Security-1 | Pre-scan + post-sweep, classifies task complexity | Write, Edit, Bash |
+| Worker-1 | Implements the task | (full access) |
+| Worker-2 | Verifies requirements only, never writes code | (full access) |
+| Reviewer-1 | Code review, verdict: APPROVED/REVISION_NEEDED/REJECTED | Write, Edit, Bash |
+
+Agent prompts live in `agents/*.agent.md`.
+
+### State Machine (`src/state/team-state.ts`)
+
+Phases: `pre_work → work → handoff → review → done` (plus `errored`, `cancelled`). Backward transitions are counted against limits (`maxRevisions: 3`, `maxRejections: 2`, `maxTotalBackwardTransitions: 5`).
+
+### Dashboard (`src/dashboard/`)
+
+- `dashboard-server.ts`: Node.js built-in `http` server with REST API + SSE streaming (13 event types)
+- `dashboard-ui.ts`: Single-file SPA (~2,550 lines) — all HTML/CSS/JS returned by `buildDashboardHTML()`. No framework, no build toolchain.
+
+### Data Locality
+
+Runtime data lives in the **target project** (not this repo):
+```
+target-project/.claude-orchestra/teams/{teamId}/state.json
+```
+This repo only keeps `registry.json` (pointers to active teams) and `logs/`.
+
+### Key Files
+
+- `src/index.ts` — CLI entry point, config loading, signal handling
+- `src/pipeline-orchestrator.ts` — Agent sessions, verdict parsing, pipeline loops
+- `src/git.ts` — Auto-commit at phase boundaries, push & merge workflow
+- `src/registry.ts` — Lightweight JSON registry of active teams
+- `src/router/complexity-router.ts` — Heuristic task classifier (simple vs standard)
+- `src/spawner/agent-process.ts` — Dual-mode agent wrapper (SDK + child_process for testing)
+
+## Design Constraints
+
+- **Zero production dependencies** besides `@anthropic-ai/claude-agent-sdk`. Dashboard uses Node.js built-in `http`. No Express, no React, no WebSocket.
+- **ESM-only** (`"type": "module"` in package.json). All imports use `.js` extension.
+- **Sandbox must be disabled** for running the engine or integration tests — the engine spawns child processes via `child_process.spawn()`. Toggle with `/sandbox` in Claude Code CLI.
+- **Dashboard HTML is cached in memory** on server start. Source changes require `npm run build` + server restart.
+
+## Testing
+
+Tests use vitest with mocked SDK (`tests/mocks/mock-sdk.ts`). The mock replaces `query()` to simulate agent responses without real API calls. Test files mirror source structure (e.g., `tests/pipeline-orchestrator.test.ts` tests `src/pipeline-orchestrator.ts`).
 
 ## Document Map
 
-- `implementation-plan.md` — what to build and in what order
-- `docs/message-contract.md` — JSON schema, flags, validation
-  (Milestones 1-2)
-- `docs/state-machine.md` — workflow states, transitions,
-  timeouts (Milestones 3, 6)
-- `docs/roles-and-jtbd.md` — role definitions, CLAUDE.md
-  prompt guidelines (Milestone 5)
-- `docs/context-management.md` — agent-engine communication,
-  model selection (Milestones 4-5)
-- `docs/operations.md` — health checks, shutdown, logging,
-  config (Milestones 4, 8)
-- `docs/architecture.md` — topology, autonomy, authority
-  (Milestone 7)
-
-## Sandbox Policy
-
-### Milestones 1-3: Sandboxed
-
-Milestones 1-3 (types, message bus, state store) should run
-with sandboxing enabled. All work is file I/O within the
-project directory — no external process execution needed.
-
-### Milestones 4-8: Unsandboxed
-
-Starting at Milestone 4 (Agent Spawner), sandboxing must be
-disabled. The engine spawns Claude Code CLI instances as child
-processes using Node.js `child_process.spawn()`. Sandboxing
-blocks this because it restricts process execution to the
-project directory.
-
-Integration tests in Milestones 4-8 also spawn real processes
-to validate the engine works end-to-end.
-
-### How to Disable Sandboxing
-
-When the human is ready to start Milestone 4, remind them to
-disable sandboxing and explain why before proceeding.
-
-**To disable:** Type `/sandbox` in the Claude Code CLI prompt
-to toggle sandboxing off. The CLI will confirm with:
-"Bash commands will no longer be sandboxed."
-
-**To re-enable later:** Type `/sandbox` again to toggle it
-back on.
-
-**Why it's needed:** The orchestration engine's core job is
-spawning and managing Claude Code CLI instances as child
-processes. Sandboxed mode restricts bash commands to safe
-operations within the project directory, which prevents
-`child_process.spawn()` from launching external processes.
-Without disabling the sandbox, the agent spawner cannot
-function and integration tests will fail.
-
-**Risk context:** Unsandboxed mode allows the CLI to execute
-any bash command. Only disable when actively working on
-Milestones 4-8. Re-enable if switching to documentation-only
-or type-only work.
+- `PRD.md` — Comprehensive product requirements (architecture, API, agent roles, state machine, dashboard, data model)
+- `implementation-plan.md` — Original 8-milestone build plan
+- `docs/` — Design specs (message contract, state machine, roles, operations, architecture)

@@ -155,10 +155,13 @@ describe('PipelineOrchestrator', () => {
     fs.mkdirSync(projectDir, { recursive: true });
     fs.mkdirSync(rolesDir, { recursive: true });
 
-    // Create role prompt files (reuses subagent prompts)
-    fs.writeFileSync(path.join(rolesDir, 'worker.claude.md'), '# Worker\nYou execute coding tasks.');
-    fs.writeFileSync(path.join(rolesDir, 'security.claude.md'), '# Security\nYou scan for security issues.');
-    fs.writeFileSync(path.join(rolesDir, 'reviewer.claude.md'), '# Reviewer\nYou review code quality.');
+    // Create role prompt files with frontmatter (config is read from frontmatter)
+    fs.writeFileSync(path.join(rolesDir, 'worker.agent.md'),
+      '---\nname: worker\nmodel: claude-opus-4-6\neffort: high\nmaxTurns: 50\n---\n\n# Worker\nYou execute coding tasks.');
+    fs.writeFileSync(path.join(rolesDir, 'security.agent.md'),
+      '---\nname: security\nmodel: claude-opus-4-6\neffort: low\nmaxTurns: 5\ndisallowedTools: Write, Edit, Bash\n---\n\n# Security\nYou scan for security issues.');
+    fs.writeFileSync(path.join(rolesDir, 'reviewer.agent.md'),
+      '---\nname: reviewer\nmodel: claude-opus-4-6\neffort: low\nmaxTurns: 5\ndisallowedTools: Write, Edit, Bash\n---\n\n# Reviewer\nYou review code quality.');
 
     mock = createPipelineMock();
     vi.mocked(sdkQuery).mockImplementation(mock.mockQueryFn);
@@ -461,6 +464,21 @@ describe('PipelineOrchestrator', () => {
       }
     });
 
+    it('passes governance hooks to all agent sessions', async () => {
+      orchestrator.createTeam('standard', projectDir);
+      orchestrator.assignTask('standard', 'implement user authentication with JWT tokens and database integration');
+
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      // All 4 sessions should have PreToolUse and PostToolUse hooks
+      for (let i = 0; i < 4; i++) {
+        const hooks = mock.getSession(i).options.hooks as Record<string, unknown[]>;
+        expect(hooks).toBeDefined();
+        expect(hooks.PreToolUse).toHaveLength(1);
+        expect(hooks.PostToolUse).toHaveLength(1);
+      }
+    });
+
     it('uses per-role effort levels', async () => {
       orchestrator.createTeam('standard', projectDir);
       orchestrator.assignTask('standard', 'implement user authentication with JWT tokens and database integration');
@@ -633,20 +651,6 @@ describe('PipelineOrchestrator', () => {
 
       expect(() => orchestrator.assignTask('busy', 'another task'))
         .toThrow('already has an active pipeline');
-    });
-  });
-
-  // --- No supervisor prompt needed ---
-
-  describe('no supervisor', () => {
-    it('does not require supervisor.claude.md prompt file', () => {
-      // Verify no supervisor file was created in rolesDir
-      expect(fs.existsSync(path.join(rolesDir, 'supervisor.claude.md'))).toBe(false);
-
-      // Pipeline should still work — no Supervisor LLM needed
-      orchestrator.createTeam('no-supervisor', projectDir);
-      orchestrator.assignTask('no-supervisor', 'fix a typo');
-      // No error means success
     });
   });
 

@@ -125,7 +125,6 @@ function logError(msg: string): void {
 
 
 function getRoleColor(instance: string): string {
-  if (instance.startsWith('Supervisor')) return colors.blue;
   if (instance.startsWith('Worker')) return colors.green;
   if (instance.startsWith('Security')) return colors.red;
   if (instance.startsWith('Reviewer')) return colors.yellow;
@@ -235,10 +234,6 @@ async function main(): Promise<void> {
   const config: Partial<PipelineOrchestraConfig> = { ...fileConfig };
   if (parsed.flags['--registry']) config.registryPath = parsed.flags['--registry'];
   if (parsed.flags['--max-teams']) config.maxConcurrentTeams = parseInt(parsed.flags['--max-teams'], 10);
-  if (parsed.flags['--model-supervisor']) {
-    config.models = config.models ?? {};
-    config.models[Role.Supervisor] = parsed.flags['--model-supervisor'];
-  }
   if (parsed.flags['--model-worker']) {
     config.models = config.models ?? {};
     config.models[Role.Worker] = parsed.flags['--model-worker'];

@@ -1,53 +1,26 @@
 // Spawns and manages Claude Code CLI instances for a team.
 // Tracks all running processes and provides lifecycle management.
+// Agent config (model, effort, tools, maxTurns) is read from YAML
+// frontmatter in each agent .md file. CLI/config overrides win.
 
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Role, type RoleInstance, ROLE_INSTANCES } from '../roles/role-types.js';
 import { AgentProcess, type AgentSpawnOptions, ProcessState } from './agent-process.js';
+import { parseFrontmatter } from './frontmatter-parser.js';
 
-// --- Default model configuration ---
+// --- Fallback defaults (used when frontmatter is missing a field) ---
 
-export const DEFAULT_MODELS: Record<Role, string> = {
-  [Role.Supervisor]: 'claude-opus-4-6',
-  [Role.Worker]: 'claude-opus-4-6',
-  [Role.Security]: 'claude-opus-4-6',
-  [Role.Reviewer]: 'claude-opus-4-6',
-};
+const FALLBACK_MODEL = 'claude-opus-4-6';
+const FALLBACK_EFFORT: 'low' | 'medium' | 'high' | 'max' = 'medium';
+const FALLBACK_MAX_TURNS = 20;
 
-// --- Default effort levels per role ---
-// Supervisor: medium — reads project, delegates, doesn't write code
-// Worker: high — writes code, needs quality reasoning
-// Security: medium — pattern-matching analysis, guided by checklist
-// Reviewer: medium — evaluation guided by Decision Transparency framework
+// --- Role to agent filename mapping ---
 
-export const DEFAULT_EFFORTS: Record<Role, 'low' | 'medium' | 'high' | 'max'> = {
-  [Role.Supervisor]: 'medium',
-  [Role.Worker]: 'high',
-  [Role.Security]: 'medium',
-  [Role.Reviewer]: 'medium',
-};
-
-// --- Tools to disallow per role ---
-// Workers get full access. Supervisor, Security, and Reviewer only need
-// read-only tools — removing Write/Edit/Bash from their context saves
-// tokens and prevents unintended modifications.
-
-export const DEFAULT_DISALLOWED_TOOLS: Record<Role, string[]> = {
-  [Role.Supervisor]: ['Write', 'Edit', 'Bash'],
-  [Role.Worker]: [],                              // Full access
-  [Role.Security]: ['Write', 'Edit', 'Bash'],
-  [Role.Reviewer]: ['Write', 'Edit', 'Bash'],
-};
-
-// --- Default max turns per role ---
-// Safety net to prevent runaway agent loops.
-// Workers get more turns because they do real coding work.
-
-export const DEFAULT_MAX_TURNS: Record<Role, number> = {
-  [Role.Supervisor]: 30,
-  [Role.Worker]: 50,
-  [Role.Security]: 20,
-  [Role.Reviewer]: 20,
+const ROLE_AGENT_FILES: Record<Role, string> = {
+  [Role.Worker]: 'worker.agent.md',
+  [Role.Security]: 'security.agent.md',
+  [Role.Reviewer]: 'reviewer.agent.md',
 };
 
 // --- Spawner options ---
@@ -57,15 +30,15 @@ export interface SpawnerOptions {
   claudeBin?: string;
   /** Override spawn args for all agents (for testing) */
   spawnArgs?: string[];
-  /** Directory containing role CLAUDE.md files */
+  /** Directory containing role agent .md files */
   rolesDir: string;
-  /** Model overrides per role */
+  /** Model overrides per role (wins over frontmatter) */
   models?: Partial<Record<Role, string>>;
-  /** Effort level overrides per role */
+  /** Effort level overrides per role (wins over frontmatter) */
   efforts?: Partial<Record<Role, 'low' | 'medium' | 'high' | 'max'>>;
-  /** Disallowed tools overrides per role (removes tools from agent context) */
+  /** Disallowed tools overrides per role (wins over frontmatter) */
   disallowedTools?: Partial<Record<Role, string[]>>;
-  /** Max turns overrides per role */
+  /** Max turns overrides per role (wins over frontmatter) */
   maxTurns?: Partial<Record<Role, number>>;
   /** Global max budget per agent query (USD) */
   maxBudgetUsd?: number;
@@ -73,21 +46,8 @@ export interface SpawnerOptions {
   maxRespawns?: number;
 }
 
-// --- Role to CLAUDE.md filename mapping ---
-
-const ROLE_FILE_MAP: Record<Role, string> = {
-  [Role.Supervisor]: 'supervisor.claude.md',
-  [Role.Worker]: 'worker.claude.md',
-  [Role.Security]: 'security.claude.md',
-  [Role.Reviewer]: 'reviewer.claude.md',
-};
-
 export class AgentSpawner {
   private readonly options: SpawnerOptions;
-  private readonly models: Record<Role, string>;
-  private readonly efforts: Record<Role, 'low' | 'medium' | 'high' | 'max'>;
-  private readonly disallowedTools: Record<Role, string[]>;
-  private readonly maxTurnsPerRole: Record<Role, number>;
   private readonly maxBudgetUsd: number | undefined;
   private readonly maxRespawns: number;
 
@@ -98,16 +58,12 @@ export class AgentSpawner {
 
   constructor(options: SpawnerOptions) {
     this.options = options;
-    this.models = { ...DEFAULT_MODELS, ...options.models };
-    this.efforts = { ...DEFAULT_EFFORTS, ...options.efforts };
-    this.disallowedTools = { ...DEFAULT_DISALLOWED_TOOLS, ...options.disallowedTools };
-    this.maxTurnsPerRole = { ...DEFAULT_MAX_TURNS, ...options.maxTurns };
     this.maxBudgetUsd = options.maxBudgetUsd;
     this.maxRespawns = options.maxRespawns ?? 3;
   }
 
   /**
-   * Spawn all 5 agents for a team.
+   * Spawn all agents for a team.
    */
   spawnTeam(teamId: string, projectPath: string): AgentProcess[] {
     if (this.teams.has(teamId)) {
@@ -135,7 +91,7 @@ export class AgentSpawner {
 
   /**
    * Spawn agents for selected roles only (complexity routing).
-   * For simple tasks, only Supervisor + Worker-1 are needed.
+   * For simple tasks, only Worker-1 is needed.
    * For each role, spawns all instances defined in ROLE_INSTANCES,
    * unless limitInstances is provided to restrict which instances spawn.
    */
@@ -327,19 +283,45 @@ export class AgentSpawner {
     instance: RoleInstance,
     projectPath: string
   ): AgentProcess {
-    const disallowed = this.disallowedTools[role];
+    const agentFilePath = path.join(this.options.rolesDir, ROLE_AGENT_FILES[role]);
+
+    // Read and parse frontmatter from the agent file
+    let frontmatterModel = FALLBACK_MODEL;
+    let frontmatterEffort: 'low' | 'medium' | 'high' | 'max' = FALLBACK_EFFORT;
+    let frontmatterMaxTurns = FALLBACK_MAX_TURNS;
+    let frontmatterDisallowed: string[] = [];
+
+    try {
+      const content = fs.readFileSync(agentFilePath, 'utf-8');
+      const { frontmatter } = parseFrontmatter(content);
+
+      if (frontmatter.model) frontmatterModel = frontmatter.model;
+      if (frontmatter.effort) frontmatterEffort = frontmatter.effort as any;
+      if (frontmatter.maxTurns) frontmatterMaxTurns = parseInt(frontmatter.maxTurns, 10);
+      if (frontmatter.disallowedTools) {
+        frontmatterDisallowed = frontmatter.disallowedTools.split(',').map(t => t.trim());
+      }
+    } catch {
+      // If file can't be read, agent-process.ts will handle the error at spawn time
+    }
+
+    // CLI/config overrides win over frontmatter
+    const model = this.options.models?.[role] ?? frontmatterModel;
+    const effort = this.options.efforts?.[role] ?? frontmatterEffort;
+    const maxTurns = this.options.maxTurns?.[role] ?? frontmatterMaxTurns;
+    const disallowed = this.options.disallowedTools?.[role] ?? frontmatterDisallowed;
 
     const opts: AgentSpawnOptions = {
       claudeBin: this.options.claudeBin,
       spawnArgs: this.options.spawnArgs,
-      model: this.models[role],
-      systemPromptPath: path.join(this.options.rolesDir, ROLE_FILE_MAP[role]),
+      model,
+      systemPromptPath: agentFilePath,
       cwd: projectPath,
       role,
       instance,
       teamId,
-      effort: this.efforts[role],
-      maxTurns: this.maxTurnsPerRole[role],
+      effort,
+      maxTurns,
       maxBudgetUsd: this.maxBudgetUsd,
       disallowedTools: disallowed.length > 0 ? disallowed : undefined,
     };

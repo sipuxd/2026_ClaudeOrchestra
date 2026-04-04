@@ -7,7 +7,9 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { readFileSync, existsSync, mkdirSync } from 'node:fs';
 import { query, type SDKMessage, type SDKUserMessage, type Query } from '@anthropic-ai/claude-agent-sdk';
+import { buildGovernanceHooks } from '../hooks.js';
 import { Role, type RoleInstance } from '../roles/role-types.js';
+import { parseFrontmatter } from './frontmatter-parser.js';
 
 // --- Message delimiter protocol ---
 
@@ -286,7 +288,8 @@ export class AgentProcess extends EventEmitter<AgentProcessEvents> {
 
     let systemPrompt: string;
     try {
-      systemPrompt = readFileSync(this.spawnOptions.systemPromptPath, 'utf-8');
+      const rawContent = readFileSync(this.spawnOptions.systemPromptPath, 'utf-8');
+      systemPrompt = parseFrontmatter(rawContent).body;
     } catch (err: any) {
       this._state = ProcessState.Crashed;
       const msg = `Failed to read system prompt at ${this.spawnOptions.systemPromptPath}: ${err?.message}`;
@@ -325,6 +328,7 @@ export class AgentProcess extends EventEmitter<AgentProcessEvents> {
         stderr: (data: string) => {
           this.emit('stderr', `[SDK] ${data}`);
         },
+        hooks: buildGovernanceHooks(this.spawnOptions.cwd),
       };
 
       // Add effort level if specified (controls reasoning depth)

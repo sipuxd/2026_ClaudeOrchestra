@@ -819,6 +819,8 @@ function renderTeamActionButtons(teamId) {
   }
   if (!t.currentTask && ph !== 'done' && ph !== 'merged' && ph !== 'pr_open') {
     html += '<button class="btn btn-sm btn-green" onclick="window.__modal.assignTask(\\'' + esc(teamId) + '\\')">Assign Task</button>';
+  } else if (t.currentTask && ph !== 'pr_open' && ph !== 'merged') {
+    html += '<button class="btn btn-sm btn-green" onclick="window.__modal.assignTask(\\'' + esc(teamId) + '\\')">Assign New Task</button>';
   }
   return html;
 }
@@ -846,9 +848,6 @@ function renderSummaryContent(teamId) {
   html += '<div class="summary-status-info"><div class="summary-task">' + esc(panelTaskText || 'No task assigned') + '</div>';
   html += '<div class="summary-status-text" style="color:' + (statusClass==='pass'?'var(--green)':'var(--red-light)') + '">' + statusText + '</div></div></div>';
 
-  // Action buttons
-  html += '<div class="summary-actions">' + renderTeamActionButtons(teamId) + '</div>';
-
   // Pipeline stats bar
   html += '<div class="pipeline-stats">';
   html += '<div class="pipeline-stat"><div class="pipeline-stat-value">' + elapsedSince(t.createdAt) + '</div><div class="pipeline-stat-label">Duration</div></div>';
@@ -863,7 +862,7 @@ function renderSummaryContent(teamId) {
   for (var a = 0; a < agentInstances.length; a++) {
     var inst = agentInstances[a];
     var ag = t.agents ? t.agents[inst] : null;
-    var agState = ag ? ag.state : 'spawning';
+    var agState = ag ? (ag.state === 'spawning' ? 'waiting' : ag.state) : 'waiting';
     var agOutput = (state.liveOutput[teamId] || []).filter(function(e){ return e.agent === inst; }).map(function(e){ return e.text; }).join('\\n');
     var verdict = getAgentVerdict(agOutput, inst);
     var verdictStyle = getVerdictStyle(verdict);
@@ -887,11 +886,14 @@ function renderSummaryContent(teamId) {
     html += '<pre class="security-result">' + esc(state.securityResults[teamId]) + '</pre></div>';
   }
 
+  // Action buttons at bottom
+  html += '<div class="summary-actions" style="margin-top:16px">' + renderTeamActionButtons(teamId) + '</div>';
+
   return html;
 }
 
 function getAgentVerdict(output, instance) {
-  if (!output) return 'PENDING';
+  if (!output) return 'WAITING';
   if (output.match(/APPROVED/i)) return 'APPROVED';
   if (output.match(/REVISION.NEEDED/i)) return 'REVISION_NEEDED';
   if (output.match(/REJECTED/i)) return 'REJECTED';
@@ -901,12 +903,12 @@ function getAgentVerdict(output, instance) {
   if (output.match(/SKIPPED/i)) return 'SKIPPED';
   var metMatch = output.match(new RegExp('\\\\d+/\\\\d+\\\\s*met','i'));
   if (metMatch) return metMatch[0];
-  return 'PENDING';
+  return 'WAITING';
 }
 
 function getVerdictStyle(verdict) {
   if (verdict === 'APPROVED' || verdict === 'Complete' || verdict.includes('met')) return 'background:rgba(63,185,80,.12);color:var(--green)';
-  if (verdict === 'SKIPPED' || verdict === 'PENDING') return 'background:rgba(72,79,88,.12);color:var(--text-muted)';
+  if (verdict === 'SKIPPED' || verdict === 'WAITING') return 'background:rgba(72,79,88,.12);color:var(--text-muted)';
   if (verdict === 'ERRORED' || verdict === 'BLOCKED' || verdict === 'REJECTED') return 'background:rgba(218,54,51,.12);color:var(--red-light)';
   return 'background:rgba(210,153,34,.12);color:var(--amber)';
 }
@@ -950,7 +952,7 @@ function renderLiveContent(teamId) {
   for (var a = 0; a < 4; a++) {
     var inst = agentInstances[a];
     var ag = t.agents ? t.agents[inst] : null;
-    var agState = ag ? ag.state : 'spawning';
+    var agState = ag ? (ag.state === 'spawning' ? 'waiting' : ag.state) : 'waiting';
     var isWorking = agState === 'active';
     var isDone = agState === 'done';
     var color = agentColors[inst];
@@ -967,7 +969,7 @@ function renderLiveContent(teamId) {
     html += '<span class="live-agent-status" style="color:' + (isWorking ? color : 'var(--text-muted)') + '">' + agState.toUpperCase() + '</span>';
     html += '</div>';
     html += '<div class="live-agent-progress"><div class="live-agent-fill" style="width:' + (isDone ? 100 : isWorking ? 50 : 0) + '%;background:' + color + '"></div></div>';
-    html += '<div class="live-agent-output">' + esc(output || (agState === 'spawning' ? 'Waiting...' : '')) + '</div>';
+    html += '<div class="live-agent-output">' + esc(output || (agState === 'waiting' ? 'Waiting...' : '')) + '</div>';
     html += '</div>';
   }
   html += '</div>';

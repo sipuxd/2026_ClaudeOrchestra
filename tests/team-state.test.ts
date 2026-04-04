@@ -17,14 +17,14 @@ import { StatePersistence } from '../src/state/persistence.js';
 // =============================================
 
 describe('TeamState creation', () => {
-  it('creates a team with all 5 agents in spawning state', () => {
+  it('creates a team with all 4 agents in spawning state', () => {
     const team = TeamState.create('team-1', 'my-project', '/path/to/project');
 
     expect(team.teamId).toBe('team-1');
     expect(team.currentPhase).toBe(TeamPhase.PreWork);
 
     const agents = team.getAllAgents();
-    expect(agents).toHaveLength(5);
+    expect(agents).toHaveLength(4);
 
     for (const [, agent] of agents) {
       expect(agent.state).toBe(AgentState.Spawning);
@@ -34,7 +34,6 @@ describe('TeamState creation', () => {
   it('has correct roles assigned to instances', () => {
     const team = TeamState.create('team-1', 'test', '/path');
 
-    expect(team.getAgent('Supervisor-1')?.role).toBe(Role.Supervisor);
     expect(team.getAgent('Worker-1')?.role).toBe(Role.Worker);
     expect(team.getAgent('Worker-2')?.role).toBe(Role.Worker);
     expect(team.getAgent('Security-1')?.role).toBe(Role.Security);
@@ -480,7 +479,7 @@ describe('StatePersistence', () => {
     expect(loaded!.teamId).toBe('team-1');
     expect(loaded!.teamName).toBe('test');
     expect(loaded!.currentPhase).toBe(TeamPhase.PreWork);
-    expect(Object.keys(loaded!.agents)).toHaveLength(5);
+    expect(Object.keys(loaded!.agents)).toHaveLength(4);
   });
 
   it('returns null for nonexistent team', () => {

@@ -2,32 +2,31 @@
 
 ## Purpose
 
-This document is the build plan for the orchestration engine. 
-It is structured for Claude Code CLI to consume as actionable 
-build instructions. It references the spec 
-(`multi-agent-orchestration-spec.md`) as the source of truth 
-for roles, JTBD, message contracts, flag enums, and workflow 
-phases. It references the README (`README.md`) for product 
-context and dashboard requirements.
+This document is the build plan for the orchestration engine.
+It references the spec documents in `docs/` as sources of
+truth for roles, pipeline flow, state machine, and operations.
 
-**This plan covers the engine only.** The dashboard is a 
-separate build phase that comes after the engine is validated.
+**This plan covers the engine only.** The dashboard was built
+as Phase 5 (live dashboard with SSE streaming, REST API,
+browser UI).
 
 ---
 
 ## Decisions
 
 - **Language:** TypeScript
-- **Engine approach:** Fully custom — no dependency on Claude 
-  Code's experimental agent teams feature
-- **Agent runtime:** Each agent is a Claude Code CLI instance 
-  spawned and managed by the engine
-- **Message transport:** Custom filesystem-based message bus 
-  using the JSON message contract from the spec
-- **Role instructions:** Separate CLAUDE.md file per role 
-  (5 files)
-- **Build target:** Headless engine with structured log output. 
-  Dashboard is a later phase.
+- **Engine approach:** Deterministic code-driven pipeline —
+  no Supervisor LLM, no tick loop
+- **Agent runtime:** Each agent is a Claude Agent SDK `query()`
+  session with warm `PromptChannel` for streaming input
+- **Communication:** Direct SDK sessions — no filesystem
+  message bus during pipeline execution
+- **Role instructions:** Separate CLAUDE.md file per role
+  (4 roles: Worker, Security, Reviewer)
+- **Pipeline modes:** Simple (Worker-1 only) and Standard
+  (Security + Worker-1 + Worker-2 + Reviewer)
+- **Complexity routing:** Heuristic classifier + Security
+  reclassification
 
 ---
 
@@ -35,39 +34,37 @@ separate build phase that comes after the engine is validated.
 
 ```
 ┌──────────────────────────────────────────────────┐
-│                  ORCHESTRATOR                      │
-│  (TypeScript process — the engine)                │
-│                                                    │
+│            PIPELINE ORCHESTRATOR                  │
+│  (TypeScript — deterministic code-driven)         │
+│                                                   │
 │  ┌────────────┐  ┌────────────┐  ┌─────────────┐ │
-│  │  Spawner    │  │  Router    │  │  Phase      │ │
-│  │  Manager    │  │  (message  │  │  Controller │ │
-│  │  (lifecycle │  │   bus)     │  │  (workflow   │ │
-│  │   of CLI    │  │            │  │   state     │ │
-│  │   instances)│  │            │  │   machine)  │ │
+│  │ Complexity │  │  Phase     │  │  State      │ │
+│  │ Router     │  │  Controller│  │  Persistence│ │
+│  │ (heuristic │  │  (state    │  │  (team      │ │
+│  │  classify) │  │   machine) │  │   state.json│ │
 │  └────────────┘  └────────────┘  └─────────────┘ │
 │         │               │               │         │
 │         ▼               ▼               ▼         │
 │  ┌─────────────────────────────────────────────┐  │
-│  │              Team State Store               │  │
-│  │  (in-memory + filesystem persistence)       │  │
+│  │           Agent Sessions (SDK query)        │  │
+│  │  (warm PromptChannel, parallel cold-start)  │  │
 │  └─────────────────────────────────────────────┘  │
 └──────────┬───────────┬───────────┬────────────────┘
            │           │           │
      ┌─────▼──┐  ┌─────▼──┐  ┌────▼────┐
-     │ Claude │  │ Claude │  │ Claude  │  ... (5 per team)
-     │ Code   │  │ Code   │  │ Code    │
-     │ CLI    │  │ CLI    │  │ CLI     │
-     │ inst.  │  │ inst.  │  │ inst.   │
+     │Security│  │Worker-1│  │Worker-2 │  + Reviewer
+     │ query()│  │ query()│  │ query() │    query()
      └────────┘  └────────┘  └─────────┘
 ```
 
 The orchestrator is a single TypeScript process that:
-1. Spawns Claude Code CLI instances (one per agent role)
-2. Routes messages between agents via the filesystem bus
-3. Manages workflow phase transitions
-4. Persists team state inside each project's `.claude-orchestra/`
+1. Creates SDK `query()` sessions (one per agent role)
+2. Sends prompts sequentially through the pipeline
+3. Parses agent responses for verdicts (regex-based)
+4. Manages workflow phase transitions deterministically
+5. Persists team state inside each project's `.claude-orchestra/`
    directory for the dashboard to read
-5. Maintains a lightweight `registry.json` with pointers to all
+6. Maintains a lightweight `registry.json` with pointers to all
    active teams across projects
 
 ---
@@ -82,50 +79,46 @@ claude-orchestra/
 ├── tsconfig.json
 ├── registry.json                 # Lightweight pointers to active teams
 ├── src/
-│   ├── index.ts                  # Entry point — CLI interface
-│   ├── orchestrator.ts           # Main orchestrator class
+│   ├── index.ts                  # Entry point
+│   ├── pipeline-orchestrator.ts  # Main orchestrator (code-driven pipeline)
 │   │
 │   ├── spawner/
-│   │   ├── agent-spawner.ts      # Spawns and manages CLI instances
-│   │   └── agent-process.ts      # Wrapper around a single CLI process
+│   │   ├── agent-spawner.ts      # Default models, tools config
+│   │   ├── agent-process.ts      # PromptChannel + SDK query wrapper
+│   │   └── frontmatter-parser.ts # YAML frontmatter parser for agent files
 │   │
 │   ├── router/
-│   │   ├── message-bus.ts        # Filesystem-based message routing
-│   │   ├── message-types.ts      # TypeScript types for message contract
-│   │   └── flag-enums.ts         # All flag enums per role pair
-│   │
-│   ├── phases/
-│   │   ├── phase-controller.ts   # Workflow state machine
-│   │   ├── pre-work.ts           # Pre-work phase logic
-│   │   ├── work.ts               # Work phase logic
-│   │   ├── handoff.ts            # Handoff phase logic
-│   │   └── review.ts             # Review phase logic
+│   │   └── complexity-router.ts  # Heuristic task classifier
 │   │
 │   ├── state/
-│   │   ├── team-state.ts         # In-memory team state
+│   │   ├── team-state.ts         # In-memory team state + transitions
 │   │   └── persistence.ts        # Filesystem persistence layer
 │   │
-│   ├── roles/
-│   │   ├── role-registry.ts      # Role definitions and JTBD mapping
-│   │   └── role-types.ts         # TypeScript types for roles
+│   ├── dashboard/
+│   │   ├── dashboard-server.ts   # HTTP + SSE server
+│   │   ├── dashboard-ui.ts       # Single-page HTML/CSS/JS builder
+│   │   └── index.ts              # Dashboard exports
 │   │
 │   ├── logger/
-│   │   └── logger.ts             # Structured logging (replaces dashboard for now)
+│   │   └── logger.ts             # Structured logging with rotation
+│   │
+│   ├── roles/
+│   │   └── role-types.ts         # Role enum, instance types
+│   │
+│   ├── git.ts                    # GitOps — auto-commits, branch mgmt
+│   ├── registry.ts               # Team registry management
 │   │
 │   └── types/
 │       └── index.ts              # Shared types
 │
-├── roles/                        # CLAUDE.md files per role
-│   ├── supervisor.claude.md
-│   ├── worker.claude.md
-│   ├── security.claude.md
-│   └── reviewer.claude.md
+├── agents/                       # Agent prompt files (YAML frontmatter + markdown)
+│   ├── worker.agent.md
+│   ├── security.agent.md
+│   ├── reviewer.agent.md
+│   └── security-review.agent.md
 │
 └── tests/
-    ├── message-bus.test.ts
-    ├── phase-controller.test.ts
-    └── integration/
-        └── full-cycle.test.ts
+    └── *.test.ts                 # 7 test files, 204 tests (Vitest)
 ```
 
 ### Target Project (created by engine on attach)
@@ -135,18 +128,7 @@ claude-orchestra/
 ├── .claude-orchestra/            # Runtime data (gitignored)
 │   └── teams/
 │       └── {team-id}/
-│           ├── state.json        # Team state snapshot
-│           ├── messages/
-│           │   ├── inbox/        # Pending messages per agent
-│           │   │   ├── supervisor-1/
-│           │   │   ├── worker-1/
-│           │   │   ├── worker-2/
-│           │   │   ├── security-1/
-│           │   │   └── reviewer-1/
-│           │   └── archive/      # Processed messages
-│           └── reports/
-│               ├── clearance/    # Security clearance reports
-│               └── reviews/      # Reviewer verdicts
+│           └── state.json        # Team state snapshot
 ├── .gitignore                    # Engine adds .claude-orchestra/ here
 ├── src/                          # (project's own source code)
 └── ...
@@ -176,298 +158,161 @@ reads this on load to discover all active teams across projects.
 
 ## Build Order
 
-Build in this exact sequence. Each milestone is independently 
+Build in this exact sequence. Each milestone is independently
 testable. Do not skip ahead.
 
-### Milestone 1: Types and Message Contract
+### Milestone 1: Types
 
-**Goal:** All TypeScript types defined. Message contract is 
-concrete and validated.
+**Goal:** All TypeScript types defined.
 
 **Build:**
 - `src/types/index.ts` — shared enums and base types
-- `src/router/message-types.ts` — full message schema as TS
-  interfaces, matching the JSON contract exactly
-- `src/router/flag-enums.ts` — all flag enums per role pair,
-  matching the flag definitions exactly
-- `src/roles/role-types.ts` — role enum, role instance types, 
-  JTBD type definitions
+- `src/roles/role-types.ts` — role enum, role instance types
 
-**Validate:** Types compile. Write unit tests that construct 
-valid and invalid messages, confirming the type system catches 
-malformed contracts at compile time.
+**Validate:** Types compile.
 
-**Reference:** [`docs/message-contract.md`](docs/message-contract.md) —
-JSON schema, flag enums, flag validation matrix.
+**Note:** The original plan included message-types.ts and flag-enums.ts for a filesystem message bus. These were eliminated — the pipeline communicates via direct SDK sessions instead.
 
 ---
 
-### Milestone 2: Message Bus
+### Milestone 2: (Eliminated — Message Bus)
 
-**Goal:** Messages can be written to and read from the 
-filesystem bus. Routing by role and instance works.
-
-**Build:**
-- `src/router/message-bus.ts`
-  - `send(message: AgentMessage): void` — writes message JSON 
-    to the target agent's inbox directory
-  - `receive(roleInstance: string): AgentMessage[]` — reads 
-    and returns all pending messages from an agent's inbox
-  - `acknowledge(messageId: string): void` — moves message 
-    from inbox to archive, updates status
-  - `getThread(threadId: string): AgentMessage[]` — retrieves 
-    all messages in a thread across all inboxes/archives
-  - `getPending(requiresResponse: true): AgentMessage[]` — 
-    finds all unanswered messages (for stuck detection)
-  - File locking to prevent race conditions when multiple 
-    agents write simultaneously
-
-**Validate:** Unit tests — send a message, receive it,
-acknowledge it, verify threading, verify atomic writes under
-concurrent access.
-
-**Reference:** [`docs/message-contract.md`](docs/message-contract.md) —
-atomic writes, message ordering, flag validation matrix,
-deduplication, size limits.
+The filesystem-based message bus was designed for the original Supervisor architecture. It was superseded by direct SDK sessions via `AgentSession.send()`. See [ADR-002](docs/architecture-decisions/002-message-bus-architecture.md) for the design reference.
 
 ---
 
 ### Milestone 3: Team State Store
 
-**Goal:** Team state is tracked in memory and persisted to 
-disk. State includes: which agents exist, what phase the team 
-is in, what each agent's current status is, and the active 
-task.
+**Goal:** Team state is tracked in memory and persisted to
+disk.
 
 **Build:**
 - `src/state/team-state.ts`
-  - `TeamState` interface: teamId, teamName, projectPath, 
-    currentPhase, agents (map of roleInstance → status), 
-    currentTask, createdAt, updatedAt
-  - `AgentStatus`: roleInstance, role, state (spawning, 
-    active, idle, blocked, waiting, done, errored), 
-    currentJob, lastMessageAt
-  - State transitions: only valid transitions allowed 
-    (e.g., can't go from pre-work to review without 
-    passing through work and handoff)
+  - `TeamState` class: teamId, teamName, projectPath,
+    currentPhase, agents map, currentTask, counters
+  - Phase transitions with precondition enforcement
+  - Loop counter management (auto-increment on backward
+    transitions, limit checking)
+  - Agent state transitions
 - `src/state/persistence.ts`
-  - Writes `state.json` to `{projectPath}/.claude-orchestra/teams/{team-id}/`
-  - Runtime data lives inside each target project, not the engine repo
-  - Debounced writes (don't write on every state change)
-  - Read on startup for recovery — uses `registry.json` to locate
-    all active teams across projects
+  - Writes `state.json` to `.claude-orchestra/teams/{team-id}/`
+  - Atomic writes via temp file + rename
+  - Forced writes on phase transitions, debounced otherwise
 
-**Validate:** Unit tests — create team state, transition
-phases, verify invalid transitions are rejected, persist
-and recover.
+**Validate:** Unit tests — create state, transition phases,
+verify invalid transitions rejected, verify loop limits
+enforced, persist and recover.
 
-**Reference:** [`docs/state-machine.md`](docs/state-machine.md) —
-team phase states, agent states, valid transitions, state
-persistence schema, crash recovery.
+**Reference:** [`docs/state-machine.md`](docs/state-machine.md)
 
 ---
 
-### Milestone 4: Agent Spawner
+### Milestone 4: Agent Spawner + SDK Sessions
 
-**Goal:** Claude Code CLI instances can be spawned, managed, 
-and terminated. Each instance runs with its role-specific 
-CLAUDE.md.
+**Goal:** Agent sessions can be created via the Claude Agent
+SDK `query()` API with warm `PromptChannel` input.
 
 **Build:**
 - `src/spawner/agent-process.ts`
-  - Wraps a single Claude Code CLI child process
-  - Spawns with: working directory (project path), 
-    role CLAUDE.md (injected via `--system-prompt` flag 
-    or copied into the working directory), environment 
-    variables (`CLAUDE_ORCHESTRA_ROLE`, 
-    `CLAUDE_ORCHESTRA_INSTANCE`, `CLAUDE_ORCHESTRA_TEAM_ID`)
-  - Captures stdout/stderr streams
-  - Monitors process health (alive, exited, errored)
-  - Provides `send(prompt: string)` to pipe instructions 
-    to the CLI instance
-  - Provides `terminate()` for graceful shutdown
+  - `PromptChannel` class — bridges sync `push()` to async
+    iterable for SDK `query()`
+  - `AgentSession` wrapper — send prompts, receive results,
+    track activity
 - `src/spawner/agent-spawner.ts`
-  - `spawnTeam(teamId, projectPath): AgentProcess[]` — 
-    spawns all 5 agents for a team
-  - `spawnAgent(teamId, role, instance): AgentProcess` — 
-    spawns a single agent
-  - `terminateTeam(teamId)` — graceful shutdown of all 
-    agents in a team
-  - `getAgent(teamId, roleInstance): AgentProcess` — 
-    retrieve a running agent
-  - Tracks all running processes
+  - Default model configuration
+  - Allowed/disallowed tools lists
+  - Max turns configuration
 
-**Validate:** Integration test — spawn a single Claude Code 
-CLI instance with a test CLAUDE.md, send it a simple prompt, 
-verify output is captured, terminate it. Then spawn a full 
-team of 5 and verify all are running.
-
-**Important:** This milestone requires Claude Code CLI to be
-installed. Test with a minimal CLAUDE.md first before using
-the real role files.
+**Validate:** Integration test — create a single SDK session,
+send a prompt, verify response received.
 
 **Reference:**
 [`docs/context-management.md`](docs/context-management.md) —
-agent-engine communication protocol (stdin pipe), response
-parsing (ORCHESTRA-MESSAGE delimiters).
-[`docs/operations.md`](docs/operations.md) — health checks,
-crash recovery (respawn protocol), graceful shutdown.
+SDK session model, warm sessions, context budgets.
 
 ---
 
-### Milestone 5: CLAUDE.md Role Files
+### Milestone 5: Agent Prompt Files + Dashboard
 
-**Goal:** Each role has a CLAUDE.md that instructs the Claude 
-Code CLI instance on its identity, JTBD, communication 
-protocol, and constraints.
+**Goal:** Each role has an agent prompt file that instructs the SDK
+session on its identity and behavior. Dashboard provides
+real-time visibility.
 
-**Build 5 files in `roles/`:**
+**Build 4 agent files in `agents/`:**
+- `agents/worker.agent.md` — implementation instructions for
+  Worker-1, verification instructions for Worker-2
+- `agents/security.agent.md` — pre-scan and sweep procedures
+- `agents/reviewer.agent.md` — evaluation framework
+- `agents/security-review.agent.md` — final security review (on-demand)
 
-Each CLAUDE.md must include:
-1. **Identity** — what role this agent is, its instance name
-2. **Mission** — from the JTBD section
-3. **Phase-specific jobs** — what to do in each workflow phase
-4. **Communication protocol** — how to send messages (write 
-   JSON to the message bus directory), what flags to use, 
-   who to send to
-5. **Constraints** — what NOT to do (e.g., worker must not 
-   touch off-limits files, reviewer must not evaluate security)
-6. **Message format** — the exact JSON schema to use when 
-   writing messages
-
-The CLAUDE.md files are the critical interface between the 
-engine and the agents. The engine spawns the CLI instance and 
-points it at the right CLAUDE.md. From that point, the agent 
-is autonomous — it reads its inbox, does its job, writes 
-messages to other agents' inboxes.
-
-**Files:**
-- `roles/supervisor.claude.md` — ref "Supervisor JTBD"
-- `roles/worker.claude.md` — ref "Worker JTBD"
-  (same file for both workers, instance name set via env var)
-- `roles/security.claude.md` — ref "Security Agent JTBD"
-- `roles/reviewer.claude.md` — ref "Reviewer JTBD"
-
-**Validate:** Spawn a single agent with its role CLAUDE.md,
-give it a simple task, verify it produces output and attempts
-to write messages in the correct format.
+**Also build:**
+- `src/dashboard.ts` — HTTP server with SSE for real-time
+  updates, REST API for team status/feedback
+- Browser UI for project monitoring, phase tracking, feedback
 
 **Reference:**
 [`docs/roles-and-jtbd.md`](docs/roles-and-jtbd.md) — JTBD
-per role, CLAUDE.md prompt engineering guidelines, few-shot
-examples, output format enforcement.
-[`docs/context-management.md`](docs/context-management.md) —
-prompt size guidelines, model selection per role.
+per role, prompt guidelines, verdict formats.
 
 ---
 
-### Milestone 6: Phase Controller
+### Milestone 6: Complexity Router
 
-**Goal:** The workflow state machine manages phase transitions 
-and triggers the right actions at each phase boundary.
+**Goal:** Complexity router classifies tasks for pipeline selection.
 
 **Build:**
-- `src/phases/phase-controller.ts`
-  - State machine: pre-work → work → handoff → review → done
-  - Also handles: handoff → work (security blocked), 
-    review → work (reviewer revise), review → pre-work 
-    (reviewer reject)
-  - Each transition has preconditions (e.g., can't enter 
-    work until clearance-report received)
-  - Emits events on transitions for the logger/dashboard
+- `src/router/complexity-router.ts` — heuristic classifier
 
-- `src/phases/pre-work.ts`
-  - Triggers: Supervisor receives task → sends scan-request 
-    to Security → waits for clearance-report → Supervisor 
-    sends task-assignments to Workers
-  - Transition condition to Work: all workers have sent 
-    task-accepted
+**Note:** The original plan included a separate `src/phases/` directory with 5 files (phase-controller.ts, pre-work.ts, work.ts, handoff.ts, review.ts). Phase evaluation logic was consolidated into `src/pipeline-orchestrator.ts` instead.
 
-- `src/phases/work.ts`
-  - Monitors: worker progress-updates, blocked signals, 
-    clearance-request/response flow
-  - Transition condition to Handoff: all workers have sent 
-    task-complete
+**Validate:** Unit test the complexity classifier. Phase transitions are tested via pipeline-orchestrator tests.
 
-- `src/phases/handoff.ts`
-  - Triggers: Supervisor sends sweep-request to Security → 
-    waits for handoff-clearance
-  - If APPROVED: transition to Review
-  - If BLOCKED/FLAGGED: Supervisor sends revision-request 
-    to workers, transition back to Work
-
-- `src/phases/review.ts`
-  - Triggers: Supervisor sends review-request to Reviewer → 
-    waits for verdict
-  - If review-approved: transition to Done
-  - If review-revise: Supervisor routes feedback, transition 
-    back to Work
-  - If review-rejected: transition back to Pre-Work
-
-**Validate:** Unit test the state machine with mock messages.
-Verify all valid transitions work. Verify invalid transitions
-are rejected. Verify preconditions are enforced.
-
-**Reference:** [`docs/state-machine.md`](docs/state-machine.md) —
-all states, transitions, preconditions, timeouts, loop limits,
-deadlock detection, error/cancelled states.
+**Reference:** [`docs/state-machine.md`](docs/state-machine.md)
 
 ---
 
-### Milestone 7: Orchestrator (Integration)
+### Milestone 7: Pipeline Orchestrator (Integration)
 
-**Goal:** The main orchestrator class ties everything together. 
-Accepts a task, creates a team, runs the full workflow cycle.
+**Goal:** The main `PipelineOrchestrator` class ties everything
+together. Accepts a task, creates sessions, runs the pipeline.
 
 **Build:**
-- `src/orchestrator.ts`
-  - `createTeam(name, projectPath): TeamState` — creates
-    `.claude-orchestra/teams/{team-id}/` inside the target
-    project, adds `.claude-orchestra/` to the project's
-    `.gitignore` if not already present, and adds a registry
-    entry to the engine's `registry.json`
-  - `assignTask(teamId, taskDescription): void` — kicks off 
-    the pre-work phase
-  - `tick(): void` — main loop iteration: check all inboxes, 
-    route messages, update state, check phase transitions
-  - `getTeamStatus(teamId): TeamState` — for the dashboard
-  - `getAllTeams(): TeamState[]` — for the dashboard
-  - `terminateTeam(teamId)` — shutdown
-
-- `src/index.ts`
-  - CLI entry point
-  - Commands: `create-team`, `assign-task`, `status`, `list`
-  - Runs the main loop (polling interval for tick())
+- `src/pipeline-orchestrator.ts`
+  - `createTeam(name, projectPath)` — creates team directory,
+    adds `.claude-orchestra/` to `.gitignore`, registers team
+  - `assignTask(teamId, description, images?)` — classifies
+    complexity, creates sessions, runs pipeline
+  - `runSimplePipeline()` — Worker-1 only
+  - `runStandardPipeline()` — full pipeline with loops
+  - `terminateTeam(teamId)` — close sessions, persist state
+  - Verdict parsers: `parseSecurityVerdict()`,
+    `parseReviewVerdict()`, `parseVerifyVerdict()`
+  - Feedback system: `notifyUser()` (non-blocking),
+    `askUser()` (blocking)
+  - Auto-commits at safety checkpoints via `GitOps`
 
 **Validate:** Full integration test — create a team, assign
-a task, watch it flow through all 4 phases to completion
-(or at least to the first phase transition). This is the
-first end-to-end test.
+a task, watch it flow through the pipeline to completion.
 
-**Reference:** [`docs/architecture.md`](docs/architecture.md) —
-topology, agent lifecycle, multi-team coordination.
+**Reference:** [`docs/architecture.md`](docs/architecture.md)
 
 ---
 
-### Milestone 8: Logger (Headless Dashboard Substitute)
+### Milestone 8: Logger + Observability
 
-**Goal:** Structured, readable log output that gives the 
-human orchestrator full visibility without a dashboard.
+**Goal:** Structured, readable log output and event emission
+for dashboard SSE.
 
 **Build:**
-- `src/logger/logger.ts`
-  - Logs every message sent/received with role colors
-  - Logs phase transitions
-  - Logs attention-needed events (using the priority system)
-  - Formats output for terminal readability
-  - Optionally writes to a log file for post-run analysis
+- Event emission throughout the pipeline for real-time
+  dashboard updates
+- Structured logging with role-specific colors
+- Log files for post-run analysis
 
-**Validate:** Run a full cycle and verify the log output
-tells a coherent story of what happened.
+**Validate:** Run a full cycle and verify the dashboard shows
+a coherent story of what happened.
 
-**Reference:** [`docs/operations.md`](docs/operations.md) —
-structured log format, event types, log levels, role colors,
-log file locations.
+**Reference:** [`docs/operations.md`](docs/operations.md)
 
 ---
 
@@ -475,128 +320,121 @@ log file locations.
 
 After all milestones are complete, the full cycle test is:
 
-1. Human runs: `claude-orchestra create-team my-project ./my-app`
-2. Human runs: `claude-orchestra assign-task my-project "Add user authentication with JWT"`
-3. Engine spawns 5 Claude Code CLI instances
-4. **Pre-work:** Supervisor receives task → Security scans 
-   → clearance report → Supervisor plans → assigns Workers
-5. **Work:** Workers implement → progress updates flow → 
-   (if needed) runtime clearance requests handled
-6. **Handoff:** Workers complete → Supervisor verifies → 
-   Security sweeps → clearance issued
-7. **Review:** Reviewer evaluates → verdict issued
-8. **Done:** Task closes, all agents idle
-9. Log output shows the full story with correct flags, 
-   phases, and role labels at every step
-
-If this cycle completes, the engine works and the dashboard 
-phase can begin.
+1. Human opens the dashboard in a browser
+2. Human creates a team attached to a local project
+3. Human assigns a task with a description
+4. Engine classifies complexity (simple or standard)
+5. **Simple:** Worker-1 implements → Done
+6. **Standard:**
+   a. **PreWork:** Security scans → clearance report
+   b. **Work:** Worker-1 implements → Worker-2 verifies
+      (up to 2 passes)
+   c. **Handoff:** Security sweeps → verdict
+   d. **Review:** Reviewer evaluates → verdict
+   e. **Done:** Sessions kept alive for Q&A
+7. Dashboard shows real-time progress, verdicts, and
+   feedback notifications
+8. Human can push & merge completed work from dashboard
 
 ---
 
 ## Resolved Design Decisions
 
-The following were open questions, now resolved. See the
-referenced docs for full specifications.
+1. **No Supervisor LLM:** The original spec defined a
+   Supervisor as an LLM agent that coordinated other agents.
+   This was replaced with deterministic TypeScript code
+   (`PipelineOrchestrator`) that drives the pipeline directly.
+   Rationale: eliminates an expensive, unpredictable LLM call
+   from the coordination path; makes the pipeline faster and
+   more reliable.
 
-1. **Engine-to-agent communication:** stdin pipe. The engine
-   spawns CLI instances as child processes and writes prompts
-   to stdin. Agents respond via stdout. See
-   [Context Management — Agent-Engine Communication](docs/context-management.md#agent-engine-communication).
+2. **SDK sessions, not CLI child processes:** Agents use the
+   Claude Agent SDK `query()` API with warm `PromptChannel`
+   sessions instead of spawning Claude Code CLI instances as
+   child processes. Rationale: lower latency (~2-3s warm vs
+   ~12s cold per message), simpler process management, direct
+   programmatic control.
 
-2. **Inbox polling:** Engine-driven. The engine's `tick()`
-   loop detects new inbox messages and injects them into
-   agent context via stdin prompts. Agents do NOT poll the
-   filesystem directly. See
-   [Context Management — How Agents Check Their Inbox](docs/context-management.md#how-agents-check-their-inbox).
+3. **Worker-2 as verifier, not implementer:** Worker-2 was
+   originally a second implementation worker. It now acts as
+   a requirements verifier — checking Worker-1's output
+   against the task requirements. Rationale: catches
+   requirement gaps before they reach review, reduces
+   revision loops.
 
-3. **Crash recovery:** 3 respawn attempts per agent per task.
-   Respawned agents receive a recovery prompt summarizing
-   their last known state. See
-   [Operations — Crash Recovery](docs/operations.md#crash-recovery).
+4. **Two pipeline modes:** Simple tasks (short description,
+   no complexity keywords) skip Security, Worker-2, and
+   Reviewer entirely. Rationale: avoids unnecessary overhead
+   for trivial tasks.
 
-4. **Token cost management:** Different models per role
-   (Haiku for Workers, Sonnet for Supervisor/Reviewer, Opus
-   for Security). Configurable per team. Cost budget with
-   warning at $10 and hard limit at $25. See
-   [Context Management — Cost Budget](docs/context-management.md#cost-budget).
+5. **Auto-commits:** The engine automatically commits at
+   safety checkpoints (after Work phase, after Security
+   sweep, on completion). Rationale: preserves progress in
+   case of failure; enables easy rollback.
 
-5. **Concurrency:** Atomic file writes via temp file +
-   `fs.rename()`. Message ordering by timestamp. See
-   [Message Contract — Atomic Writes](docs/message-contract.md#atomic-writes).
-
-6. **Runtime data locality:** Runtime data (messages, team
-   state, reports) lives inside each target project's
-   `.claude-orchestra/` directory, not the engine repo. The
-   engine maintains a lightweight `registry.json` with
-   pointers to active teams across projects. The engine
+6. **Runtime data locality:** Runtime data (state.json)
+   lives inside each target project's `.claude-orchestra/`
+   directory, not the engine repo. The engine maintains
+   a lightweight `registry.json` with pointers. The engine
    does not create projects — it attaches teams to existing
    local repos.
 
+7. **Feedback system:** The pipeline supports blocking and
+   non-blocking feedback to the dashboard. Blocking questions
+   pause the pipeline until the user responds. Non-blocking
+   notifications are fire-and-forget.
+
 ---
 
-## Error Handling and Recovery
+## Error Handling
 
-### Malformed Agent Output
+### SDK Session Errors
 
-When an agent produces unparseable output (invalid JSON,
-missing required fields, wrong message schema):
+When an SDK `query()` call rejects (session crash, timeout):
+- The pipeline catches the error
+- Transitions the team to `errored` state
+- Closes all sessions
+- Surfaces the error to the dashboard
 
-1. Log the malformed output at `warn` level.
-2. Delete the malformed file from the inbox.
-3. Send a corrective prompt to the agent via stdin.
-4. Increment retry counter for the agent.
-5. After 3 consecutive failures, mark agent as `errored`.
-6. Counter resets to 0 after any successful message.
+### Loop Limit Exceeded
 
-### Agent Crashes
+When backward transitions exceed configured limits:
+- The `TeamState.transitionPhase()` method throws a
+  `TransitionError`
+- The pipeline catches it and transitions to `errored`
 
-Each agent gets 3 respawn attempts per task. See
-[Operations — Crash Recovery](docs/operations.md#crash-recovery)
-for the full protocol including recovery prompts.
+### Verdict Parse Failures
 
-### Timeouts
+- Security verdict: fails explicitly if no verdict found
+- Review verdict: defaults to `REVISION_NEEDED` (conservative)
+- Verify verdict: defaults to `COMPLETE` if ambiguous
 
-All messages with `requiresResponse: true` are monitored.
-Default timeouts range from 2-10 minutes depending on the
-message type. Phase-level hard timeouts range from 15-90
-minutes. See
-[State Machine — Timeouts](docs/state-machine.md#timeouts).
+### Loop Limits (Defaults)
 
-### Loop Limits
-
-- Max 3 revision loops (handoff→work or review→work)
-- Max 2 rejection loops (review→pre-work)
+- Max 3 revision loops (Handoff→Work or Review→Work)
+- Max 2 rejection loops (Review→PreWork)
 - Max 5 total backward transitions per task
+- Max 2 verification passes per Work phase entry
 - Exceeding any limit transitions to `errored` state
 
 See [State Machine — Loop Limits](docs/state-machine.md#loop-limits).
-
-### Deadlock Detection
-
-Checked on every `tick()`. If no agent is active, at least
-one is waiting/blocked, and no pending messages exist, the
-system is deadlocked. See
-[State Machine — Deadlock Detection](docs/state-machine.md#deadlock-detection).
 
 ---
 
 ## Configuration
 
 All settings are configurable via `orchestra.config.json` with
-CLI flag overrides for common settings. See
+CLI flag overrides. See
 [Operations — Configuration Reference](docs/operations.md#configuration-reference)
 for the full schema.
 
 Key settings:
-- `engine.tickIntervalMs` — main loop interval (default: 1000)
-- `engine.registryPath` — path to registry file (default: `./registry.json`)
 - `models.*` — model selection per role
-- `timeouts.*` — timeout values per message type and phase
-- `limits.*` — max revisions, rejections, respawns
+- `limits.*` — max revisions, rejections, verify passes
 - `costBudget.*` — warning and hard limit thresholds
 
-Required environment variable: `ANTHROPIC_API_KEY`
+Required environment variable: `ANTHROPIC_API_KEY` (unless
+using Claude Max subscription)
 
 ---
 
@@ -605,59 +443,28 @@ Required environment variable: `ANTHROPIC_API_KEY`
 ### Unit Tests (Per Milestone)
 
 Each milestone's "Validate" section defines unit test criteria.
-These test individual components in isolation.
-
-### Mock Agent Tests
-
-For integration testing without real API calls, use **mock
-agents** — lightweight processes that simulate agent behavior:
-
-- Read messages from inbox
-- Wait a configurable delay
-- Write predefined response messages to target inboxes
-- Support configurable failure modes (crash, malformed output,
-  timeout, wrong flag)
-
-Mock agents are defined as simple Node.js scripts in
-`tests/mocks/` that accept a behavior configuration via
-environment variables.
 
 ### Integration Tests
 
 | Test | What It Validates |
 |------|------------------|
-| Happy path | Full 4-phase cycle with mock agents, no errors |
-| Security block | Handoff→Work loop when Security blocks |
-| Reviewer revise | Review→Work loop with revision feedback |
-| Reviewer reject | Review→Pre-Work loop with re-planning |
-| Agent crash + respawn | Kill a mock agent mid-task, verify respawn |
-| Timeout escalation | Mock agent goes silent, verify timeout fires |
-| Deadlock detection | Put all mock agents in waiting state |
+| Happy path (simple) | Worker-1 only pipeline, no errors |
+| Happy path (standard) | Full 4-phase pipeline, no errors |
+| Security block | Handoff→Work backward transition |
+| Reviewer revise | Review→Work backward transition |
+| Reviewer reject | Review→PreWork backward transition |
 | Loop limit | Trigger max revisions, verify errored state |
-| Engine crash recovery | Kill engine, restart, verify resume |
-| Malformed output | Mock agent sends invalid JSON 3 times |
-
-### Stress Tests
-
-| Test | What It Validates |
-|------|------------------|
-| Concurrent writes | 5 mock agents writing to inboxes simultaneously |
-| Message flood | One agent sends 100 messages rapidly |
-| Multi-team | 3 teams running simultaneously |
-| Long-running task | 5 revision cycles (at the limit) |
+| Security reclassify | Standard→Simple downgrade during pre-scan |
+| Verification gaps | Worker-2 finds gaps, Worker-1 fixes |
 
 ### Test Commands
 
 ```bash
-# Unit tests per milestone
-npm test -- --grep "message-bus"
-npm test -- --grep "phase-controller"
+# Unit tests
+npm test
 
 # Integration tests
 npm run test:integration
-
-# Stress tests (longer running)
-npm run test:stress
 ```
 
 ---
@@ -665,18 +472,18 @@ npm run test:stress
 ## Document References
 
 - **Architecture:** [`docs/architecture.md`](docs/architecture.md) —
-  MAS topology, autonomy, authority hierarchy
-- **Message Contract:** [`docs/message-contract.md`](docs/message-contract.md) —
-  JSON schema, flag enums, validation (Milestones 1-2)
+  pipeline topology, agent roles, authority model
 - **Roles & JTBD:** [`docs/roles-and-jtbd.md`](docs/roles-and-jtbd.md) —
   role definitions, prompt guidelines (Milestone 5)
 - **State Machine:** [`docs/state-machine.md`](docs/state-machine.md) —
-  workflow states, transitions, timeouts (Milestone 6)
+  workflow states, transitions, loop limits (Milestone 6)
 - **Context Management:** [`docs/context-management.md`](docs/context-management.md) —
-  LLM context, costs, model selection (Milestone 5)
+  SDK sessions, context budgets, model selection (Milestone 4-5)
 - **Operations:** [`docs/operations.md`](docs/operations.md) —
-  health checks, shutdown, logging (Milestone 8)
+  health monitoring, shutdown, logging (Milestone 8)
+- **Architecture Decisions:** [`docs/architecture-decisions/`](docs/architecture-decisions/) —
+  ADRs including message bus reference design
 - **README:** [`README.md`](README.md) — product context,
-  dashboard requirements (future build phase)
+  dashboard requirements
 - **Workflow Diagram:** [`orchestration-workflow.html`](orchestration-workflow.html) —
   visual reference for the full lifecycle flow

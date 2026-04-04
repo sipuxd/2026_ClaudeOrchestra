@@ -175,8 +175,8 @@ Optional `orchestra.config.json` (all fields optional):
   },
   "efforts": {
     "Worker": "high",
-    "Security": "low",
-    "Reviewer": "low"
+    "Security": "medium",
+    "Reviewer": "medium"
   }
 }
 ```
@@ -186,7 +186,7 @@ Optional `orchestra.config.json` (all fields optional):
 - **Runtime:** TypeScript, Node.js
 - **AI:** Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`)
 - **Dashboard:** Node.js built-in `http` + SSE (zero UI dependencies)
-- **Tests:** Vitest — 392 tests across 13 files
+- **Tests:** Vitest — 204 tests across 7 files
 - **External dependencies:** 1 (Claude Agent SDK)
 
 ## Project Structure
@@ -195,8 +195,6 @@ Optional `orchestra.config.json` (all fields optional):
 src/
 ├── index.ts                       # CLI entry point & command routing
 ├── pipeline-orchestrator.ts       # Core pipeline engine (standard + simple)
-├── orchestrator.ts                # Legacy tick-based orchestrator
-├── subagent-orchestrator.ts       # SDK subagent orchestrator
 ├── git.ts                         # Git commit, push & merge operations
 ├── registry.ts                    # Cross-project team registry
 ├── dashboard/
@@ -204,22 +202,14 @@ src/
 │   ├── dashboard-ui.ts            # Single-page HTML/CSS/JS builder
 │   └── index.ts                   # Dashboard exports
 ├── router/
-│   ├── message-bus.ts             # Filesystem message routing
-│   ├── message-types.ts           # Message schema & validation
-│   ├── flag-enums.ts              # Role-pair flag definitions
 │   └── complexity-router.ts       # Simple vs standard classification
-├── phases/
-│   ├── phase-controller.ts        # State machine & transitions
-│   ├── pre-work.ts                # Pre-work phase logic
-│   ├── work.ts                    # Work phase logic
-│   ├── handoff.ts                 # Handoff phase logic
-│   └── review.ts                  # Review phase logic
 ├── state/
 │   ├── team-state.ts              # In-memory state with validated transitions
 │   └── persistence.ts             # Filesystem persistence (.claude-orchestra/)
 ├── spawner/
 │   ├── agent-spawner.ts           # Agent lifecycle management
-│   └── agent-process.ts           # Single CLI process wrapper
+│   ├── agent-process.ts           # SDK session wrapper (PromptChannel + query)
+│   └── frontmatter-parser.ts     # YAML frontmatter parser for agent files
 ├── roles/
 │   └── role-types.ts              # Role enums & types
 ├── logger/
@@ -227,13 +217,13 @@ src/
 └── types/
     └── index.ts                   # Shared enums (Phase, Priority, etc.)
 
-roles/subagent/                    # Agent system prompts (CLAUDE.md files)
-├── worker.claude.md               # Worker-1 (implementer) & Worker-2 (verifier)
-├── security.claude.md             # Security pre-scan & post-sweep
-├── reviewer.claude.md             # Code review & verdicts
-└── supervisor.claude.md           # Supervisor (legacy mode only)
+agents/                            # Agent system prompts (YAML frontmatter + markdown)
+├── worker.agent.md               # Worker-1 (implementer) & Worker-2 (verifier)
+├── security.agent.md             # Security pre-scan & post-sweep
+├── reviewer.agent.md             # Code review & verdicts
+└── security-review.agent.md      # Final security review (on-demand)
 
-tests/                             # 13 test files, 392 tests (Vitest)
+tests/                             # 7 test files, 204 tests (Vitest)
 docs/                              # Architecture & design specifications
 ```
 
@@ -255,7 +245,6 @@ Auto-commits happen at 3 checkpoints: after Build, after Sweep passes, and final
 | Document | Description |
 |----------|-------------|
 | [Architecture](docs/architecture.md) | Agent topology, authority hierarchy, conflict resolution |
-| [Message Contract](docs/message-contract.md) | JSON schema, flag enums, validation |
 | [Roles & JTBD](docs/roles-and-jtbd.md) | Role definitions, prompt guidelines |
 | [State Machine](docs/state-machine.md) | Phases, transitions, loop limits, deadlock detection |
 | [Context Management](docs/context-management.md) | Model selection, cost budgets |

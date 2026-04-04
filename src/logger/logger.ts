@@ -6,7 +6,6 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Role, type RoleInstance } from '../roles/role-types.js';
 import { TeamPhase } from '../state/team-state.js';
-import type { AgentMessage } from '../router/message-types.js';
 import type { PipelineOrchestrator } from '../pipeline-orchestrator.js';
 
 // --- Log Levels ---
@@ -91,7 +90,6 @@ const ANSI = {
 };
 
 const ROLE_COLORS: Record<string, string> = {
-  Supervisor: ANSI.blue,
   Worker: ANSI.green,
   Security: ANSI.red,
   Reviewer: ANSI.yellow,
@@ -289,53 +287,6 @@ export class Logger {
         teamId,
         phase,
         data: { outcome, durationMs, durationSeconds: parseFloat(seconds) },
-      });
-    });
-
-    orchestrator.on('message-routed', (teamId, message) => {
-      this.debug('message_sent', `${message.roleSourceInstance} -> [${message.flag}] -> ${message.roleTargetInstance ?? message.roleTarget}`, {
-        teamId,
-        phase: message.phase,
-        roleSource: message.roleSource,
-        roleSourceInstance: message.roleSourceInstance,
-        roleTarget: message.roleTarget,
-        messageId: message.messageId,
-        flag: message.flag,
-      });
-    });
-
-    orchestrator.on('agent-message', (teamId, instance, message) => {
-      // Decision flags get promoted to info level with content preview
-      const decisionFlags = [
-        'review-approved', 'review-revise', 'review-rejected',
-        'handoff-clearance', 'clearance-report',
-        'task-complete', 'task-accepted', 'blocked',
-      ];
-      const isDecision = decisionFlags.includes(message.flag);
-      const level = isDecision ? LogLevel.Info : LogLevel.Debug;
-
-      let logMessage = `${instance} -> [${message.flag}] -> ${message.roleTargetInstance ?? message.roleTarget}`;
-
-      // For decision messages, append a content preview
-      if (isDecision && message.content) {
-        // Extract first meaningful line (skip empty lines and the verdict word itself)
-        const lines = message.content.split('\n').filter((l: string) => l.trim().length > 0);
-        const preview = lines.length > 0
-          ? (lines[0].length > 120 ? lines[0].substring(0, 120) + '...' : lines[0])
-          : '';
-        if (preview) {
-          logMessage += `\n         ${preview}`;
-        }
-      }
-
-      this.log(level, 'message_received', logMessage, {
-        teamId,
-        phase: message.phase,
-        roleSource: message.roleSource,
-        roleSourceInstance: instance,
-        roleTarget: message.roleTarget,
-        messageId: message.messageId,
-        flag: message.flag,
       });
     });
 

@@ -1,12 +1,16 @@
 // Git operations for target project repos.
 //
-// Two tiers:
+// Three tiers:
 //   1. Automatic (engine-controlled): commit() only — safety checkpoints
-//      at phase boundaries on the current branch (dev). No user approval needed.
+//      at phase boundaries on the team's branch. No user approval needed.
 //
-//   2. User-initiated: pushAndMerge() — called from dashboard button or
-//      CLI command. Pushes dev, merges to main, pushes main, returns to dev.
-//      The engine NEVER runs this automatically.
+//   2. User-initiated: createPullRequest() — pushes team branch and creates
+//      a GitHub PR via `gh`. Called from dashboard button.
+//
+//   3. Polling: checkPrState() — checks if a PR has been merged on GitHub.
+//      Called by the engine's PR polling loop.
+//
+//   Legacy: pushAndMerge() — @deprecated, kept for backward compatibility.
 
 import { execSync } from 'node:child_process';
 
@@ -100,7 +104,151 @@ export class GitOps {
     return git(projectPath, `merge ${source}`);
   }
 
+  // --- Branch & PR operations ---
+
   /**
+   * Slugify a team name into a valid git branch name.
+   * "Auth API Endpoints" → "team/auth-api-endpoints"
+   */
+  static slugifyBranchName(teamName: string): string {
+    const slug = teamName
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .replace(/-{2,}/g, '-');
+    return `team/${slug || 'unnamed'}`;
+  }
+
+  /**
+   * Create a new branch off main for a team.
+   * Checks out main, pulls latest (best-effort), creates branch.
+   * Returns the final branch name (may have suffix if collision).
+   */
+  static createTeamBranch(projectPath: string, branchName: string): GitResult & { branchName: string } {
+    // Start from main
+    const checkoutMain = git(projectPath, 'checkout main');
+    if (!checkoutMain.success) {
+      return { ...checkoutMain, branchName };
+    }
+
+    // Pull latest (best-effort — may fail if no remote)
+    git(projectPath, 'pull origin main');
+
+    // Try the branch name, append suffix on collision
+    let finalName = branchName;
+    for (let i = 0; i < 10; i++) {
+      const candidate = i === 0 ? branchName : `${branchName}-${i + 1}`;
+      const exists = git(projectPath, `rev-parse --verify ${candidate}`);
+      if (!exists.success) {
+        finalName = candidate;
+        break;
+      }
+      if (i === 9) {
+        finalName = `${branchName}-${Date.now()}`;
+      }
+    }
+
+    const create = git(projectPath, `checkout -b ${finalName}`);
+    if (!create.success) {
+      // Return to main on failure
+      git(projectPath, 'checkout main');
+      return { ...create, branchName: finalName };
+    }
+
+    // Best-effort push to set up tracking
+    git(projectPath, `push -u origin ${finalName}`);
+
+    return { success: true, output: `Created branch ${finalName}`, branchName: finalName };
+  }
+
+  /**
+   * Check if `gh` CLI is available.
+   */
+  private static ghAvailable: boolean | null = null;
+  static isGhAvailable(): boolean {
+    if (GitOps.ghAvailable === null) {
+      try {
+        execSync('gh --version', { stdio: 'pipe', timeout: 5_000 });
+        GitOps.ghAvailable = true;
+      } catch {
+        GitOps.ghAvailable = false;
+      }
+    }
+    return GitOps.ghAvailable;
+  }
+
+  /**
+   * Push a team branch and create a GitHub PR.
+   * Returns the PR number and URL on success.
+   */
+  static createPullRequest(
+    projectPath: string,
+    branchName: string,
+    title: string,
+    body: string
+  ): GitResult & { prNumber?: number; prUrl?: string } {
+    if (!GitOps.isGhAvailable()) {
+      return {
+        success: false,
+        output: 'GitHub CLI (gh) is not installed. Install it from https://cli.github.com/ to create PRs.',
+      };
+    }
+
+    // Push branch to remote
+    const push = git(projectPath, `push -u origin ${branchName}`);
+    if (!push.success) {
+      return { ...push };
+    }
+
+    // Create PR via gh
+    const safeTitle = title.replace(/"/g, '\\"');
+    const safeBody = body.replace(/"/g, '\\"');
+    try {
+      const output = execSync(
+        `gh pr create --base main --head "${branchName}" --title "${safeTitle}" --body "${safeBody}"`,
+        { cwd: projectPath, encoding: 'utf-8', timeout: 30_000, stdio: ['pipe', 'pipe', 'pipe'] }
+      );
+      // gh pr create outputs the PR URL
+      const prUrl = output.trim();
+      const prNumberMatch = prUrl.match(/\/pull\/(\d+)/);
+      const prNumber = prNumberMatch ? parseInt(prNumberMatch[1], 10) : undefined;
+      return { success: true, output: prUrl, prNumber, prUrl };
+    } catch (err: any) {
+      const output = (err.stdout ?? '') + (err.stderr ?? '');
+      return { success: false, output: output.trim() };
+    }
+  }
+
+  /**
+   * Check the state of a GitHub PR.
+   * Returns { state, merged } from `gh pr view`.
+   */
+  static checkPrState(projectPath: string, prNumber: number): { state: string; merged: boolean } | null {
+    if (!GitOps.isGhAvailable()) return null;
+    try {
+      const output = execSync(
+        `gh pr view ${prNumber} --json state,merged`,
+        { cwd: projectPath, encoding: 'utf-8', timeout: 15_000, stdio: ['pipe', 'pipe', 'pipe'] }
+      );
+      const data = JSON.parse(output.trim());
+      return { state: data.state ?? 'UNKNOWN', merged: data.merged ?? false };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Delete a local branch (safe delete — must be fully merged).
+   */
+  static deleteLocalBranch(projectPath: string, branchName: string): GitResult {
+    return git(projectPath, `branch -d ${branchName}`);
+  }
+
+  // --- Legacy ---
+
+  /**
+   * @deprecated Use createPullRequest() instead. Kept for backward compatibility.
+   *
    * Full push-and-merge workflow. User-initiated only.
    *
    * 1. git push origin dev

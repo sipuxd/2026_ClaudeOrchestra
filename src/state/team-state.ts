@@ -12,6 +12,8 @@ export enum TeamPhase {
   Handoff = 'handoff',
   Review = 'review',
   Done = 'done',
+  PrOpen = 'pr_open',
+  Merged = 'merged',
   Errored = 'errored',
   Cancelled = 'cancelled',
 }
@@ -71,6 +73,9 @@ export interface TeamStateData {
   counters: LoopCounters;
   createdAt: string;
   updatedAt: string;
+  branchName?: string;
+  prNumber?: number;
+  prUrl?: string;
 }
 
 // --- Transition errors ---
@@ -89,7 +94,9 @@ const VALID_PHASE_TRANSITIONS: Record<TeamPhase, readonly TeamPhase[]> = {
   [TeamPhase.Work]: [TeamPhase.Handoff, TeamPhase.Done, TeamPhase.Errored, TeamPhase.Cancelled],
   [TeamPhase.Handoff]: [TeamPhase.Review, TeamPhase.Work, TeamPhase.Errored, TeamPhase.Cancelled],
   [TeamPhase.Review]: [TeamPhase.Done, TeamPhase.Work, TeamPhase.PreWork, TeamPhase.Errored, TeamPhase.Cancelled],
-  [TeamPhase.Done]: [TeamPhase.PreWork],
+  [TeamPhase.Done]: [TeamPhase.PreWork, TeamPhase.PrOpen],
+  [TeamPhase.PrOpen]: [TeamPhase.Merged, TeamPhase.Done, TeamPhase.Cancelled],
+  [TeamPhase.Merged]: [],
   [TeamPhase.Errored]: [TeamPhase.PreWork, TeamPhase.Cancelled],
   [TeamPhase.Cancelled]: [],
 };
@@ -358,9 +365,29 @@ export class TeamState {
   get isTerminal(): boolean {
     return (
       this.data.currentPhase === TeamPhase.Done ||
+      this.data.currentPhase === TeamPhase.Merged ||
       this.data.currentPhase === TeamPhase.Cancelled ||
       this.data.currentPhase === TeamPhase.Errored
     );
+  }
+
+  // --- Branch & PR management ---
+
+  setBranchName(name: string): void {
+    this.data.branchName = name;
+    this.touch();
+  }
+
+  setPrInfo(prNumber: number, prUrl: string): void {
+    this.data.prNumber = prNumber;
+    this.data.prUrl = prUrl;
+    this.touch();
+  }
+
+  clearPrInfo(): void {
+    this.data.prNumber = undefined;
+    this.data.prUrl = undefined;
+    this.touch();
   }
 
   // --- Private helpers ---

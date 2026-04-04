@@ -130,6 +130,14 @@ export class DashboardServer {
       this.broadcast('security-review', { teamId, ...data });
     });
 
+    this.orchestrator.on('pr-created', (teamId, prNumber, prUrl) => {
+      this.broadcast('pr-created', { teamId, prNumber, prUrl });
+    });
+
+    this.orchestrator.on('team-archived', (teamId, prUrl) => {
+      this.broadcast('team-archived', { teamId, prUrl });
+    });
+
     this.orchestrator.on('shutdown', () => {
       this.broadcast('shutdown', {});
       for (const client of this.sseClients) {
@@ -191,6 +199,12 @@ export class DashboardServer {
     const stopMatch = pathname.match(/^\/api\/teams\/([^/]+)\/stop$/);
     if (stopMatch && method === 'POST') {
       this.handleStopTeam(decodeURIComponent(stopMatch[1]), res);
+      return;
+    }
+
+    const createPrMatch = pathname.match(/^\/api\/teams\/([^/]+)\/create-pr$/);
+    if (createPrMatch && method === 'POST') {
+      this.handleCreatePr(decodeURIComponent(createPrMatch[1]), res);
       return;
     }
 
@@ -339,6 +353,24 @@ export class DashboardServer {
   private handleGetRegistry(res: http.ServerResponse): void {
     const entries = this.orchestrator.getRegistryEntries();
     this.sendJSON(res, entries);
+  }
+
+  private handleCreatePr(
+    teamId: string,
+    res: http.ServerResponse
+  ): void {
+    try {
+      const status = this.orchestrator.getTeamStatus(teamId);
+      if (!status) {
+        this.sendJSON(res, { error: `Team "${teamId}" not found` }, 404);
+        return;
+      }
+
+      const result = this.orchestrator.createPr(teamId);
+      this.sendJSON(res, result, result.success ? 200 : 500);
+    } catch (err: any) {
+      this.sendJSON(res, { error: err.message }, 500);
+    }
   }
 
   private handlePushMerge(

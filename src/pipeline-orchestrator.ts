@@ -15,18 +15,18 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { execSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { Query, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import { buildGovernanceHooks } from './hooks.js';
 import { Role, type RoleInstance } from './roles/role-types.js';
 import { AgentState } from './types/index.js';
-import type { AgentMessage } from './router/message-types.js';
 import { TeamState, TeamPhase, type TeamStateData, type LoopLimits, DEFAULT_LOOP_LIMITS } from './state/team-state.js';
 import { StatePersistence } from './state/persistence.js';
 import { Registry } from './registry.js';
 import { GitOps } from './git.js';
 import { classifyComplexity } from './router/complexity-router.js';
+import { parseFrontmatter } from './spawner/frontmatter-parser.js';
 import { randomUUID } from 'node:crypto';
 
 // --- Orchestrator events (shared interface for all event consumers) ---
@@ -37,10 +37,8 @@ export interface OrchestratorEvents {
   'task-classified': [teamId: string, complexity: string, agentCount: number];
   'phase-transition': [teamId: string, from: TeamPhase, to: TeamPhase, trigger: string];
   'task-complete': [teamId: string, phase: TeamPhase, durationMs: number];
-  'message-routed': [teamId: string, message: AgentMessage];
   'agent-output': [teamId: string, instance: RoleInstance, data: string];
   'agent-progress': [teamId: string, instance: RoleInstance, text: string];
-  'agent-message': [teamId: string, instance: RoleInstance, message: AgentMessage];
   'agent-crashed': [teamId: string, instance: RoleInstance, code: number | null];
   'agent-stderr': [teamId: string, instance: RoleInstance, data: string];
   'agent-respawned': [teamId: string, instance: RoleInstance];
@@ -52,6 +50,8 @@ export interface OrchestratorEvents {
   'agent-task': [teamId: string, instance: RoleInstance, subtask: string];
   'tick': [teamId: string];
   'security-review': [teamId: string, data: { status: string; result?: string }];
+  'pr-created': [teamId: string, prNumber: number, prUrl: string];
+  'team-archived': [teamId: string, prUrl: string];
   'shutdown': [];
 }
 
@@ -67,11 +67,17 @@ export interface FeedbackPayload {
   highlightTerms?: string[];
   detail?: string;
 }
-import {
-  DEFAULT_MODELS,
-  DEFAULT_DISALLOWED_TOOLS,
-  DEFAULT_MAX_TURNS,
-} from './spawner/agent-spawner.js';
+// Agent config defaults are read from YAML frontmatter in agent .md files.
+// These fallbacks are used when frontmatter is missing a field.
+const FALLBACK_MODEL = 'claude-opus-4-6';
+const FALLBACK_EFFORT: EffortLevel = 'medium';
+const FALLBACK_MAX_TURNS = 20;
+
+const ROLE_AGENT_FILES: Record<Role, string> = {
+  [Role.Worker]: 'worker.agent.md',
+  [Role.Security]: 'security.agent.md',
+  [Role.Reviewer]: 'reviewer.agent.md',
+};
 
 // --- PromptChannel: bridges sync push() to async iterable for SDK ---
 // Duplicated from agent-process.ts to keep that file untouched.
@@ -281,6 +287,7 @@ class AgentSession {
         allowDangerouslySkipPermissions: true,
         persistSession: false,
         env: { ...process.env, CLAUDECODE: undefined },
+        hooks: buildGovernanceHooks(opts.cwd),
       } as any,
     });
 
@@ -422,25 +429,6 @@ export interface PipelineOrchestraConfig {
   skipRequirements?: boolean;
 }
 
-// --- Pipeline-tuned defaults ---
-// Key insight: each agent gets its own query(), so we can tune per-role.
-// Workers need high effort (creative coding).
-// Security/Reviewer need low effort (scanning/judging, not coding).
-
-const DEFAULT_PIPELINE_EFFORTS: Record<Role, EffortLevel> = {
-  [Role.Supervisor]: 'low',    // Not used in pipeline mode
-  [Role.Worker]: 'high',       // Creative coding needs deep reasoning
-  [Role.Security]: 'low',      // Pattern scanning, not creative work
-  [Role.Reviewer]: 'low',      // Quick verdict, not deep analysis
-};
-
-const DEFAULT_PIPELINE_MAX_TURNS: Record<Role, number> = {
-  [Role.Supervisor]: 1,        // Not used in pipeline mode
-  [Role.Worker]: 50,           // Workers may need many turns for complex tasks
-  [Role.Security]: 5,          // Scan or sweep is one pass
-  [Role.Reviewer]: 5,          // Read code, issue verdict — 5 turns max
-};
-
 const DEFAULT_PIPELINE_CONFIG = {
   registryPath: './registry.json',
   logDirectory: './logs',
@@ -476,6 +464,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   private readonly maxTurnsPerRole: Record<Role, number>;
   private readonly teams: Map<string, PipelineTeamContext> = new Map();
   private shuttingDown = false;
+  private prPollInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor(config: Partial<PipelineOrchestraConfig> = {}) {
     super();
@@ -489,10 +478,12 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     this.persistence = new StatePersistence();
     this.registry = new Registry(this.config.registryPath);
 
-    this.models = { ...DEFAULT_MODELS, ...config.models };
-    this.efforts = { ...DEFAULT_PIPELINE_EFFORTS, ...config.efforts };
-    this.disallowedTools = { ...DEFAULT_DISALLOWED_TOOLS, ...config.disallowedTools };
-    this.maxTurnsPerRole = { ...DEFAULT_PIPELINE_MAX_TURNS, ...config.maxTurns };
+    // Build defaults from agent file frontmatter, then apply config overrides
+    const fmDefaults = this.loadFrontmatterDefaults(this.config.rolesDir);
+    this.models = { ...fmDefaults.models, ...config.models };
+    this.efforts = { ...fmDefaults.efforts, ...config.efforts };
+    this.disallowedTools = { ...fmDefaults.disallowedTools, ...config.disallowedTools };
+    this.maxTurnsPerRole = { ...fmDefaults.maxTurns, ...config.maxTurns };
   }
 
   // --- Team Lifecycle ---
@@ -527,8 +518,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     // Add .claude-orchestra/ to the project's .gitignore if not present
     this.ensureGitignore(resolvedProjectPath);
 
-    // Ensure we're on a dev branch — create one if on main
-    this.ensureDevBranch(resolvedProjectPath);
+    // Create a dedicated branch for this team off main
+    const branchName = this.ensureTeamBranch(resolvedProjectPath, name);
 
     const limits: LoopLimits = {
       ...DEFAULT_LOOP_LIMITS,
@@ -536,6 +527,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     };
 
     const state = TeamState.create(teamId, name, resolvedProjectPath, limits);
+    state.setBranchName(branchName);
 
     // Register team directory with persistence and persist initial state
     this.persistence.registerTeamDir(teamId, teamDir);
@@ -773,6 +765,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
+    this.stopPrPolling();
 
     for (const [, ctx] of this.teams) {
       this.closeSessions(ctx);
@@ -813,8 +806,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   // --- Git Operations (user-initiated) ---
 
   /**
-   * Push current branch and merge to main. User-initiated only.
-   * Returns git result with combined output.
+   * @deprecated Use createPr() instead.
    */
   pushAndMerge(teamId: string): import('./git.js').GitResult {
     const ctx = this.teams.get(teamId);
@@ -822,6 +814,141 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       return { success: false, output: `Team "${teamId}" not found` };
     }
     return GitOps.pushAndMerge(ctx.state.snapshot.projectPath);
+  }
+
+  /**
+   * Push the team's branch and create a GitHub PR. User-initiated.
+   * Transitions team from Done → PrOpen on success.
+   */
+  createPr(teamId: string): import('./git.js').GitResult & { prNumber?: number; prUrl?: string } {
+    const ctx = this.teams.get(teamId);
+    if (!ctx) {
+      return { success: false, output: `Team "${teamId}" not found` };
+    }
+
+    const { snapshot } = ctx.state;
+    if (snapshot.currentPhase !== TeamPhase.Done) {
+      return { success: false, output: `Team is in "${snapshot.currentPhase}" phase, must be "done" to create PR` };
+    }
+
+    const branchName = snapshot.branchName;
+    if (!branchName) {
+      return { success: false, output: 'No branch name set for this team' };
+    }
+
+    const taskDesc = snapshot.currentTask?.description ?? 'No description';
+    const title = taskDesc.length > 72 ? taskDesc.substring(0, 69) + '...' : taskDesc;
+    const body = `## Team: ${snapshot.teamName}\n\n**Task:** ${taskDesc}\n\n---\n_Created by ClaudeOrchestra_`;
+
+    const result = GitOps.createPullRequest(snapshot.projectPath, branchName, title, body);
+
+    if (result.success && result.prNumber && result.prUrl) {
+      ctx.state.setPrInfo(result.prNumber, result.prUrl);
+      const fromPhase = ctx.state.currentPhase;
+      ctx.state.transitionPhase(TeamPhase.PrOpen);
+      this.persistence.persistNow(ctx.state);
+      this.emit('phase-transition', teamId, fromPhase, TeamPhase.PrOpen, 'pr-created');
+      this.emit('pr-created', teamId, result.prNumber, result.prUrl);
+      this.startPrPolling();
+    }
+
+    return result;
+  }
+
+  /**
+   * Archive a team after its PR has been merged.
+   * Cleans up branch, registry, and in-memory state.
+   */
+  async archiveTeam(teamId: string): Promise<void> {
+    const ctx = this.teams.get(teamId);
+    if (!ctx) return;
+
+    const { snapshot } = ctx.state;
+    const prUrl = snapshot.prUrl ?? '';
+
+    // Close any lingering sessions
+    this.closeSessions(ctx);
+
+    // Transition to Merged
+    if (snapshot.currentPhase === TeamPhase.PrOpen) {
+      const fromPhase = ctx.state.currentPhase;
+      ctx.state.transitionPhase(TeamPhase.Merged);
+      this.emit('phase-transition', teamId, fromPhase, TeamPhase.Merged, 'pr-merged');
+    }
+
+    this.persistence.persistNow(ctx.state);
+
+    // Clean up local branch
+    if (snapshot.branchName) {
+      GitOps.checkout(snapshot.projectPath, 'main');
+      GitOps.deleteLocalBranch(snapshot.projectPath, snapshot.branchName);
+    }
+
+    // Remove from registry and memory
+    this.registry.remove(teamId);
+    this.teams.delete(teamId);
+
+    this.emit('team-archived', teamId, prUrl);
+  }
+
+  // --- PR Polling ---
+
+  /**
+   * Start polling GitHub for merged PRs. Called when a team enters PrOpen.
+   * Polls every 60s. Safe to call multiple times (idempotent).
+   */
+  private startPrPolling(): void {
+    if (this.prPollInterval) return;
+
+    this.prPollInterval = setInterval(() => {
+      this.pollPrStates();
+    }, 60_000);
+  }
+
+  private stopPrPolling(): void {
+    if (this.prPollInterval) {
+      clearInterval(this.prPollInterval);
+      this.prPollInterval = null;
+    }
+  }
+
+  private pollPrStates(): void {
+    for (const [teamId, ctx] of this.teams) {
+      const { snapshot } = ctx.state;
+      if (snapshot.currentPhase !== TeamPhase.PrOpen) continue;
+      if (!snapshot.prNumber) continue;
+
+      const prState = GitOps.checkPrState(snapshot.projectPath, snapshot.prNumber);
+      if (!prState) continue; // gh not available or error — skip
+
+      if (prState.merged) {
+        // PR was merged — archive the team
+        this.archiveTeam(teamId).catch(() => {});
+      } else if (prState.state === 'CLOSED') {
+        // PR closed without merge — return to Done so user can re-create
+        const fromPhase = ctx.state.currentPhase;
+        ctx.state.clearPrInfo();
+        ctx.state.transitionPhase(TeamPhase.Done);
+        this.persistence.persistNow(ctx.state);
+        this.emit('phase-transition', teamId, fromPhase, TeamPhase.Done, 'pr-closed-without-merge');
+        this.emit('feedback', teamId, {
+          id: `pr-closed-${Date.now()}`,
+          type: 'warning',
+          title: 'PR Closed',
+          message: `PR #${snapshot.prNumber} was closed without merging. You can create a new PR.`,
+          blocking: false,
+          timestamp: new Date().toISOString(),
+        });
+      }
+    }
+
+    // Stop polling if no teams are in PrOpen
+    const anyPrOpen = [...this.teams.values()].some(
+      ctx => ctx.state.snapshot.currentPhase === TeamPhase.PrOpen
+    );
+    if (!anyPrOpen) {
+      this.stopPrPolling();
+    }
   }
 
   // --- Final Security Review (user-initiated) ---
@@ -858,7 +985,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     this.emit('agent-output', teamId, 'Security-1' as any, '[Security Review] Starting comprehensive review...');
 
     try {
-      const systemPrompt = this.loadRolePrompt('security-review.claude.md');
+      const systemPrompt = this.loadRolePrompt('security-review.agent.md');
       const session = new AgentSession('SecurityReview', systemPrompt, {
         model: this.models[Role.Security],
         cwd,
@@ -926,26 +1053,21 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     fs.writeFileSync(gitignorePath, content + separator + entry + '\n', 'utf-8');
   }
 
-  // --- Private: Dev Branch Setup ---
+  // --- Private: Team Branch Setup ---
 
-  private ensureDevBranch(projectPath: string): void {
-    const current = GitOps.currentBranch(projectPath);
-    if (current !== 'main') return; // already on a non-main branch
-
-    try {
-      // Check if local dev branch already exists
-      execSync('git rev-parse --verify dev', { cwd: projectPath, stdio: 'pipe' });
-      // dev exists locally, just check it out
-      execSync('git checkout dev', { cwd: projectPath, stdio: 'pipe' });
-    } catch {
-      // No local dev branch — create it and push to origin
-      execSync('git checkout -b dev', { cwd: projectPath, stdio: 'pipe' });
-      try {
-        execSync('git push -u origin dev', { cwd: projectPath, stdio: 'pipe' });
-      } catch {
-        // Push may fail if no remote — that's fine, local dev is created
-      }
+  /**
+   * Create a dedicated branch for this team off main.
+   * Returns the branch name (may include suffix if name was taken).
+   */
+  private ensureTeamBranch(projectPath: string, teamName: string): string {
+    const branchName = GitOps.slugifyBranchName(teamName);
+    const result = GitOps.createTeamBranch(projectPath, branchName);
+    if (!result.success) {
+      // Fall back: try to just stay on whatever branch we're on
+      console.warn(`[orchestra] Failed to create team branch ${branchName}: ${result.output}`);
+      return branchName;
     }
+    return result.branchName;
   }
 
   // --- Private: Session Management ---
@@ -967,9 +1089,9 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     onProgress?: (accumulated: string) => void
   ): AgentSession {
     const systemPrompt = this.loadRolePrompt(
-      role === Role.Worker ? 'worker.claude.md' :
-        role === Role.Security ? 'security.claude.md' :
-          'reviewer.claude.md'
+      role === Role.Worker ? 'worker.agent.md' :
+        role === Role.Security ? 'security.agent.md' :
+          'reviewer.agent.md'
     );
 
     return new AgentSession(name, systemPrompt, {
@@ -1544,10 +1666,50 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
   // --- Private: Role Prompt Loading ---
 
+  private loadFrontmatterDefaults(rolesDir: string): {
+    models: Record<Role, string>;
+    efforts: Record<Role, EffortLevel>;
+    disallowedTools: Record<Role, string[]>;
+    maxTurns: Record<Role, number>;
+  } {
+    const models: Record<string, string> = {};
+    const efforts: Record<string, EffortLevel> = {};
+    const disallowedTools: Record<string, string[]> = {};
+    const maxTurns: Record<string, number> = {};
+
+    for (const [role, filename] of Object.entries(ROLE_AGENT_FILES)) {
+      const filePath = path.join(rolesDir, filename);
+      try {
+        const content = fs.readFileSync(filePath, 'utf-8');
+        const { frontmatter } = parseFrontmatter(content);
+
+        models[role] = frontmatter.model ?? FALLBACK_MODEL;
+        efforts[role] = (frontmatter.effort as EffortLevel) ?? FALLBACK_EFFORT;
+        maxTurns[role] = frontmatter.maxTurns ? parseInt(frontmatter.maxTurns, 10) : FALLBACK_MAX_TURNS;
+        disallowedTools[role] = frontmatter.disallowedTools
+          ? frontmatter.disallowedTools.split(',').map((t: string) => t.trim())
+          : [];
+      } catch {
+        models[role] = FALLBACK_MODEL;
+        efforts[role] = FALLBACK_EFFORT;
+        maxTurns[role] = FALLBACK_MAX_TURNS;
+        disallowedTools[role] = [];
+      }
+    }
+
+    return {
+      models: models as Record<Role, string>,
+      efforts: efforts as Record<Role, EffortLevel>,
+      disallowedTools: disallowedTools as Record<Role, string[]>,
+      maxTurns: maxTurns as Record<Role, number>,
+    };
+  }
+
   private loadRolePrompt(filename: string): string {
     const promptPath = path.join(this.config.rolesDir, filename);
     try {
-      return fs.readFileSync(promptPath, 'utf-8');
+      const rawContent = fs.readFileSync(promptPath, 'utf-8');
+      return parseFrontmatter(rawContent).body;
     } catch (err: any) {
       throw new Error(`Failed to read role prompt at ${promptPath}: ${err?.message}`);
     }

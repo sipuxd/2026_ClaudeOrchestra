@@ -207,36 +207,67 @@ a:hover{text-decoration:underline}
 .feedback-block-actions{display:flex;gap:8px;flex-wrap:wrap}
 
 /* --- Summary Content --- */
-.summary-section{margin-bottom:20px}
-.summary-section h4{font-size:.8125rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;
-  margin-bottom:8px}
-.summary-field{display:flex;justify-content:space-between;align-items:center;padding:6px 0;
-  border-bottom:1px solid rgba(48,54,61,.5)}
-.summary-field:last-child{border-bottom:none}
-.summary-label{color:var(--text-secondary);font-size:.8125rem}
-.summary-value{font-size:.8125rem;font-weight:500}
+.summary-status-top{display:flex;align-items:center;gap:16px;padding:16px;margin-bottom:16px;
+  background:var(--bg);border:1px solid var(--border);border-radius:10px}
+.summary-status-icon{width:44px;height:44px;border-radius:50%;display:flex;align-items:center;
+  justify-content:center;font-size:1.3rem;flex-shrink:0}
+.summary-status-top.pass .summary-status-icon{background:rgba(35,134,54,.12);color:var(--green)}
+.summary-status-top.fail .summary-status-icon{background:rgba(218,54,51,.12);color:var(--red-light)}
+.summary-task{font-size:.875rem;color:var(--text-primary);line-height:1.4}
+.summary-status-text{font-size:.75rem;margin-top:4px}
+.summary-actions{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
+.pipeline-stats{display:flex;gap:0;margin-bottom:20px;background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:12px}
+.pipeline-stat{text-align:center;flex:1}
+.pipeline-stat-value{font-size:1.05rem;font-weight:700;color:var(--text-primary)}
+.pipeline-stat-label{font-size:.65rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-top:2px}
 
-/* Phase Progress in Summary */
-.phase-progress{display:flex;align-items:center;gap:0;margin-bottom:8px}
-.phase-step{display:flex;align-items:center;gap:4px;font-size:.6875rem;color:var(--text-muted)}
-.phase-step.completed{color:var(--green)}
-.phase-step.current{color:var(--blue)}
-.phase-step .step-dot{width:12px;height:12px;border-radius:50%;border:2px solid currentColor;
-  display:flex;align-items:center;justify-content:center;font-size:7px}
-.phase-step.completed .step-dot{background:var(--green);border-color:var(--green);color:#fff}
-.phase-step.current .step-dot{border-color:var(--blue);animation:step-pulse 1.5s infinite}
-@keyframes step-pulse{0%,100%{box-shadow:0 0 0 0 rgba(88,166,255,.4)}50%{box-shadow:0 0 0 4px rgba(88,166,255,.1)}}
-.phase-connector{width:20px;height:2px;background:var(--border);margin:0 2px}
-.phase-connector.completed{background:var(--green)}
+/* Expandable Agent Sections */
+.agent-sections-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.agent-section{background:var(--bg);border:1px solid var(--border);border-radius:10px;overflow:hidden;cursor:pointer}
+.agent-section-header{display:flex;align-items:center;gap:10px;padding:12px 14px}
+.agent-section-header:hover{background:var(--surface)}
+.agent-chevron{font-size:.6rem;color:var(--text-muted);transition:transform .2s}
+.agent-section.expanded .agent-chevron{transform:rotate(90deg)}
+.agent-dot-sm{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+.agent-name{font-weight:600;font-size:.8125rem;color:var(--text-primary)}
+.agent-verdict{margin-left:auto;font-size:.6875rem;font-weight:600;padding:2px 8px;border-radius:10px}
+.agent-section-body{display:none;padding:12px 14px;border-top:1px solid var(--border)}
+.agent-section.expanded .agent-section-body{display:block}
+.agent-output{font-family:'SF Mono','Fira Code',monospace;font-size:.75rem;color:var(--text-secondary);
+  line-height:1.5;white-space:pre-wrap;word-break:break-word;margin:0;max-height:200px;overflow-y:auto}
+.security-result-section{margin-top:16px}
+.security-result-section h4{font-size:.8125rem;color:var(--text-muted);text-transform:uppercase;margin-bottom:8px}
 
 /* --- Live Mode --- */
-.live-output{font-family:'SF Mono','Fira Code','Cascadia Code',monospace;font-size:.75rem;
-  line-height:1.6;color:var(--text-secondary);white-space:pre-wrap;word-break:break-word}
-.live-entry{padding:4px 0;border-bottom:1px solid rgba(48,54,61,.3)}
-.live-entry .live-agent{color:var(--blue);font-weight:600;margin-right:6px}
-.live-entry .live-text{color:var(--text-secondary)}
-.live-entry.error .live-text{color:var(--red-light)}
-.live-entry.progress .live-text{color:var(--text-muted)}
+.live-header{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:12px}
+.live-task{font-size:.8125rem;color:var(--text-secondary);line-height:1.4;flex:1}
+.live-elapsed{font-size:.8125rem;color:var(--text-muted);font-variant-numeric:tabular-nums;flex-shrink:0;margin-left:12px}
+.live-phase-bar{display:flex;align-items:center;margin-bottom:20px}
+.live-phase-step{display:flex;flex-direction:column;align-items:center;gap:6px}
+.live-dot{width:28px;height:28px;border-radius:50%;border:2px solid var(--border);background:var(--bg);
+  display:flex;align-items:center;justify-content:center;font-size:.75rem;z-index:1;color:var(--text-muted)}
+.live-dot.past{border-color:var(--green);background:var(--green);color:#fff;font-weight:700}
+.live-dot.current{border-color:var(--blue);background:var(--blue);color:#fff;font-weight:700;box-shadow:0 0 12px rgba(88,166,255,.4)}
+.live-dot-label{font-size:.65rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em}
+.live-dot-label.past{color:var(--green)}
+.live-dot-label.current{color:var(--blue)}
+.live-connector{flex:1;height:2px;background:var(--border);margin:0 -2px;margin-bottom:20px}
+.live-connector.past{background:var(--green)}
+.live-agent-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px}
+.live-agent-card{background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:12px}
+.live-agent-card.active-agent{border-color:var(--agent-color,var(--blue))}
+.live-agent-header{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.live-agent-dot{width:8px;height:8px;border-radius:50%;background:var(--border)}
+.live-agent-dot.working{background:var(--agent-color,var(--blue));animation:pulse-dot 1.5s infinite}
+.live-agent-dot.done{background:var(--green)}
+@keyframes pulse-dot{0%,100%{opacity:1}50%{opacity:.4}}
+.live-agent-name{font-weight:600;font-size:.8rem;color:var(--text-primary)}
+.live-agent-status{margin-left:auto;font-size:.65rem;text-transform:uppercase;font-weight:600}
+.live-agent-progress{height:3px;background:var(--border);border-radius:2px;overflow:hidden;margin-bottom:8px}
+.live-agent-fill{height:100%;border-radius:2px;transition:width .5s}
+.live-agent-output{font-family:'SF Mono','Fira Code',monospace;font-size:.72rem;color:var(--text-muted);
+  line-height:1.5;max-height:80px;overflow-y:auto;white-space:pre-wrap;word-break:break-word}
+.live-actions{display:flex;gap:8px}
 
 /* --- Modal --- */
 .modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);
@@ -703,6 +734,13 @@ function renderProjectDetailView() {
   var teamIds = Array.from(proj.teams);
   var filtered = filterTeams(teamIds, state.projectFilter[p] || null);
 
+  // Auto-select first team if none selected (before rendering cards so selected state applies)
+  if (!state.selectedCompact || !proj.teams.has(state.selectedCompact)) {
+    if (filtered.length > 0) {
+      state.selectedCompact = filtered[0];
+    }
+  }
+
   html += '<div class="compact-card-grid">';
   for (var j = 0; j < filtered.length; j++) {
     html += renderTeamCard(filtered[j], true);
@@ -726,10 +764,7 @@ function renderInlineDetail(teamId) {
   var t = state.teams[teamId];
   if (!t) return '';
   var html = '<div class="inline-detail">';
-  html += '<div class="inline-detail-header"><h3>' + esc(t.teamName || teamId) + '</h3>';
-  html += '<div class="inline-detail-actions">';
-  html += renderTeamActionButtons(teamId);
-  html += '</div></div>';
+  html += '<div class="inline-detail-header"><h3>' + esc(t.teamName || teamId) + '</h3></div>';
   // Feedback blocks
   html += renderFeedbackBlocks(teamId);
   // Summary info
@@ -794,71 +829,155 @@ function renderSummaryContent(teamId) {
   if (!t) return '';
   var ph = t.currentPhase || 'pre_work';
   var pi = phaseIndex(ph);
-  var html = '<div class="summary-section"><h4>Pipeline Progress</h4>';
+  var panelTaskText = t.currentTask ? (t.currentTask.description || t.currentTask).toString() : '';
+  var statusInfo = getCardStatusInfo(ph, teamNeedsAttention(teamId), teamId);
+  var isDone = ph === 'done' || ph === 'errored' || ph === 'cancelled' || ph === 'merged';
 
-  // Phase steps
-  html += '<div class="phase-progress">';
-  var labels = ['scan','build','sweep','review','done'];
-  for (var s = 0; s < 5; s++) {
-    var cls = '';
-    if (ph === 'errored' || ph === 'cancelled') cls = s <= pi ? 'completed' : '';
-    else if (s < pi || pi === 4) cls = 'completed';
-    else if (s === pi) cls = 'current';
-    html += '<div class="phase-step ' + cls + '"><span class="step-dot">' + (cls==='completed'?'\\u2713':'') + '</span>' + labels[s] + '</div>';
-    if (s < 4) html += '<div class="phase-connector ' + (s < pi ? 'completed' : '') + '"></div>';
-  }
-  html += '</div></div>';
+  // Status summary top
+  var statusIcon = isDone && ph === 'done' ? '&#10003;' : ph === 'errored' ? '&#10007;' : '&#9888;';
+  var statusClass = ph === 'done' || ph === 'merged' ? 'pass' : 'fail';
+  var statusText = ph === 'done' ? 'All gates passed' :
+    ph === 'errored' ? 'Pipeline errored in ' + phaseLabel(ph) + ' phase' :
+    ph === 'pr_open' ? 'PR created — awaiting merge' :
+    statusInfo.label;
 
-  html += '<div class="summary-section"><h4>Details</h4>';
-  html += '<div class="summary-field"><span class="summary-label">Team</span><span class="summary-value">' + esc(t.teamName || teamId) + '</span></div>';
-  html += '<div class="summary-field"><span class="summary-label">Phase</span><span class="summary-value phase-' + ph + '" style="padding:2px 8px;border-radius:8px;font-size:.75rem">' + phaseLabel(ph) + '</span></div>';
-  var panelTaskText = t.currentTask ? (t.currentTask.description || t.currentTask).toString() : 'None';
-  html += '<div class="summary-field"><span class="summary-label">Task</span><span class="summary-value" style="max-width:300px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(panelTaskText) + '</span></div>';
-  if (t.branchName) {
-    html += '<div class="summary-field"><span class="summary-label">Branch</span><span class="summary-value" style="font-family:monospace;font-size:.75rem">' + esc(t.branchName) + '</span></div>';
-  }
-  if (t.prUrl) {
-    html += '<div class="summary-field"><span class="summary-label">PR</span><span class="summary-value"><a href="' + esc(t.prUrl) + '" target="_blank">#' + (t.prNumber||'') + '</a></span></div>';
-  }
-  html += '<div class="summary-field"><span class="summary-label">Created</span><span class="summary-value">' + (t.createdAt ? new Date(t.createdAt).toLocaleString() : '—') + '</span></div>';
-  html += '<div class="summary-field"><span class="summary-label">Elapsed</span><span class="summary-value card-elapsed" data-created="' + (t.createdAt||'') + '">' + elapsedSince(t.createdAt) + '</span></div>';
-  if (t.counters) {
-    html += '<div class="summary-field"><span class="summary-label">Revisions</span><span class="summary-value">' + (t.counters.revisions||0) + '</span></div>';
-    html += '<div class="summary-field"><span class="summary-label">Rejections</span><span class="summary-value">' + (t.counters.rejections||0) + '</span></div>';
-  }
+  var html = '<div class="summary-status-top ' + statusClass + '">';
+  html += '<div class="summary-status-icon">' + statusIcon + '</div>';
+  html += '<div class="summary-status-info"><div class="summary-task">' + esc(panelTaskText || 'No task assigned') + '</div>';
+  html += '<div class="summary-status-text" style="color:' + (statusClass==='pass'?'var(--green)':'var(--red-light)') + '">' + statusText + '</div></div></div>';
+
+  // Action buttons
+  html += '<div class="summary-actions">' + renderTeamActionButtons(teamId) + '</div>';
+
+  // Pipeline stats bar
+  html += '<div class="pipeline-stats">';
+  html += '<div class="pipeline-stat"><div class="pipeline-stat-value">' + elapsedSince(t.createdAt) + '</div><div class="pipeline-stat-label">Duration</div></div>';
+  html += '<div class="pipeline-stat"><div class="pipeline-stat-value">' + (t.counters ? t.counters.revisions : 0) + '</div><div class="pipeline-stat-label">Revisions</div></div>';
+  html += '<div class="pipeline-stat"><div class="pipeline-stat-value">' + (t.counters ? t.counters.rejections : 0) + '</div><div class="pipeline-stat-label">Rejections</div></div>';
   html += '</div>';
 
-  // Agents section
-  html += '<div class="summary-section"><h4>Agents</h4>';
+  // Expandable agent sections (2x2 grid)
   var agentInstances = ['Security-1','Worker-1','Worker-2','Reviewer-1'];
+  var agentColors = { 'Security-1':'var(--red)', 'Worker-1':'var(--green)', 'Worker-2':'var(--green)', 'Reviewer-1':'var(--amber)' };
+  html += '<div class="agent-sections-grid">';
   for (var a = 0; a < agentInstances.length; a++) {
-    var ag = t.agents ? t.agents[agentInstances[a]] : null;
+    var inst = agentInstances[a];
+    var ag = t.agents ? t.agents[inst] : null;
     var agState = ag ? ag.state : 'spawning';
-    var color = agState === 'active' ? 'var(--blue)' : agState === 'done' ? 'var(--green)' : 'var(--text-muted)';
-    html += '<div class="summary-field"><span class="summary-label">' + agentInstances[a] + '</span>';
-    html += '<span class="summary-value" style="color:' + color + '">' + agState + '</span></div>';
+    var agOutput = (state.liveOutput[teamId] || []).filter(function(e){ return e.agent === inst; }).map(function(e){ return e.text; }).join('\\n');
+    var verdict = getAgentVerdict(agOutput, inst);
+    var verdictStyle = getVerdictStyle(verdict);
+
+    html += '<div class="agent-section" onclick="toggleAgentSection(this)">';
+    html += '<div class="agent-section-header">';
+    html += '<span class="agent-chevron">&#9654;</span>';
+    html += '<span class="agent-dot-sm" style="background:' + agentColors[inst] + '"></span>';
+    html += '<span class="agent-name">' + inst + '</span>';
+    html += '<span class="agent-verdict" style="' + verdictStyle + '">' + esc(verdict) + '</span>';
+    html += '</div>';
+    html += '<div class="agent-section-body">';
+    html += '<pre class="agent-output">' + esc(agOutput || agState) + '</pre>';
+    html += '</div></div>';
   }
   html += '</div>';
 
   // Security review result
   if (state.securityResults[teamId]) {
-    html += '<div class="summary-section"><h4>Security Review</h4>';
-    html += '<div class="security-result">' + esc(state.securityResults[teamId]) + '</div></div>';
+    html += '<div class="security-result-section"><h4>Security Review</h4>';
+    html += '<pre class="security-result">' + esc(state.securityResults[teamId]) + '</pre></div>';
   }
 
   return html;
 }
 
+function getAgentVerdict(output, instance) {
+  if (!output) return 'PENDING';
+  if (output.match(/APPROVED/i)) return 'APPROVED';
+  if (output.match(/REVISION.NEEDED/i)) return 'REVISION_NEEDED';
+  if (output.match(/REJECTED/i)) return 'REJECTED';
+  if (output.match(/BLOCKED/i)) return 'BLOCKED';
+  if (output.match(/COMPLETE/i)) return 'Complete';
+  if (output.match(/ERRORED|error/i) && instance !== 'Security-1') return 'ERRORED';
+  if (output.match(/SKIPPED/i)) return 'SKIPPED';
+  var metMatch = output.match(new RegExp('\\\\d+/\\\\d+\\\\s*met','i'));
+  if (metMatch) return metMatch[0];
+  return 'PENDING';
+}
+
+function getVerdictStyle(verdict) {
+  if (verdict === 'APPROVED' || verdict === 'Complete' || verdict.includes('met')) return 'background:rgba(63,185,80,.12);color:var(--green)';
+  if (verdict === 'SKIPPED' || verdict === 'PENDING') return 'background:rgba(72,79,88,.12);color:var(--text-muted)';
+  if (verdict === 'ERRORED' || verdict === 'BLOCKED' || verdict === 'REJECTED') return 'background:rgba(218,54,51,.12);color:var(--red-light)';
+  return 'background:rgba(210,153,34,.12);color:var(--amber)';
+}
+
+window.toggleAgentSection = function(el) {
+  el.classList.toggle('expanded');
+};
+
 // ---- Render: Live Content ----
 function renderLiveContent(teamId) {
-  var entries = state.liveOutput[teamId] || [];
-  var html = '';
-  for (var i = 0; i < entries.length; i++) {
-    var e = entries[i];
-    html += '<div class="live-entry ' + (e.type||'') + '">';
-    if (e.agent) html += '<span class="live-agent">[' + esc(e.agent) + ']</span>';
-    html += '<span class="live-text">' + esc(e.text) + '</span></div>';
+  var t = state.teams[teamId];
+  if (!t) return '';
+  var ph = t.currentPhase || 'pre_work';
+  var pi = phaseIndex(ph);
+  var panelTaskText = t.currentTask ? (t.currentTask.description || t.currentTask).toString() : '';
+
+  // Task + elapsed
+  var html = '<div class="live-header">';
+  html += '<div class="live-task">' + esc(panelTaskText || 'No task') + '</div>';
+  html += '<div class="live-elapsed card-elapsed" data-created="' + (t.createdAt||'') + '">' + elapsedSince(t.createdAt) + '</div>';
+  html += '</div>';
+
+  // Phase bar with dots
+  html += '<div class="live-phase-bar">';
+  var labels = ['scan','build','sweep','review','done'];
+  for (var s = 0; s < 5; s++) {
+    var dotCls = '';
+    if (s < pi || pi === 4) dotCls = 'past';
+    else if (s === pi) dotCls = 'current';
+    html += '<div class="live-phase-step">';
+    html += '<div class="live-dot ' + dotCls + '">' + (dotCls==='past'?'&#10003;':(s+1)) + '</div>';
+    html += '<div class="live-dot-label ' + dotCls + '">' + labels[s] + '</div></div>';
+    if (s < 4) html += '<div class="live-connector ' + (s < pi ? 'past' : '') + '"></div>';
   }
+  html += '</div>';
+
+  // 2x2 agent cards
+  var agentInstances = ['Security-1','Worker-1','Worker-2','Reviewer-1'];
+  var agentColors = { 'Security-1':'#f85149', 'Worker-1':'#3fb950', 'Worker-2':'#3fb950', 'Reviewer-1':'#d2a8ff' };
+  html += '<div class="live-agent-grid">';
+  for (var a = 0; a < 4; a++) {
+    var inst = agentInstances[a];
+    var ag = t.agents ? t.agents[inst] : null;
+    var agState = ag ? ag.state : 'spawning';
+    var isWorking = agState === 'active';
+    var isDone = agState === 'done';
+    var color = agentColors[inst];
+    var output = '';
+    var entries = state.liveOutput[teamId] || [];
+    for (var ei = entries.length - 1; ei >= 0; ei--) {
+      if (entries[ei].agent === inst) { output = entries[ei].text; break; }
+    }
+
+    html += '<div class="live-agent-card' + (isWorking ? ' active-agent' : '') + '" style="--agent-color:' + color + '">';
+    html += '<div class="live-agent-header">';
+    html += '<span class="live-agent-dot ' + (isWorking ? 'working' : isDone ? 'done' : '') + '"></span>';
+    html += '<span class="live-agent-name">' + inst + '</span>';
+    html += '<span class="live-agent-status" style="color:' + (isWorking ? color : 'var(--text-muted)') + '">' + agState.toUpperCase() + '</span>';
+    html += '</div>';
+    html += '<div class="live-agent-progress"><div class="live-agent-fill" style="width:' + (isDone ? 100 : isWorking ? 50 : 0) + '%;background:' + color + '"></div></div>';
+    html += '<div class="live-agent-output">' + esc(output || (agState === 'spawning' ? 'Waiting...' : '')) + '</div>';
+    html += '</div>';
+  }
+  html += '</div>';
+
+  // Stop + Steer buttons
+  html += '<div class="live-actions">';
+  html += '<button class="btn btn-danger" style="flex:1" onclick="window.__modal.stopPipeline(\\'' + esc(teamId) + '\\')">Stop Pipeline</button>';
+  html += '<button class="btn btn-secondary" style="flex:1" onclick="window.__modal.steerAgent(\\'' + esc(teamId) + '\\')">Steer Agent</button>';
+  html += '</div>';
+
   return html;
 }
 
@@ -889,9 +1008,6 @@ function renderPanel() {
 
   if (state.panelMode === 'summary') {
     html += renderSummaryContent(state.panelTeamId);
-    html += '<div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap">';
-    html += renderTeamActionButtons(state.panelTeamId);
-    html += '</div>';
   } else {
     html += '<div class="live-output" id="liveOutputArea">' + renderLiveContent(state.panelTeamId) + '</div>';
   }

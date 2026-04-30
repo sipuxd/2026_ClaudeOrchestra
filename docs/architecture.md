@@ -1,243 +1,294 @@
-# ClaudeOrchestra — System Architecture
+# ClaudeOrchestra - System Architecture
 
-> Source of truth for pipeline topology, agent roles, authority
-> model, and coordination patterns.
+> Source of truth for system structure, pipeline topology, provider runtime,
+> authority model, and coordination patterns.
 >
-> **Cross-references:**
-> - [Roles & JTBD](./roles-and-jtbd.md) — role definitions
-> - [State Machine](./state-machine.md) — workflow model
-> - [Visual Diagram](../orchestration-workflow.html) — interactive
->   lifecycle flow
+> Cross-references:
+> - [Roles & JTBD](./roles-and-jtbd.md) - role definitions and prompt rules
+> - [State Machine](./state-machine.md) - workflow model and transitions
+> - [Context Management](./context-management.md) - runtime context strategy
+> - [Operations](./operations.md) - configuration, health, and shutdown
+> - [ADR 001](./architecture-decisions/001-eliminate-supervisor-llm.md) - why the Supervisor LLM was removed
 
 ---
 
-## Pipeline Architecture
+## System Overview
 
-ClaudeOrchestra uses a **deterministic, code-driven pipeline**.
-There is no Supervisor LLM — the `PipelineOrchestrator` class
-drives the workflow directly, sending prompts to agents via
-the Claude Agent SDK `query()` API.
+ClaudeOrchestra is a deterministic, code-driven orchestration engine for AI coding agents. It governs autonomous code generation with security scanning, requirements verification, code review, git checkpoints, and a live dashboard.
 
-```
-PipelineOrchestrator (TypeScript)
-├── Complexity Router (heuristic classification)
-├── Agent Sessions (SDK query() with warm PromptChannel)
-└── Phase Controller (state machine)
-    ↓ manages
-Team State Store
-    ↓ spawns/manages
-Up to 4 Agent Sessions (1 per role)
+There is no Supervisor LLM. The `PipelineOrchestrator` class drives the workflow directly:
+
+```text
+Security scan
+  -> Worker-1 implementation
+  -> Worker-2 requirements verification
+  -> Security sweep
+  -> Reviewer quality gate
+  -> Done
 ```
 
-### Two Pipeline Modes
+The orchestrator is plain TypeScript. It sends prompts to runtime agents, parses verdicts with deterministic functions, and moves the team through a validated state machine.
 
-| Mode | Agents | When |
-|------|--------|------|
-| **Simple** | Worker-1 only | Short task description, no complexity keywords |
-| **Standard** | Security-1, Worker-1, Worker-2, Reviewer-1 | Longer description or complexity keywords detected |
+---
 
-The complexity router (`src/router/complexity-router.ts`)
-classifies tasks heuristically based on description length
-(>20 words = standard) and keyword analysis (e.g., "test",
-"refactor", "implement", "api"). Security-1 can also
-reclassify a standard task to simple during its pre-scan.
+## High-Level Structure
 
-### Standard Pipeline Flow
-
-```
-Security-1 (pre-scan)
-    ↓
-Worker-1 (implement) → Worker-2 (verify requirements)
-    ↓                       ↓ gaps found? → Worker-1 fixes (max 2 loops)
-    ↓
-Security-1 (post-sweep)
-    ↓ BLOCKED? → back to Worker-1
-    ↓ APPROVED/FLAGGED ↓
-Reviewer-1 (quality review)
-    ↓ REVISION_NEEDED? → back to Worker-1
-    ↓ REJECTED? → back to Security-1 (full restart)
-    ↓ APPROVED ↓
-Done
+```text
+CLI / Dashboard
+    |
+    v
+PipelineOrchestrator
+    |-- Complexity Router
+    |-- Requirements Extractor
+    |-- Team State Machine
+    |-- Registry + Persistence
+    |-- GitOps
+    |-- Provider-backed AgentSession interface
+            |-- ClaudeAgentSession -> @anthropic-ai/claude-agent-sdk query()
+            |-- CodexAgentSession  -> @openai/codex-sdk thread/runStreamed()
 ```
 
-### Simple Pipeline Flow
+Primary modules:
 
+| Area | Files | Responsibility |
+|------|-------|----------------|
+| CLI | `src/index.ts` | CLI commands, dashboard startup, signal handling |
+| Config | `src/config.ts` | Config loading, config path priority, CLI override merging |
+| Orchestration | `src/pipeline-orchestrator.ts` | Pipeline flow, verdict parsing, feedback, Q&A, session creation |
+| Runtime adapters | `src/agent-runtime/` | Claude/Codex adapter boundary, auth guards, effort mapping |
+| State | `src/state/` | Validated phase transitions, persistence to target projects |
+| Dashboard | `src/dashboard/` | HTTP API, SSE, single-page UI |
+| Git | `src/git.ts` | Team branches, auto-commits, PR creation/polling |
+| Registry | `src/registry.ts` | Engine-local index of active teams |
+| Roles | `agents/*.agent.md` | Runtime prompts sent to spawned agents |
+
+---
+
+## Global Agent Runtime
+
+The agent runtime is global for one orchestrator process. It is all Claude or all Codex:
+
+```json
+{
+  "agentRuntime": {
+    "provider": "codex",
+    "auth": "subscription",
+    "model": "gpt-5.5"
+  }
+}
 ```
-Worker-1 (implement task)
-    ↓
-Done
-```
+
+Supported providers:
+
+| Provider | Adapter | SDK surface | Auth mode |
+|----------|---------|-------------|-----------|
+| `claude` | `ClaudeAgentSession` | Claude Agent SDK `query()` | Claude subscription OAuth |
+| `codex` | `CodexAgentSession` | Codex SDK/CLI thread API | ChatGPT/Codex subscription OAuth |
+
+`auth: "subscription"` means subscription/OAuth credentials, not API-key billing. The runtime refuses to start if environment variables are set that would switch the provider into API-key or external-provider billing:
+
+- Claude guarded vars: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`
+- Codex guarded vars: `CODEX_API_KEY`, `OPENAI_API_KEY`, `OPENAI_AUTH_TOKEN`
+
+Provider-specific differences stay inside `src/agent-runtime/`:
+
+- `auth.ts` normalizes runtime config and strips guarded env vars.
+- `factory.ts` chooses the active adapter.
+- `effort.ts` maps provider-specific effort names.
+- `claude-session.ts` owns Claude SDK `query()` behavior.
+- `codex-session.ts` owns Codex SDK thread behavior.
+
+---
+
+## Effort And Model Selection
+
+`agentRuntime.model`, when set, is a global model override for every role. If omitted or set to `"default"`, the active provider chooses its default, except Claude can still use role prompt frontmatter/per-role `models` for tuning.
+
+Effort names differ by provider:
+
+| Provider | Native effort names |
+|----------|---------------------|
+| Codex | `minimal`, `low`, `medium`, `high`, `xhigh` |
+| Claude Agent SDK | `low`, `medium`, `high`, `max` |
+
+Codex VS Code may show Low, Medium, High, and Extra High; Extra High maps to config value `xhigh`. Compatibility aliases are handled at the adapter boundary: `max` maps to Codex `xhigh`, `xhigh` maps to Claude `max`, and Codex-only `minimal` maps to Claude `low`.
 
 ---
 
 ## Agent Topology
 
-ClaudeOrchestra uses up to **4 agent sessions** per team.
-All coordination is handled by the engine code — agents do
-not communicate with each other directly.
-
-```
-         PipelineOrchestrator (code)
-        ┌──────┬──────┬──────────┐
-        │      │      │          │
-   ┌────┴─┐ ┌──┴───┐ ┌┴────────┐ ┌─────────┐
-   │ W-1  │ │ W-2  │ │Security │ │Reviewer │
-   └──────┘ └──────┘ └─────────┘ └─────────┘
-```
-
-### Agents Per Team
+ClaudeOrchestra uses up to four runtime agent sessions per team:
 
 | Role | Instances | Purpose |
 |------|-----------|---------|
-| Worker-1 | 1 | Implements the assigned task within security-cleared boundaries |
-| Worker-2 | 1 | Verifies Worker-1's output against task requirements (does NOT write code) |
-| Security Agent | 1 | Pre-scan clearance + post-work sweep validation |
-| Reviewer | 1 | Evaluates quality and correctness of security-cleared work |
+| Worker | `Worker-1`, `Worker-2` | Worker-1 implements; Worker-2 verifies requirements |
+| Security | `Security-1` | Pre-scan clearance and post-work security sweep |
+| Reviewer | `Reviewer-1` | Quality and correctness review |
 
-### Communication Model
+Agents do not communicate directly. The orchestrator is the sole coordinator:
 
-Agents do **not** communicate with each other. The pipeline
-orchestrator acts as the sole coordinator:
+1. Engine sends a prompt to one agent session.
+2. Agent returns output and/or progress events.
+3. Engine parses the output for a verdict.
+4. Engine decides the next step.
+5. Engine prompts the next agent.
 
-1. Engine sends a prompt to an agent via SDK `query()`.
-2. Agent processes the prompt and returns a response.
-3. Engine parses the response for verdicts (regex-based).
-4. Engine decides the next step based on the verdict.
-5. Engine sends the next prompt to the next agent.
+Runtime agents receive explicit role prompts from `agents/*.agent.md`. They do not automatically inherit `AGENTS.md` or `CLAUDE.md`; those files guide interactive coding assistants in this repo, not the spawned runtime agents unless their content is deliberately included in role prompts.
 
-All agent sessions are created in parallel at pipeline start
-(cold-start latency ~12s happens concurrently). Subsequent
-messages within a warm session are ~2-3s.
+---
+
+## Pipeline Modes
+
+### Simple Pipeline
+
+Used for short, low-risk tasks classified as simple by the heuristic router or reclassified by Security:
+
+```text
+Worker-1 implements -> Done
+```
+
+Only Worker-1 participates. There is no security sweep or review.
+
+### Standard Pipeline
+
+Used for standard or complex tasks:
+
+```text
+Security-1 pre-scan
+    |
+    v
+Worker-1 implements -> Worker-2 verifies requirements
+    |                      |
+    |                      +-- GAPS_FOUND -> Worker-1 fixes, then Worker-2 re-checks
+    v
+Security-1 post-work sweep
+    |
+    +-- BLOCKED -> Work
+    |
+    v
+Reviewer-1 quality review
+    |
+    +-- REVISION_NEEDED -> Work
+    +-- REJECTED -> PreWork
+    +-- APPROVED -> Done
+```
+
+Worker-2 has an inner verification loop capped at two passes. Phase-level backward transitions are counted by `TeamState` and bounded by loop limits.
 
 ---
 
 ## Authority Model
 
-### Security Decisions
+| Authority | Verdicts | Effect |
+|-----------|----------|--------|
+| Security | `APPROVED`, `FLAGGED`, `BLOCKED` | Blocks or clears work for review |
+| Worker-2 | `COMPLETE`, `GAPS_FOUND` | Drives the requirements gap loop |
+| Reviewer | `APPROVED`, `REVISION_NEEDED`, `REJECTED` | Completes, revises, or restarts the task |
+| Human | Dashboard feedback actions | Can approve requirements, cancel, ask questions, run security review, create PR |
 
-The Security Agent's verdict is authoritative:
-
-- **APPROVED** — work is clean, proceed to review
-- **FLAGGED** — concerns noted but not blocking, proceed
-- **BLOCKED** — must be resolved, triggers automatic retry
-
-A BLOCKED verdict causes an automatic backward transition
-(Handoff → Work). The engine does not override Security.
-If loop limits are exceeded, the pipeline errors and
-escalates to the human.
-
-### Quality Decisions
-
-The Reviewer's verdict is authoritative:
-
-- **APPROVED** — task complete
-- **REVISION_NEEDED** — specific changes required, retry Work
-- **REJECTED** — fundamentally off-track, restart from PreWork
-
-### Verification Decisions
-
-Worker-2's verdict drives the inner verification loop:
-
-- **COMPLETE** — all requirements met, proceed to sweep
-- **GAPS_FOUND** — specific requirements missing, Worker-1
-  fixes (max 2 verification passes)
-
-### Human Authority
-
-The human orchestrator has final authority via the dashboard:
-
-- Can cancel any task at any time
-- Receives notifications for security blocks, revisions,
-  rejections
-- Can respond to blocking feedback questions
-- Can push and merge completed work via dashboard
+The engine never lets an LLM choose routing. LLMs produce findings and verdicts; TypeScript decides the next step.
 
 ---
 
-## Agent Sessions
+## Requirements Extraction
 
-Each agent gets a **warm SDK session** via the Claude Agent
-SDK `query()` call with a `PromptChannel` for streaming input.
+Before the pipeline starts, a disposable provider-backed session extracts explicit requirements from the user task. The dashboard shows the checklist as blocking feedback:
 
-### Session Lifecycle
+- Approve: requirements become Worker-2's verification target.
+- Skip: pipeline proceeds without an approved requirements list.
+- Extraction failure: pipeline proceeds and shows a warning.
 
-1. **Created** when a task is assigned (all sessions in parallel)
-2. **Warm** throughout the pipeline — subsequent messages reuse
-   the same session (~2-3s vs ~12s cold start)
-3. **Kept alive** after pipeline completion for Q&A
-4. **Closed** when the team is terminated
-
-### Session Identity
-
-Each session is configured with:
-- Role-specific CLAUDE.md system prompt
-- Working directory set to the target project
-- Model selection (configurable, default: all use the same model)
-
-### Context Management
-
-Sessions accumulate context through:
-1. Their initial CLAUDE.md prompt (role instructions)
-2. Sequential prompts from the engine
-3. Work performed (file reads/writes via Claude Code tools)
-
-Context is ephemeral to the session. If a session is closed
-and recreated, previous context is lost. The engine provides
-summary context in subsequent prompts to compensate.
+This step is bypassed when `skipRequirements: true` is set, primarily for tests.
 
 ---
 
-## Auto-Commits
+## State And Persistence
 
-The engine performs automatic git commits at safety
-checkpoints during the standard pipeline:
+Team runtime state lives in the target project:
 
-| Checkpoint | Commit Message |
-|-----------|---------------|
-| After Work phase completes | `WIP: work phase complete` |
-| After Security sweep passes | `WIP: security sweep passed` |
-| Pipeline success | First 72 chars of task description |
+```text
+target-project/
+└── .claude-orchestra/
+    └── teams/
+        └── {teamId}/
+            └── state.json
+```
 
-The engine ensures the project is on a non-main branch
-(`dev` created if needed) and adds `.claude-orchestra/` to
-`.gitignore`.
+The engine repo keeps only `registry.json`, a lightweight pointer list of active teams and target project paths.
 
----
+Persistence properties:
 
-## Feedback System
-
-The pipeline supports two feedback patterns for dashboard
-integration:
-
-### Non-Blocking (Fire-and-Forget)
-
-Notifications that don't pause the pipeline:
-- Requirements gap warnings from Worker-2
-- Security block notifications
-- Revision/rejection notifications
-- Completion summaries
-
-### Blocking (Pause Until Response)
-
-Questions that halt the pipeline until the user responds:
-- Requirements approval before work begins
-- Any decision that requires human input
+- Phase transitions force immediate writes.
+- Non-phase state changes are debounced.
+- Writes use temp-file + rename for atomicity.
+- `.claude-orchestra/` is added to the target project's `.gitignore`.
 
 ---
 
-## Multi-Team Coordination
+## Dashboard And API
 
-Teams are fully isolated. There is no inter-team
-communication. Each team:
+The dashboard is served by `src/dashboard/dashboard-server.ts` using Node's built-in `http` module. It serves one cached HTML page generated by `buildDashboardHTML()` and streams events through Server-Sent Events.
 
-- Has its own `.claude-orchestra/teams/{team-id}/` directory
-  inside the target project
-- Has its own agent sessions
-- Has its own workflow phase state
-- Operates on its own project path
+Core API surface:
 
-The human orchestrator is the only entity with cross-team
-visibility, provided by the dashboard.
+| Route | Purpose |
+|-------|---------|
+| `GET /` | Dashboard HTML |
+| `GET /events` | SSE stream with team/runtime state |
+| `GET /api/runtime` | Active provider/auth/model |
+| `GET /api/teams` | Team list |
+| `POST /api/teams` | Create team, optionally with initial task |
+| `POST /api/teams/:id/task` | Assign task |
+| `POST /api/teams/:id/feedback` | Resolve blocking feedback |
+| `POST /api/teams/:id/ask` | Ask a warm session a question |
+| `POST /api/teams/:id/security-review` | Run final diff security review |
+| `POST /api/teams/:id/create-pr` | Push branch and create GitHub PR |
+| `GET /preview/:id/...` | Preview generated HTML files from target project |
 
-Sequential teams on the same repo are supported. Parallel
-teams on the same repo are not yet supported.
+---
+
+## Git Workflow
+
+Each team gets a dedicated branch:
+
+```text
+team/{slugified-team-name}
+```
+
+Automatic engine checkpoints:
+
+| Checkpoint | Commit message |
+|------------|----------------|
+| Work phase complete | `WIP: work phase complete` |
+| Security sweep passed | `WIP: security sweep passed` |
+| Pipeline success | First 72 characters of task description |
+
+User-initiated git actions:
+
+- Create PR via `gh pr create`.
+- Poll PR state every 60 seconds while a team is in `pr_open`.
+- Archive merged teams by closing sessions, deleting local branch, removing registry entry, and transitioning to `merged`.
+
+Legacy `pushAndMerge()` remains for compatibility but `createPr()` is the preferred workflow.
+
+---
+
+## Instruction Files
+
+| File | Reader | Purpose |
+|------|--------|---------|
+| `AGENTS.md` | Codex and imported by Claude Code | Shared instructions for interactive repo work |
+| `CLAUDE.md` | Claude Code | Thin wrapper that imports `AGENTS.md` |
+| `agents/*.agent.md` | ClaudeOrchestra runtime agents | Role prompts sent to spawned agents |
+
+Do not duplicate shared repo instructions across `AGENTS.md` and `CLAUDE.md`. Keep shared guidance in `AGENTS.md`; keep only Claude-specific notes in `CLAUDE.md`.
+
+---
+
+## Historical Architecture
+
+The original design used a Supervisor LLM and a filesystem message bus. That design is preserved only for historical reference:
+
+- `multi-agent-orchestration-spec.md` is deprecated.
+- `docs/architecture-decisions/message-bus-reference/` is reference material, not active runtime code.
+- `src/spawner/agent-process.ts` and `src/spawner/agent-spawner.ts` are retained from older flows/tests; the active pipeline creates sessions through `src/agent-runtime/factory.ts`.

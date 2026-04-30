@@ -1,5 +1,10 @@
 # ClaudeOrchestra — Implementation Plan
 
+> Historical build plan. This document is retained to explain the original
+> implementation sequence, but it is not the current architecture source of
+> truth. For current Claude/Codex runtime structure and workflows, use
+> `docs/architecture.md`, `docs/state-machine.md`, and `PRD.md`.
+
 ## Purpose
 
 This document is the build plan for the orchestration engine.

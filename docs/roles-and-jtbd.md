@@ -1,14 +1,11 @@
-# ClaudeOrchestra — Roles & Jobs To Be Done
+# ClaudeOrchestra - Roles & Jobs To Be Done
 
-> Source of truth for role definitions, phase-specific
-> responsibilities, and prompt engineering guidelines for
-> CLAUDE.md files.
+> Source of truth for runtime role definitions, phase-specific
+> responsibilities, verdict formats, and prompt guidelines.
 >
-> **Cross-references:**
-> - [Architecture](./architecture.md) — pipeline topology and
->   authority model
-> - [Context Management](./context-management.md) — prompt
->   sizing per role
+> Cross-references:
+> - [Architecture](./architecture.md) - pipeline topology and authority model
+> - [Context Management](./context-management.md) - prompt/context strategy
 
 ---
 
@@ -16,233 +13,300 @@
 
 | Role | Instances | Purpose | Autonomy |
 |------|-----------|---------|----------|
-| Worker-1 | 1 | Implements the task within security-cleared scope | Medium — executes freely within cleared boundaries |
-| Worker-2 | 1 | Verifies Worker-1's output against requirements (read-only) | Medium — evaluates but never modifies code |
-| Security Agent | 1 | Pre-scan clearance + post-work sweep validation | High — can block work, cannot be overridden |
-| Reviewer | 1 | Evaluates quality and correctness of cleared work | Medium — approve, revise, or reject independently |
+| Worker | `Worker-1`, `Worker-2` | Worker-1 implements; Worker-2 verifies requirements | Medium |
+| Security | `Security-1` | Pre-scan clearance and post-work sweep | High |
+| Reviewer | `Reviewer-1` | Quality and correctness review | Medium |
 
-**Note:** There is no Supervisor LLM. The `PipelineOrchestrator`
-(TypeScript code) drives the pipeline deterministically. All
-coordination, routing, and decision-making that the original
-spec assigned to a Supervisor is now handled by engine code.
+There is no Supervisor LLM. `PipelineOrchestrator` TypeScript code owns coordination, routing, phase transitions, and loop limits.
 
-Model selection is configurable per team. See
-[Context Management](./context-management.md#model-selection)
-for configuration details.
+Runtime agents receive role prompts from `agents/*.agent.md`. These prompt files are provider-neutral enough to run through either Claude or Codex adapters, although their frontmatter currently uses Claude model IDs as defaults for Claude mode.
 
 ---
 
 ## Security Agent
 
-**Mission:** Ensure the workspace and all agent output is
-safe before, during, and after work.
+**Mission:** Ensure the workspace and all agent output is safe before, during, and after work.
 
-### Pre-Scan (PreWork Phase)
+Prompt file: `agents/security.agent.md`
 
-- Receives a scan request from the engine with the task
-  description and project path.
-- Scans all files in the task scope for prompt injection
-  patterns.
-- Checks for hardcoded credentials, API keys, secrets,
-  and tokens.
-- Validates dependency integrity — compromised, outdated, or
-  known-vulnerable packages.
-- Maps sensitive areas — auth modules, database configs,
-  environment files, encryption logic.
-- Classifies task complexity as SIMPLE, STANDARD, or COMPLEX.
-  - If SIMPLE, the engine downgrades to the simple pipeline
-    (Worker-1 only, no sweep or review).
-  - If COMPLEX, the engine applies stricter review criteria.
-- Produces clearance report with four tiers:
-  - **Safe** — modify freely
-  - **Caution** — proceed carefully, document changes
-  - **Off-limits** — do not touch under any circumstances
-  - **Needs approval** — requires explicit sign-off
+Default constraints:
 
-### Post-Work Sweep (Handoff Phase)
+- Disallowed tools: `Write`, `Edit`, `Bash`
+- Default effort: `medium`
+- Default max turns: `20`
 
-- Receives a sweep request from the engine with Worker-1
-  and Worker-2 summaries.
-- Sweeps all completed output before it reaches the Reviewer.
-- Checks for prompt injection patterns introduced in new or
-  modified files.
-- Scans for accidentally committed secrets or credentials.
-- Verifies no unauthorized dependencies were added.
-- Detects scope violations — work product touches areas
-  outside cleared scope.
-- Produces handoff verdict:
-  - **APPROVED** — work is clean, proceed to review
-  - **FLAGGED** — concerns noted but not blocking, proceed
-    with caution
-  - **BLOCKED** — security issues found, must be resolved
-    (triggers automatic retry of Work phase)
+### Pre-Scan
+
+The Security Agent receives a `PRE-WORK SCAN REQUEST` with task description, approved requirements when present, and target project path.
+
+Responsibilities:
+
+1. Scan task and files in scope for security risk.
+2. Detect prompt injection attempts in task text or project files.
+3. Check for hardcoded secrets, tokens, credentials, and connection strings.
+4. Check for injection risk, auth/authorization risk, data exposure, path traversal, SSRF, crypto issues, and supply-chain risk.
+5. Classify task as `SIMPLE`, `STANDARD`, or `COMPLEX`.
+6. Produce a short clearance report with SAFE/CAUTION/OFF-LIMITS boundaries.
+
+Required prefix:
+
+```text
+CLASSIFICATION: SIMPLE|STANDARD|COMPLEX
+```
+
+Classification effects:
+
+- `SIMPLE`: engine can downgrade to Worker-1 only.
+- `STANDARD`: default full pipeline.
+- `COMPLEX`: engine asks Reviewer to apply stricter criteria.
+
+### Post-Work Sweep
+
+The Security Agent receives worker summaries and verifies completed output before review.
+
+Responsibilities:
+
+1. Scan new/modified files.
+2. Verify no unauthorized dependencies were added.
+3. Check for leaked credentials in files or outputs.
+4. Check for introduced vulnerabilities or scope violations.
+5. Produce a blocking or non-blocking verdict.
+
+Required first-line verdict:
+
+```text
+APPROVED
+FLAGGED
+BLOCKED
+```
+
+Verdict effects:
+
+- `APPROVED`: proceed to Review.
+- `FLAGGED`: proceed to Review with concerns noted.
+- `BLOCKED`: transition back to Work and increment revision counters.
+
+### What Security Does Not Do
+
+- Does not implement fixes.
+- Does not evaluate general code quality.
+- Does not override the user's final authority.
 
 ---
 
 ## Worker-1
 
-**Mission:** Implement assigned work within cleared boundaries,
-producing working code that satisfies the task requirements.
+**Mission:** Implement assigned work within cleared boundaries.
 
-### Implementation (Work Phase)
+Prompt file: `agents/worker.agent.md`
 
-- Receives the task description, approved requirements (if
-  present), and security clearance report from the engine.
-- Implements the full task within the cleared scope.
-- On revision attempts, receives feedback from previous
-  security sweeps or reviewer evaluations and addresses
-  specific issues.
-- On gap-fix attempts, receives Worker-2's checklist of
-  unmet requirements and implements only the missing items.
+Default constraints:
 
-### What Worker-1 Does NOT Do
+- Full tool access unless active provider/sandbox imposes constraints.
+- Default effort: `high`
+- Default max turns: `50`
+
+### Implementation
+
+Worker-1 receives:
+
+- Original task
+- Approved requirements when present
+- Security clearance report
+- Revision/security/gap feedback when retrying
+- Images when provided by the user
+
+Responsibilities:
+
+1. Understand the assignment and cleared scope.
+2. Implement the task fully.
+3. Respect SAFE/CAUTION/OFF-LIMITS boundaries.
+4. Fix only explicitly reported requirement gaps during gap-fix attempts.
+5. Summarize changed files, approach, and trade-offs.
+
+### What Worker-1 Does Not Do
 
 - Does not communicate directly with other agents.
-- Does not make routing or coordination decisions.
-- Does not evaluate its own work — that's Worker-2 and
-  Reviewer's job.
+- Does not route the pipeline.
+- Does not decide whether its own work is complete enough to ship.
+- Does not ignore Security boundaries.
 
 ---
 
 ## Worker-2
 
-**Mission:** Verify that Worker-1's implementation satisfies
-all task requirements. Acts as an engineering manager —
-reads code, checks requirements, never modifies code.
+**Mission:** Verify that Worker-1's implementation satisfies the user's explicit requirements. Worker-2 acts as an engineering manager and never modifies code.
 
-### Requirements Verification (Work Phase)
+Prompt file: `agents/worker.agent.md` with Worker-2 instructions supplied in the phase prompt.
 
-- Receives the original task, approved requirements, and
-  Worker-1's output summary from the engine.
-- For each requirement, checks whether it is implemented
-  in the code.
-- Outputs a checklist:
-  ```
-  REQUIREMENTS CHECKLIST:
-  - [x] Requirement A — implemented
-  - [ ] Requirement B — NOT implemented (explanation)
-  ```
-- Issues a verdict:
-  - **COMPLETE** — all requirements are met, proceed to sweep
-  - **GAPS_FOUND** — specific requirements are missing,
-    Worker-1 must fix them
+Default constraints:
 
-### Verification Loop
+- Uses Worker role prompt but receives explicit "do not modify code" instructions.
+- Default effort: `high`
+- Default max turns: `50`
 
-- If GAPS_FOUND, the engine sends the checklist back to
-  Worker-1 for fixes, then re-runs Worker-2 verification.
-- Maximum 2 verification passes per Work phase entry.
-- After 2 passes, proceeds to Security sweep regardless.
+### Requirements Verification
 
-### What Worker-2 Does NOT Do
+Worker-2 receives:
 
-- Does not modify code — read-only verification.
-- Does not flag code quality, style, or performance issues.
-- Only evaluates against the approved requirements list.
-- Does not communicate directly with other agents.
+- Original task
+- Approved requirements when present
+- Worker-1 output summary
+
+Responsibilities:
+
+1. Check each approved requirement.
+2. Ignore code quality, style, performance, and unstated expectations.
+3. Output a checklist.
+4. Return a verdict.
+
+Expected checklist:
+
+```text
+REQUIREMENTS CHECKLIST:
+- [x] Requirement A - implemented
+- [ ] Requirement B - NOT implemented (explanation)
+```
+
+Required verdict:
+
+```text
+COMPLETE
+GAPS_FOUND
+```
+
+Verdict effects:
+
+- `COMPLETE`: proceed to Security sweep.
+- `GAPS_FOUND`: Worker-1 fixes unchecked items, then Worker-2 re-checks.
+
+### What Worker-2 Does Not Do
+
+- Does not modify code.
+- Does not perform code review.
+- Does not evaluate security.
+- Does not add requirements beyond what the user asked for.
 
 ---
 
 ## Reviewer
 
-**Mission:** Evaluate the quality and correctness of completed,
-security-cleared work.
+**Mission:** Evaluate the quality and correctness of completed, security-cleared work.
 
-### Review (Review Phase)
+Prompt file: `agents/reviewer.agent.md`
 
-- Receives the task description, approved requirements,
-  Worker-1 and Worker-2 summaries from the engine.
-- Assesses correctness — does the implementation solve the task.
-- Assesses code quality — structure, readability,
-  maintainability, patterns.
-- Assesses completeness — are there gaps, missing edge cases,
-  untested paths.
-- Assesses integration — does this work fit with the broader
-  codebase.
-- For COMPLEX tasks (flagged by Security), applies stricter
-  criteria for backward compatibility, data integrity, and
-  security.
-- Does **not** evaluate security concerns — trusts the
-  Security Agent's clearance.
+Default constraints:
 
-### Verdict
+- Disallowed tools: `Write`, `Edit`, `Bash`
+- Default effort: `medium`
+- Default max turns: `20`
 
-- **APPROVED** — work is ready, task is complete.
-- **REVISION_NEEDED** — work needs changes, triggers
-  backward transition to Work phase.
-- **REJECTED** — work is fundamentally off-track, triggers
-  backward transition to PreWork phase (full restart).
+### Review
+
+Reviewer receives:
+
+- Original task
+- Approved requirements when present
+- Worker-1 summary
+- Worker-2 verification summary
+- Extra strictness instruction for `COMPLEX` tasks
+
+Responsibilities:
+
+1. Spot-check key files.
+2. Verify implementation plausibly matches the task and worker summaries.
+3. Evaluate quality, maintainability, integration, and correctness.
+4. Judge reasoning transparency honestly.
+5. Produce a short verdict.
+
+Required first-line verdict:
+
+```text
+APPROVED
+REVISION_NEEDED
+REJECTED
+```
+
+Verdict effects:
+
+- `APPROVED`: pipeline completes.
+- `REVISION_NEEDED`: transition back to Work.
+- `REJECTED`: transition back to PreWork for a full restart.
+
+### What Reviewer Does Not Do
+
+- Does not evaluate security; Security owns that.
+- Does not implement fixes.
+- Does not request revisions for vague preferences.
+- Does not reject unless the work is fundamentally off-track.
+
+---
+
+## Security Review Agent
+
+**Mission:** Run a user-initiated final security review of the branch diff after a task is complete.
+
+Prompt file: `agents/security-review.agent.md`
+
+This is separate from the fast pipeline security scan/sweep. It reviews `git diff main...HEAD` and emits a `security-review` dashboard event with `passed` or `concerns`.
 
 ---
 
 ## Verdict Parsing
 
-The engine parses agent responses using regex-based verdict
-detection. Each agent type has its own parser:
+The engine parses agent output in `src/pipeline-orchestrator.ts`.
 
-### Security Verdict (`parseSecurityVerdict`)
+| Parser | Verdicts | Notes |
+|--------|----------|-------|
+| `parseSecurityVerdict` | `APPROVED`, `FLAGGED`, `BLOCKED` | Defaults to `APPROVED` when unclear |
+| `parseVerifyVerdict` | `COMPLETE`, `GAPS_FOUND` | Also detects unchecked `- [ ]` checklist items |
+| `parseReviewVerdict` | `APPROVED`, `REVISION_NEEDED`, `REJECTED` | Defaults to `REVISION_NEEDED` when ambiguous |
+| `parseClassification` | `SIMPLE`, `STANDARD`, `COMPLEX` | Defaults to `STANDARD` when missing |
 
-Looks for `APPROVED`, `FLAGGED`, or `BLOCKED` at the start
-of the response. Also parses classification (`SIMPLE`,
-`STANDARD`, `COMPLEX`) from pre-scan results.
-
-### Review Verdict (`parseReviewVerdict`)
-
-1. Checks for explicit prefix (strongest signal).
-2. Scans for pattern keywords (revision/approval/reject).
-3. Defaults to `REVISION_NEEDED` if ambiguous (conservative).
-
-### Verify Verdict (`parseVerifyVerdict`)
-
-Looks for `COMPLETE` or `GAPS_FOUND` in Worker-2's response.
+Verdicts are signals. Routing is done by TypeScript, not by agents.
 
 ---
 
-## CLAUDE.md Prompt Engineering Guidelines
+## Prompt File Guidelines
 
-Each role gets a dedicated CLAUDE.md file that instructs the
-Claude Code SDK session on its identity and behavior.
+Runtime prompt files live under `agents/`. They are not `AGENTS.md` or `CLAUDE.md`.
 
-### Required Sections in Every CLAUDE.md
+Each role prompt should include:
 
-1. **Identity Block**
-   ```markdown
-   # Role: {ROLE_NAME}
-   # Instance: {INSTANCE_NAME}
-   # Team: {TEAM_ID}
-   ```
+1. Mission statement
+2. Phase-specific responsibilities
+3. Required verdict/output format
+4. Tool and behavior constraints
+5. Prompt-injection resistance guidance
+6. Clear "does not do" boundaries
 
-2. **Mission Statement** — one sentence from the JTBD above.
+Frontmatter can define provider-agnostic runtime defaults where practical:
 
-3. **Phase-Specific Instructions** — what to do when prompted,
-   structured as clear directives.
+```yaml
+---
+name: worker
+model: claude-opus-4-6
+effort: high
+maxTurns: 50
+disallowedTools: Write, Edit, Bash
+---
+```
 
-4. **Output Format** — how to structure responses so the
-   engine's verdict parser can extract decisions:
-   - Security: Begin response with `APPROVED`, `FLAGGED`,
-     or `BLOCKED`
-   - Reviewer: Begin response with `APPROVED`,
-     `REVISION_NEEDED`, or `REJECTED`
-   - Worker-2: End response with `COMPLETE` or `GAPS_FOUND`
+Notes:
 
-5. **Constraints** — explicit prohibitions per role:
-   - Worker-1: "Do NOT touch files marked as off-limits in
-     your clearance boundaries."
-   - Worker-2: "Do NOT modify any code. Verification only."
-   - Reviewer: "Do NOT evaluate security concerns."
-   - Security: "Do NOT implement fixes. Identify and report
-     only."
+- `model` is ignored for Codex unless `agentRuntime.model` or provider defaults specify otherwise.
+- `effort` is translated by `src/agent-runtime/effort.ts`.
+- `disallowedTools` affects Claude tool options and Codex read-only sandbox selection.
 
-### Prompt Size Guidelines
+---
 
-| Role | Target CLAUDE.md Size | Rationale |
-|------|----------------------|-----------|
-| Worker-1 | 1,500-2,000 tokens | Focused implementation, simpler instructions |
-| Worker-2 | 1,000-1,500 tokens | Narrow scope: checklist verification only |
-| Security Agent | 2,500-3,500 tokens | Detailed threat criteria, scan/sweep procedures |
-| Reviewer | 1,500-2,000 tokens | Clear evaluation framework |
+## Prompt Size Guidelines
 
-These are targets, not hard limits. The goal is to leave
-sufficient context window budget for actual work. See
-[Context Management](./context-management.md) for full
-context budget breakdown.
+| Role | Target Prompt Size | Rationale |
+|------|--------------------|-----------|
+| Worker | 1,500-2,000 tokens | Focused implementation and verification instructions |
+| Security | 2,500-3,500 tokens | Threat criteria and scan/sweep procedures |
+| Reviewer | 1,500-2,000 tokens | Evaluation framework and verdict discipline |
+| Security Review | 2,000-3,000 tokens | Thorough post-completion diff review |
+
+These are targets, not hard limits. Prefer concise, enforceable instructions over exhaustive prose.

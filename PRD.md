@@ -6,13 +6,13 @@ ClaudeOrchestra is a deterministic multi-agent orchestration engine that governs
 
 The engine eliminates the need for a Supervisor LLM — code drives the pipeline deterministically: **Security Scan → Worker Implementation → Requirements Verification → Security Sweep → Code Review → Done**. Each phase has clear responsibilities, verdicts, and loop-back logic. A real-time browser dashboard at `localhost:3460` provides visibility and control.
 
-**Tech stack**: TypeScript, Node.js 18+, `@anthropic-ai/claude-agent-sdk` — zero other production dependencies. Dashboard uses Node.js built-in `http` module (no Express, no React, no WebSocket).
+**Tech stack**: TypeScript, Node.js 18+, `@anthropic-ai/claude-agent-sdk`, `@openai/codex-sdk`. Dashboard uses Node.js built-in `http` module (no Express, no React, no WebSocket). The active agent runtime is global: one running orchestrator process uses either Claude or Codex for all teams.
 
 ---
 
 ## Problem Statement
 
-Developers trust Claude AI to write code but face critical gaps:
+Developers trust AI coding agents such as Claude Code and Codex to write code but face critical gaps:
 
 1. **No security enforcement** — AI agents can read/write anywhere, including `.env` files and sensitive modules
 2. **No completeness verification** — No systematic way to ensure all requirements are actually implemented
@@ -23,7 +23,7 @@ Developers trust Claude AI to write code but face critical gaps:
 
 - Solo developers or small team leads managing 2–5 projects concurrently
 - Trust AI for code generation but demand safety and governance
-- Use Claude Code CLI for interactive building
+- Use Claude Code, Codex, or both for interactive building
 - Need to say "build this feature" and return to a reviewed, security-checked result
 
 ---
@@ -51,29 +51,37 @@ The `PipelineOrchestrator` (in `src/pipeline-orchestrator.ts`) is pure TypeScrip
 
 ### Agent Execution Model
 
-Each agent is a **Claude Agent SDK `query()` session** wrapped in an `AgentSession` class (defined in `pipeline-orchestrator.ts`):
+Each runtime agent is a provider-backed `AgentSession` created through `src/agent-runtime/factory.ts`. The orchestrator does not call provider SDKs directly; it talks to the shared `AgentSession` interface and the provider adapters own SDK-specific behavior.
 
-- **PromptChannel**: An async iterable that bridges sync `push()` calls to the SDK's streaming `query()` API. Supports text + base64 image content.
-- **Warm sessions**: First message pays ~12s cold start; subsequent messages are ~2–3s. All 4 agents cold-start in parallel.
-- **Streaming progress**: `onProgress` callback captures tool_use activity (file paths, commands, thinking) and streams it to the dashboard via SSE.
-- **Session reuse**: After pipeline completion, sessions stay alive for user Q&A via the "Ask" button.
+- **Global provider**: `agentRuntime.provider` is all-or-nothing for the current process: `claude` or `codex`. Teams do not mix providers.
+- **Claude adapter**: `ClaudeAgentSession` wraps the Claude Agent SDK `query()` API with a `PromptChannel` async iterable for warm, streaming sessions.
+- **Codex adapter**: `CodexAgentSession` wraps the Codex SDK/CLI thread API with `startThread()` and `runStreamed()`.
+- **Role prompts**: runtime agents receive explicit prompts from `agents/*.agent.md`. They do not automatically inherit `AGENTS.md` or `CLAUDE.md`; shared project guidance must be added to role prompts deliberately if runtime agents need it.
+- **Streaming progress**: adapters normalize provider events into dashboard progress messages and stream them via SSE.
+- **Session reuse**: after pipeline completion, sessions stay alive for user Q&A via the "Ask" button when the provider session remains open.
 
-SDK options per agent:
-- `permissionMode: 'bypassPermissions'` + `allowDangerouslySkipPermissions: true` — agents run without permission prompts
-- `allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Grep', 'Glob']`
-- `persistSession: false` — no session state saved to disk
-- `env: { CLAUDECODE: undefined }` — prevents SDK from detecting nested Claude Code
+Runtime options:
+- `auth: "subscription"` means OAuth subscription credentials, not API-key billing.
+- Claude subscription auth strips API-key/provider environment variables and passes `CLAUDECODE: undefined`.
+- Codex subscription auth strips OpenAI API-key environment variables and forces ChatGPT login with `forced_login_method: "chatgpt"`.
+- Codex uses read-only sandbox mode for roles whose disallowed tools include write/edit/bash capability; otherwise it uses workspace-write.
+- Provider-specific effort names are translated at the adapter boundary in `src/agent-runtime/effort.ts`.
 
-### Agent Roles & Default Models
+### Agent Roles, Defaults, And Provider Models
 
-| Role | Instance(s) | Default Model | Default Effort | Default Max Turns | Disallowed Tools |
-|------|-------------|---------------|----------------|-------------------|------------------|
-| Worker | Worker-1, Worker-2 | claude-opus-4-6 | high | 50 | (none — full access) |
-| Security | Security-1 | claude-opus-4-6 | medium | 20 | Write, Edit, Bash |
-| Reviewer | Reviewer-1 | claude-opus-4-6 | medium | 20 | Write, Edit, Bash |
-| Security Review | (on-demand) | claude-opus-4-6 | high | 15 | Write, Edit, Bash |
+| Role | Instance(s) | Default Model Source | Default Effort | Default Max Turns | Disallowed Tools |
+|------|-------------|----------------------|----------------|-------------------|------------------|
+| Worker | Worker-1, Worker-2 | role prompt frontmatter for Claude; provider default for Codex unless `agentRuntime.model` is set | high | 50 | (none — full access) |
+| Security | Security-1 | role prompt frontmatter for Claude; provider default for Codex unless `agentRuntime.model` is set | medium | 20 | Write, Edit, Bash |
+| Reviewer | Reviewer-1 | role prompt frontmatter for Claude; provider default for Codex unless `agentRuntime.model` is set | medium | 20 | Write, Edit, Bash |
+| Security Review | (on-demand) | same provider/model resolution as Security | high | 15 | Write, Edit, Bash |
 
-All models and settings are configurable per role via `orchestra.config.json` or CLI flags.
+`agentRuntime.model`, when set, is the global model override for every role. If omitted or set to `"default"`, the active provider chooses its default, except Claude can still use role prompt frontmatter/per-role `models` for tuning.
+
+Effort names are provider-specific:
+- Codex SDK/config accepts `minimal`, `low`, `medium`, `high`, and `xhigh`. The VS Code dropdown may only show Low, Medium, High, and Extra High; Extra High maps to `xhigh`.
+- Claude Agent SDK uses `low`, `medium`, `high`, and `max`.
+- Compatibility aliases are kept at the adapter boundary: `max` maps to Codex `xhigh`; `xhigh` maps to Claude Agent SDK `max`; Codex-only `minimal` maps to Claude Agent SDK `low`.
 
 ### Role Instance Types (from `src/roles/role-types.ts`)
 
@@ -105,7 +113,7 @@ The internal `TeamPhase` enum uses legacy names that map to the dashboard's disp
 
 ### Step 0: Requirements Extraction (Pre-Pipeline)
 
-Before the pipeline starts, a disposable `query()` session extracts a numbered requirements checklist from the task description. This is shown to the user in a blocking feedback prompt with "Approve" / "Skip" buttons. Approved requirements become the verification target for Worker-2.
+Before the pipeline starts, a disposable provider-backed session extracts a numbered requirements checklist from the task description. This is shown to the user in a blocking feedback prompt with "Approve" / "Skip" buttons. Approved requirements become the verification target for Worker-2.
 
 - Model: uses Worker model at `effort: 'low'`, `maxTurns: 1`
 - System prompt: "You are a requirements analyst. Extract explicit requirements... Do NOT add requirements the user didn't ask for."
@@ -278,12 +286,15 @@ interface TeamStateData {
 
 ## Agent Communication
 
-### AgentProcess (`src/spawner/agent-process.ts`)
+### Agent Runtime (`src/agent-runtime/`)
 
-Dual-mode agent wrapper (also retained from original architecture):
+The pipeline runtime uses provider adapters behind a shared `AgentSession` interface:
 
-1. **SDK mode** (production): Uses `PromptChannel` → `query()` with streaming
-2. **child_process mode** (testing): Spawns mock processes via `spawn()`
+1. **Claude mode**: `ClaudeAgentSession` uses `PromptChannel` -> Claude Agent SDK `query()` with streaming.
+2. **Codex mode**: `CodexAgentSession` uses Codex SDK/CLI threads and streamed turn events.
+3. **Testing**: Vitest mocks SDK behavior so pipeline tests do not call real providers.
+
+`src/spawner/agent-process.ts` is retained from the original architecture as a dual-mode wrapper for older spawning flows and tests, but the pipeline orchestrator now creates runtime sessions through `src/agent-runtime/factory.ts`.
 
 Key features:
 - **"Last message wins"**: In SDK mode, messages are buffered per turn. Within a decision category (e.g., review verdicts), only the last message is authoritative. This handles LLM deliberation — if an agent sends `review-rejected` then changes its mind to `review-approved`, only the approval is emitted.
@@ -488,7 +499,9 @@ Commands:
 - `list` — Show all teams with phase badges
 - `recover` — Recover teams from persisted state, start engine
 
-**Config loading priority**: CLI flags > `orchestra.config.json` > `CLAUDE_ORCHESTRA_CONFIG` env var > defaults.
+**Config file selection priority**: `--config <path>` > `CLAUDE_ORCHESTRA_CONFIG` env var > `./orchestra.config.json`.
+
+**Config value priority**: CLI flags > selected config file > defaults.
 
 **Signal handling**: SIGTERM/SIGINT → graceful shutdown (close dashboard, close sessions, persist state). Second signal → force kill all.
 
@@ -500,25 +513,27 @@ Commands:
 
 ```json
 {
+  "agentRuntime": {
+    "provider": "codex",
+    "auth": "subscription",
+    "model": "gpt-5.5"
+  },
   "engine": {
     "registryPath": "./registry.json",
-    "logDirectory": "./logs"
+    "logDirectory": "./logs",
+    "rolesDir": "./agents"
   },
+  "skipRequirements": false,
   "teams": { "maxConcurrentTeams": 5 },
   "limits": {
     "maxRevisions": 3,
     "maxRejections": 2,
     "maxTotalBackwardTransitions": 5
   },
-  "models": {
-    "Worker": "claude-opus-4-6",
-    "Security": "claude-opus-4-6",
-    "Reviewer": "claude-sonnet-4-6"
-  },
   "efforts": {
-    "Worker": "high",
-    "Security": "medium",
-    "Reviewer": "medium"
+    "Worker": "xhigh",
+    "Security": "high",
+    "Reviewer": "high"
   },
   "disallowedTools": {
     "Security": ["Write", "Edit", "Bash"],
@@ -532,6 +547,25 @@ Commands:
 }
 ```
 
+Use `agentRuntime.provider: "claude"` with a Claude model when running through Claude Agent SDK:
+
+```json
+{
+  "agentRuntime": {
+    "provider": "claude",
+    "auth": "subscription",
+    "model": "claude-opus-4-6"
+  },
+  "efforts": {
+    "Worker": "max",
+    "Security": "low",
+    "Reviewer": "medium"
+  }
+}
+```
+
+The optional per-role `models` block remains available for Claude tuning. For all-or-nothing provider switching, prefer `agentRuntime.model` as the single global model override.
+
 ### CLI Flags
 
 ```
@@ -539,6 +573,9 @@ Commands:
 --registry <path>       Registry file path
 --config <path>         Config file path
 --max-teams <n>         Max concurrent teams
+--provider <name>       Agent provider: claude or codex
+--auth <mode>           Auth mode: subscription
+--model <id>            Global model override (e.g. gpt-5.5, default)
 --model-worker <id>     Model for Worker agents
 --model-security <id>   Model for Security agent
 --model-reviewer <id>   Model for Reviewer agent
@@ -548,13 +585,16 @@ Commands:
 
 ## Testing
 
-**204 tests across 7 test files** — all passing.
+**233 tests across 10 test files** — all passing.
 
 | Test File | What It Covers |
 |---|---|
 | `complexity-router.test.ts` | Keyword detection, word count threshold, simple vs standard classification |
+| `agent-runtime.test.ts` | Provider-specific effort mapping and compatibility aliases |
+| `config.test.ts` | Config loading, CLI override priority, runtime knob pass-through |
 | `dashboard-server.test.ts` | HTTP routes, SSE streaming, team CRUD, task assignment, push-merge |
 | `git.test.ts` | Commit, push, merge, pushAndMerge workflow, branch checkout, merge failure recovery |
+| `hooks.test.ts` | Governance hooks, type-check hook behavior, safe handling of tool input |
 | `logger.test.ts` | Structured logging, terminal output, file output, rotation |
 | `pipeline-orchestrator.test.ts` | Full pipeline (scan→build→verify→sweep→review→done), security BLOCKED loops, revision loops, rejection loops, loop limit enforcement, simple pipeline, reclassification, requirements extraction |
 | `registry.test.ts` | CRUD operations, atomic writes, duplicate handling |
@@ -571,18 +611,29 @@ npm run test:watch    # Watch mode
 
 ```
 2026_ClaudeOrchestra/
+├── AGENTS.md                             # Shared coding-agent guidance for Codex and Claude Code
+├── CLAUDE.md                             # Claude Code wrapper that imports AGENTS.md
 ├── src/
-│   ├── index.ts                          # CLI entry point (433 lines)
-│   ├── pipeline-orchestrator.ts          # Core engine: AgentSession, verdict parsers,
-│   │                                     #   pipeline loops, feedback, Q&A (1,599 lines)
+│   ├── index.ts                          # CLI entry point
+│   ├── config.ts                         # Config loading, config-path priority,
+│   │                                     #   CLI override merging, pass-through tests
+│   ├── pipeline-orchestrator.ts          # Core engine: verdict parsers, pipeline loops,
+│   │                                     #   feedback, Q&A, provider session creation
 │   ├── git.ts                            # Git commit, push, merge operations (163 lines)
 │   ├── registry.ts                       # Registry.json management (102 lines)
 │   │
+│   ├── agent-runtime/
+│   │   ├── types.ts                      # Provider-agnostic AgentSession interface
+│   │   ├── auth.ts                       # Runtime config + subscription env guards
+│   │   ├── effort.ts                     # Provider-specific effort mapping
+│   │   ├── factory.ts                    # Provider adapter factory
+│   │   ├── claude-session.ts             # Claude Agent SDK adapter
+│   │   └── codex-session.ts              # Codex SDK adapter
+│   │
 │   ├── spawner/
-│   │   ├── agent-process.ts              # AgentProcess: dual-mode (SDK/child_process),
-│   │   │                                 #   PromptChannel, "last message wins" (646 lines)
-│   │   ├── agent-spawner.ts              # AgentSpawner: team lifecycle, respawn (330 lines)
-│   │   └── frontmatter-parser.ts         # YAML frontmatter parser for agent files (49 lines)
+│   │   ├── agent-process.ts              # Legacy Claude-only SDK/child-process wrapper
+│   │   ├── agent-spawner.ts              # Legacy Claude-only team lifecycle path
+│   │   └── frontmatter-parser.ts         # YAML frontmatter parser for role prompts
 │   │
 │   ├── router/
 │   │   └── complexity-router.ts          # Heuristic task classifier (54 lines)
@@ -611,7 +662,7 @@ npm run test:watch    # Watch mode
 │   ├── reviewer.agent.md                # Code review verdicts
 │   └── security-review.agent.md         # Final comprehensive security review (on-demand)
 │
-├── tests/                                # 204 tests across 7 files
+├── tests/                                # 233 tests across 10 files
 │   ├── mocks/mock-sdk.ts
 │   └── *.test.ts
 │
@@ -623,14 +674,13 @@ npm run test:watch    # Watch mode
 │   ├── context-management.md
 │   └── operations.md
 │
-├── package.json                          # deps: @anthropic-ai/claude-agent-sdk only
+├── package.json                          # deps: Claude Agent SDK and Codex SDK
 ├── tsconfig.json
 ├── vitest.config.ts
-├── CLAUDE.md                             # Project build instructions
 └── implementation-plan.md                # 8-milestone build plan
 ```
 
-**Total**: ~7,780 lines of production TypeScript (including 2,619 lines of dashboard UI).
+**Total**: production TypeScript plus a single-file dashboard UI.
 
 ---
 
@@ -649,12 +699,15 @@ The message bus (filesystem JSON files) was built for the Supervisor architectur
 - `send()` returns the full response, making verdict parsing trivial
 - Warm sessions avoid cold-start overhead between phases
 
-### Why Zero Dependencies?
-Only production dependency is `@anthropic-ai/claude-agent-sdk`. Dashboard uses Node.js `http` module. No Express, no React, no WebSocket libraries. This means:
+### Why Minimal Dependencies?
+Production dependencies are limited to the provider SDKs: `@anthropic-ai/claude-agent-sdk` and `@openai/codex-sdk`. Dashboard uses Node.js `http` module. No Express, no React, no WebSocket libraries. This means:
 - Minimal attack surface
-- No supply chain risk
+- Lower supply chain risk
 - No dependency version conflicts
 - Fast `npm install`
+
+### Why Provider Adapters?
+Claude Agent SDK and Codex SDK expose different APIs (`query()` vs. Codex threads) and different effort names (`max` vs. `xhigh`). The orchestrator stays clean by depending only on `AgentSession`; SDK-specific code, auth guards, and effort mapping live under `src/agent-runtime/`.
 
 ### Why Runtime Data in Target Projects?
 `.claude-orchestra/` lives in the target project (auto-gitignored), not in the engine repo. This means:
@@ -670,7 +723,7 @@ Only production dependency is `@anthropic-ai/claude-agent-sdk`. Dashboard uses N
 2. **CI/CD integration** — Human-driven tool, not an automated pipeline stage.
 3. **Distributed execution** — Single orchestrator process, one machine.
 4. **Custom agent topologies** — Fixed 4-agent layout per team (Worker×2, Security, Reviewer).
-5. **Non-Claude LLMs** — Claude Agent SDK only.
+5. **Mixed providers in one run** — A process is globally all Claude or all Codex. Teams do not choose different providers.
 6. **Inter-team coordination** — Teams are isolated. Sequential teams on same repo only.
 
 ---
@@ -689,8 +742,10 @@ Only production dependency is `@anthropic-ai/claude-agent-sdk`. Dashboard uses N
 
 | Term | Definition |
 |---|---|
-| **AgentSession** | Wrapper around a warm Claude Agent SDK `query()` session. Manages PromptChannel, streaming, send/receive cycle. |
-| **PromptChannel** | Async iterable that bridges sync `push()` to SDK's streaming API. Supports text + base64 images. |
+| **Agent Runtime** | The active provider layer, either Claude or Codex, configured globally through `agentRuntime.provider`. |
+| **AgentSession** | Provider-agnostic wrapper around a warm runtime session. Claude uses `query()`; Codex uses SDK/CLI threads. |
+| **PromptChannel** | Claude adapter async iterable that bridges sync `push()` to the Claude SDK's streaming API. Supports text + base64 images. |
+| **Provider Adapter** | Runtime module under `src/agent-runtime/` that translates orchestration calls into Claude SDK or Codex SDK behavior. |
 | **Pipeline** | The deterministic sequence: Scan → Build → Sweep → Review → Done. |
 | **Team** | A set of 4 agent sessions + orchestrator context attached to one project. |
 | **Phase** | A workflow stage (pre_work, work, handoff, review, done, errored, cancelled). |

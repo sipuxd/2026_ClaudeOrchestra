@@ -4,7 +4,7 @@ A governance engine for autonomous AI coding. Security gates, completeness verif
 
 ## The Problem
 
-You can open Claude Code and build anything. But letting AI agents write production code unsupervised is a different problem. There's no security enforcement, no review gate, no way to know if requirements were fully met, and no visibility when you're running multiple projects.
+You can open Claude Code or Codex and build anything. But letting AI agents write production code unsupervised is a different problem. There's no security enforcement, no review gate, no way to know if requirements were fully met, and no visibility when you're running multiple projects.
 
 **ClaudeOrchestra is for the solo developer or small team lead managing multiple AI-assisted projects.** You're building 2-5 things concurrently. You trust AI to write code but don't trust it to ship without review. You want to say "build this feature" and come back to a reviewed, security-checked result — not babysit a single Claude session.
 
@@ -39,7 +39,7 @@ The engine does not create projects. You create a repo, clone it locally, then c
               │   PIPELINE    │  ← TypeScript engine (Node.js)
               │  ORCHESTRATOR │
               └──┬──┬──┬──┬──┘
-                 │  │  │  │     4 warm Claude Agent SDK sessions
+                 │  │  │  │     4 warm provider SDK sessions
                  │  │  │  └──── Reviewer-1  (quality gate)
                  │  │  └─────── Worker-2    (completeness verifier)
                  │  └────────── Worker-1    (implementer)
@@ -132,7 +132,7 @@ node dist/index.js dashboard --mode pipeline
 ### Prerequisites
 
 - Node.js 18+
-- Claude Max subscription or API access (agents use Claude Agent SDK)
+- Claude subscription for the Claude provider, or ChatGPT/Codex subscription for the Codex provider
 - A local git repo to point the engine at (the engine does not create projects)
 
 ### CLI Commands
@@ -156,10 +156,17 @@ Optional `orchestra.config.json` (all fields optional):
 
 ```json
 {
+  "agentRuntime": {
+    "provider": "claude",
+    "auth": "subscription",
+    "model": "claude-opus-4-6"
+  },
   "engine": {
     "registryPath": "./registry.json",
-    "logDirectory": "./logs"
+    "logDirectory": "./logs",
+    "rolesDir": "./agents"
   },
+  "skipRequirements": false,
   "teams": {
     "maxConcurrentTeams": 5
   },
@@ -167,11 +174,6 @@ Optional `orchestra.config.json` (all fields optional):
     "maxRevisions": 3,
     "maxRejections": 2,
     "maxTotalBackwardTransitions": 5
-  },
-  "models": {
-    "Worker": "claude-opus-4-6",
-    "Security": "claude-opus-4-6",
-    "Reviewer": "claude-opus-4-6"
   },
   "efforts": {
     "Worker": "high",
@@ -181,22 +183,130 @@ Optional `orchestra.config.json` (all fields optional):
 }
 ```
 
+### Agent Runtime
+
+ClaudeOrchestra uses one global agent runtime at a time. It is all Codex or all Claude for the current dashboard/orchestrator process.
+
+The active provider is selected in exactly one place: `agentRuntime.provider`.
+`agentRuntime.model`, when set, is a global model override for every agent role. If you omit it or set it to `"default"`, the active provider chooses its default model. The optional per-role `models` block is Claude tuning and is not needed to switch providers.
+
+Use Codex with ChatGPT subscription auth:
+
+```json
+{
+  "agentRuntime": {
+    "provider": "codex",
+    "auth": "subscription",
+    "model": "gpt-5.5"
+  }
+}
+```
+
+Before starting the dashboard, sign in with ChatGPT through Codex:
+
+```bash
+codex login
+npm run build
+npm run dashboard
+```
+
+Use Claude with Claude.ai subscription auth:
+
+```json
+{
+  "agentRuntime": {
+    "provider": "claude",
+    "auth": "subscription",
+    "model": "claude-opus-4-6"
+  }
+}
+```
+
+Before starting the dashboard, sign in through Claude Code:
+
+```bash
+claude
+npm run build
+npm run dashboard
+```
+
+You can also override the runtime for a single CLI run:
+
+```bash
+node dist/index.js dashboard --provider codex --auth subscription --model gpt-5.5
+node dist/index.js dashboard --provider claude --auth subscription --model claude-opus-4-6
+```
+
+`auth: "subscription"` means OAuth subscription credentials, not API key billing. When subscription auth is selected, the engine refuses to start if API-key environment variables that would override subscription auth are present:
+
+- Codex: `CODEX_API_KEY`, `OPENAI_API_KEY`, `OPENAI_AUTH_TOKEN`
+- Claude: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`
+
+If you want the provider to choose its default model, set `"model": "default"` or omit the model.
+
+### Effort Levels
+
+`efforts` are configured once in `orchestra.config.json`, but the active provider adapter translates them to that SDK's vocabulary:
+
+- Codex SDK / Codex config accepts `minimal`, `low`, `medium`, `high`, and `xhigh`. In the Codex VS Code dropdown, you may only see Low, Medium, High, and Extra High for the selected model/profile. Extra High maps to config value `xhigh`; Codex does not use `max` as the preferred setting.
+- Claude Agent SDK uses `low`, `medium`, `high`, and `max` through its `query()` options. Claude's general API docs also describe newer model-specific effort levels such as `xhigh`, but this project currently targets the Claude Agent SDK surface.
+
+For clean provider switching, prefer provider-native names in config:
+
+```json
+{
+  "agentRuntime": { "provider": "codex", "auth": "subscription", "model": "gpt-5.5" },
+  "efforts": { "Worker": "xhigh", "Security": "low", "Reviewer": "medium" }
+}
+```
+
+```json
+{
+  "agentRuntime": { "provider": "claude", "auth": "subscription", "model": "claude-opus-4-6" },
+  "efforts": { "Worker": "max", "Security": "low", "Reviewer": "medium" }
+}
+```
+
+The runtime keeps backward-compatible aliases at the adapter boundary: `max` maps to Codex `xhigh`, `xhigh` maps to Claude Agent SDK `max`, and Codex-only `minimal` maps to Claude Agent SDK `low`.
+
+### Provider SDKs
+
+- Claude runtime uses `@anthropic-ai/claude-agent-sdk`.
+- Codex runtime uses `@openai/codex-sdk`, which wraps the Codex CLI and uses the same ChatGPT/Codex login when `auth` is `"subscription"`.
+- SDK-specific calls stay inside `src/agent-runtime/*-session.ts`; the orchestrator only talks to the shared `AgentSession` interface.
+
+### Agent Instruction Files
+
+- `AGENTS.md` is the shared coding-agent instruction file. Codex reads it directly.
+- `CLAUDE.md` is a thin Claude Code wrapper that imports `@AGENTS.md` and contains only Claude-specific notes.
+- ClaudeOrchestra's spawned runtime agents do not automatically inherit either file. They receive explicit role prompts from `agents/*.agent.md`; add shared instructions to those role prompts deliberately if runtime agents need them.
+
 ## Tech Stack
 
 - **Runtime:** TypeScript, Node.js
-- **AI:** Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`)
+- **AI:** Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`) or Codex SDK (`@openai/codex-sdk`)
 - **Dashboard:** Node.js built-in `http` + SSE (zero UI dependencies)
-- **Tests:** Vitest — 204 tests across 7 files
-- **External dependencies:** 1 (Claude Agent SDK)
+- **Tests:** Vitest — 233 tests across 10 files
+- **External dependencies:** Claude Agent SDK and Codex SDK
 
 ## Project Structure
 
 ```
+AGENTS.md                          # Shared instructions for Codex and imported by Claude Code
+CLAUDE.md                          # Claude Code wrapper around AGENTS.md
 src/
 ├── index.ts                       # CLI entry point & command routing
+├── config.ts                      # Config file loading and CLI override merging
 ├── pipeline-orchestrator.ts       # Core pipeline engine (standard + simple)
 ├── git.ts                         # Git commit, push & merge operations
 ├── registry.ts                    # Cross-project team registry
+├── agent-runtime/
+│   ├── types.ts                   # Provider-agnostic AgentSession interface
+│   ├── auth.ts                    # Runtime config + subscription env guards
+│   ├── effort.ts                  # Provider-specific effort mapping
+│   ├── factory.ts                 # Provider adapter factory
+│   ├── claude-session.ts          # Claude Agent SDK adapter
+│   └── codex-session.ts           # Codex SDK adapter
 ├── dashboard/
 │   ├── dashboard-server.ts        # HTTP + SSE server, preview routes
 │   ├── dashboard-ui.ts            # Single-page HTML/CSS/JS builder
@@ -207,8 +317,8 @@ src/
 │   ├── team-state.ts              # In-memory state with validated transitions
 │   └── persistence.ts             # Filesystem persistence (.claude-orchestra/)
 ├── spawner/
-│   ├── agent-spawner.ts           # Agent lifecycle management
-│   ├── agent-process.ts           # SDK session wrapper (PromptChannel + query)
+│   ├── agent-spawner.ts           # Legacy Claude-only lifecycle path
+│   ├── agent-process.ts           # Legacy Claude-only SDK/child-process wrapper
 │   └── frontmatter-parser.ts     # YAML frontmatter parser for agent files
 ├── roles/
 │   └── role-types.ts              # Role enums & types
@@ -223,7 +333,7 @@ agents/                            # Agent system prompts (YAML frontmatter + ma
 ├── reviewer.agent.md             # Code review & verdicts
 └── security-review.agent.md      # Final security review (on-demand)
 
-tests/                             # 7 test files, 204 tests (Vitest)
+tests/                             # 10 test files, 233 tests (Vitest)
 docs/                              # Architecture & design specifications
 ```
 

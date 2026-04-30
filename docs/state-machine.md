@@ -1,12 +1,11 @@
-# ClaudeOrchestra — Workflow State Machine
+# ClaudeOrchestra - Workflow State Machine
 
-> Source of truth for all workflow states, transitions,
-> preconditions, loop limits, and error handling.
+> Source of truth for workflow states, transitions, loop limits,
+> persistence, and error handling.
 >
-> **Cross-references:**
-> - [Architecture](./architecture.md) — pipeline topology
-> - [Operations](./operations.md) — health monitoring,
->   shutdown protocol
+> Cross-references:
+> - [Architecture](./architecture.md) - pipeline topology
+> - [Operations](./operations.md) - health monitoring and shutdown
 
 ---
 
@@ -14,36 +13,43 @@
 
 ```mermaid
 stateDiagram-v2
-    [*] --> pre_work : task assigned (standard)
-    [*] --> work : task assigned (simple)
+    [*] --> pre_work : team created / task assigned
 
     pre_work --> work : security scan complete
-    pre_work --> work : security reclassifies as SIMPLE
-    pre_work --> errored : SDK error / loop limit
+    pre_work --> errored : session error / loop limit
     pre_work --> cancelled : human cancels
 
     work --> handoff : workers complete (standard)
     work --> done : worker complete (simple)
-    work --> errored : SDK error / loop limit
+    work --> errored : session error / loop limit
     work --> cancelled : human cancels
 
     handoff --> review : security APPROVED/FLAGGED
-    handoff --> work : security BLOCKED → revision
-    handoff --> errored : SDK error / loop limit
+    handoff --> work : security BLOCKED
+    handoff --> errored : session error / loop limit
     handoff --> cancelled : human cancels
 
     review --> done : reviewer APPROVED
     review --> work : reviewer REVISION_NEEDED
     review --> pre_work : reviewer REJECTED
-    review --> errored : SDK error / loop limit
+    review --> errored : session error / loop limit
     review --> cancelled : human cancels
 
-    done --> [*]
+    done --> pre_work : new task
+    done --> pr_open : PR created
+
+    pr_open --> merged : PR merged
+    pr_open --> done : PR closed without merge
+    pr_open --> cancelled : human cancels
+
+    errored --> pre_work : retry
+    errored --> cancelled : abandon
+
+    merged --> [*]
     cancelled --> [*]
-    errored --> pre_work : human retries
-    errored --> cancelled : human abandons
-    errored --> [*]
 ```
+
+The code source of truth is `src/state/team-state.ts`.
 
 ---
 
@@ -51,310 +57,255 @@ stateDiagram-v2
 
 | State | Description |
 |-------|-------------|
-| `pre_work` | Security Agent scanning project, producing clearance report |
-| `work` | Worker-1 implementing, Worker-2 verifying requirements |
+| `pre_work` | Security Agent scanning project and producing clearance |
+| `work` | Worker-1 implementing and Worker-2 verifying requirements |
 | `handoff` | Security Agent sweeping completed output |
 | `review` | Reviewer evaluating security-cleared work |
-| `done` | Task approved, sessions kept alive for Q&A |
-| `errored` | Unrecoverable failure, requires human intervention |
-| `cancelled` | Task cancelled by human orchestrator |
+| `done` | Task approved; sessions may stay alive for Q&A |
+| `pr_open` | Pull request created and being polled for merge/close |
+| `merged` | PR merged and team archived |
+| `errored` | Unrecoverable failure requiring human intervention |
+| `cancelled` | Task/team cancelled by human |
 
-### Terminal States
-
-`done`, `cancelled`, and `errored` (if not retried) are
-terminal states. When a team reaches a terminal state:
-
-1. Final `state.json` is persisted
-2. Agent sessions are kept alive (done) or closed (errored/
-   cancelled)
-3. Team is marked inactive in the orchestrator
+Terminal states in code are `done`, `merged`, `errored`, and `cancelled`. `done` can re-enter `pre_work` for a new task or move to `pr_open` when a PR is created.
 
 ---
 
-## Two Pipeline Paths
+## Pipeline Paths
 
 ### Simple Pipeline
 
-For tasks classified as simple by the heuristic router or
-reclassified as SIMPLE by Security during pre-scan:
+For tasks classified as simple by the heuristic router or reclassified as SIMPLE by Security during pre-scan:
 
-```
-Work → Done
+```text
+work -> done
 ```
 
-Only Worker-1 participates. No Security sweep, no Review.
+Only Worker-1 participates.
 
 ### Standard Pipeline
 
 For tasks classified as standard or complex:
 
-```
-PreWork → Work → Handoff → Review → Done
+```text
+pre_work -> work -> handoff -> review -> done
 ```
 
-All 4 agents participate. Supports backward transitions.
+All four runtime agents participate: Security-1, Worker-1, Worker-2, Reviewer-1.
 
 ---
 
 ## Agent States
 
-Each agent within a team has its own state, independent of
-the team's phase state.
+Each agent within a team has its own state independent of the team's phase.
 
 | State | Description |
 |-------|-------------|
-| `Spawning` | SDK session initializing |
-| `Active` | Processing a prompt or executing work |
-| `Idle` | Waiting for the pipeline to reach this agent's step |
-| `Blocked` | Cannot proceed (loop limit, SDK error) |
-| `Waiting` | Awaiting a response (used for blocking feedback) |
-| `Done` | Completed current work |
-| `Errored` | Session crashed or produced invalid output |
+| `spawning` | Runtime session initializing or ready to initialize |
+| `active` | Processing a prompt or executing work |
+| `idle` | Waiting for the pipeline to reach this agent's step |
+| `blocked` | Cannot proceed without intervention |
+| `waiting` | Awaiting a feedback response |
+| `done` | Completed current work |
+| `errored` | Session crashed or produced unrecoverable failure |
 
-### Valid Agent State Transitions
-
-```
-Spawning → Active | Errored
-Active   → Idle | Blocked | Waiting | Done | Errored
-Idle     → Active | Errored
-Blocked  → Active (when unblocked) | Errored
-Waiting  → Active (when response received) | Errored
-Done     → Active (next step) | Idle
-Errored  → Spawning (session recreated)
-```
+Valid agent transitions are enforced in `src/state/team-state.ts`.
 
 ---
 
 ## Phase Transitions
 
-### PreWork → Work
+### PreWork -> Work
 
-**Trigger:** Security Agent's scan response is parsed.
+Trigger: Security scan completes, or the pipeline starts a simple task.
 
-**Engine actions:**
-- Parse classification (SIMPLE/STANDARD/COMPLEX)
-- If SIMPLE: downgrade to simple pipeline, close unused
-  sessions, skip to Work → Done
-- If STANDARD/COMPLEX: proceed to Work with all agents
-- Update team phase to `work`
+Engine actions:
 
-### Work → Handoff (Standard Pipeline)
+- Parse `CLASSIFICATION: SIMPLE|STANDARD|COMPLEX`.
+- If SIMPLE, close unused standard-pipeline sessions and run Worker-1 only.
+- If STANDARD/COMPLEX, continue with all standard-pipeline agents.
+- Persist state.
 
-**Trigger:** Worker-1 completes implementation AND Worker-2
-completes verification (or max verify passes reached).
+### Work -> Handoff
 
-**Engine actions:**
-- Auto-commit: `WIP: work phase complete`
-- Update team phase to `handoff`
-- Send sweep request to Security with worker summaries
+Trigger: Worker-1 implementation completes and Worker-2 verification completes or reaches the max verification passes.
 
-### Work → Done (Simple Pipeline)
+Engine actions:
 
-**Trigger:** Worker-1 completes implementation.
+- Auto-commit `WIP: work phase complete`.
+- Send post-work sweep prompt to Security.
+- Persist state.
 
-**Engine actions:**
-- Update team phase to `done`
-- Emit `task-complete` event
+### Work -> Done
 
-### Handoff → Review (Security Approved)
+Trigger: Simple pipeline Worker-1 completes.
 
-**Trigger:** Security Agent responds with `APPROVED` or
-`FLAGGED` verdict.
+Engine actions:
 
-**Engine actions:**
-- Auto-commit: `WIP: security sweep passed`
-- Update team phase to `review`
-- Send review request to Reviewer with task context and
-  worker summaries
+- Auto-commit final task checkpoint.
+- Mark pipeline complete.
+- Emit `task-complete`.
+- Keep session available for Q&A when possible.
 
-### Handoff → Work (Security Blocked)
+### Handoff -> Review
 
-**Trigger:** Security Agent responds with `BLOCKED` verdict.
+Trigger: Security sweep verdict is `APPROVED` or `FLAGGED`.
 
-**Engine actions:**
-- Increment revision loop counter (auto, via state machine)
-- Check against max loop limits (throws if exceeded)
-- Update team phase to `work`
-- Notify dashboard (non-blocking warning)
-- Re-run Worker-1 with updated constraints, then Worker-2
+Engine actions:
 
-### Review → Done (Approved)
+- Auto-commit `WIP: security sweep passed`.
+- Send review prompt to Reviewer.
+- Persist state.
 
-**Trigger:** Reviewer responds with `APPROVED` verdict.
+### Handoff -> Work
 
-**Engine actions:**
-- Auto-commit with task description (first 72 chars)
-- Update team phase to `done`
-- Keep sessions alive for Q&A
-- Emit `task-complete` event
+Trigger: Security sweep verdict is `BLOCKED`.
 
-### Review → Work (Revision Needed)
+Engine actions:
 
-**Trigger:** Reviewer responds with `REVISION_NEEDED` verdict.
+- Increment revision and total-backward-transition counters.
+- Notify dashboard.
+- Send updated constraints back through Work.
 
-**Engine actions:**
-- Increment revision loop counter
-- Check against max loop limits
-- Update team phase to `work`
-- Notify dashboard (non-blocking info)
-- Re-run Worker-1 with reviewer feedback, then Worker-2
+### Review -> Done
 
-### Review → PreWork (Rejected)
+Trigger: Reviewer verdict is `APPROVED`.
 
-**Trigger:** Reviewer responds with `REJECTED` verdict.
+Engine actions:
 
-**Engine actions:**
-- Increment rejection counter
-- Check against max rejection limit
-- Update team phase to `pre_work`
-- Notify dashboard (non-blocking warning)
-- Restart pipeline from Security scan
+- Auto-commit final task checkpoint.
+- Mark pipeline complete.
+- Emit completion feedback and `task-complete`.
 
-### Any Phase → Errored
+### Review -> Work
 
-**Triggered by:**
-- SDK `query()` rejects (session crash)
-- Loop limit exceeded (`TransitionError` thrown)
-- Unhandled exception in pipeline
+Trigger: Reviewer verdict is `REVISION_NEEDED`.
 
-**Engine actions:**
-- Update team phase to `errored`
-- Close all agent sessions
-- Emit `error` event for dashboard
-- Surface to human as critical notification
+Engine actions:
 
-### Any Phase → Cancelled
+- Increment revision and total-backward-transition counters.
+- Notify dashboard.
+- Re-run Worker-1 and Worker-2 with review feedback.
 
-**Triggered by:** Human orchestrator cancels via dashboard.
+### Review -> PreWork
 
-**Engine actions:**
-- Update team phase to `cancelled`
-- Close all agent sessions
-- Persist final state
+Trigger: Reviewer verdict is `REJECTED`.
+
+Engine actions:
+
+- Increment rejection and total-backward-transition counters.
+- Notify dashboard.
+- Restart from Security scan.
+
+### Done -> PrOpen
+
+Trigger: User creates a PR from the dashboard.
+
+Engine actions:
+
+- Push team branch.
+- Create GitHub PR through `gh pr create`.
+- Store `prNumber` and `prUrl`.
+- Start PR polling.
+
+### PrOpen -> Merged
+
+Trigger: PR polling detects merged PR.
+
+Engine actions:
+
+- Close lingering sessions.
+- Delete local team branch after checkout to `main`.
+- Remove registry entry.
+- Emit `team-archived`.
+
+### PrOpen -> Done
+
+Trigger: PR polling detects PR closed without merge.
+
+Engine actions:
+
+- Clear PR info.
+- Return to `done`.
+- Notify dashboard that a new PR can be created.
+
+### Any Active Phase -> Errored
+
+Triggered by:
+
+- Provider session failure
+- Loop limit exceeded
+- Unhandled pipeline exception
+
+Engine actions:
+
+- Emit `error`.
+- Notify dashboard.
+- Transition to `errored`.
+- Persist state.
+
+### Any Active Phase -> Cancelled
+
+Triggered by human cancellation or shutdown.
+
+Engine actions:
+
+- Close sessions.
+- Transition to `cancelled` when valid.
+- Persist state.
 
 ---
 
 ## Loop Limits
 
-Revision and rejection loops are bounded to prevent infinite
-cycling. The state machine enforces these automatically.
+Revision and rejection loops are bounded to prevent infinite cycling.
 
-### Revision Loop (Handoff → Work or Review → Work)
+| Limit | Default | Applies To |
+|-------|---------|------------|
+| `maxRevisions` | 3 | `handoff -> work`, `review -> work` |
+| `maxRejections` | 2 | `review -> pre_work` |
+| `maxTotalBackwardTransitions` | 5 | All backward phase transitions combined |
 
-- **Default maximum:** 3 revisions per task
-- **Counter:** Incremented automatically by `transitionPhase()`
-  on backward transitions to Work
-- **At limit:** `TransitionError` thrown, pipeline catches it
-  and transitions to `errored`
-- **Configurable:** Via `maxRevisions` in loop limits config
+When a limit is exceeded, `TeamState.transitionPhase()` sets the team to `errored` and throws `TransitionError`.
 
-### Rejection Loop (Review → PreWork)
+### Verification Loop
 
-- **Default maximum:** 2 rejections per task
-- **Counter:** Incremented automatically on backward
-  transitions to PreWork
-- **At limit:** Same as revision — `TransitionError` → errored
+Worker-2 verification has its own internal cap:
 
-### Combined Limit
+| Limit | Value | Scope |
+|-------|-------|-------|
+| `MAX_VERIFY_PASSES` | 2 | Worker-2 re-checks per Work phase entry |
 
-- **Total backward transitions:** 5 per task (revisions +
-  rejections combined)
-- **Purpose:** Catches pathological patterns where the task
-  oscillates between different failure modes
-- **At limit:** Same as individual limits
-
-### Verification Loop (Worker-2 re-checks)
-
-- **Maximum:** 2 passes per Work phase entry
-- **Scope:** Internal to the Work phase, does NOT increment
-  the revision counter
-- **At limit:** Proceeds to Security sweep regardless of
-  Worker-2's verdict
-
-### Default Loop Limits
-
-```typescript
-{
-  maxRevisions: 3,
-  maxRejections: 2,
-  maxTotalBackwardTransitions: 5,
-  maxVerifyPasses: 2   // per Work phase entry
-}
-```
+This does not increment revision counters. After the cap is reached, the pipeline proceeds to Security sweep.
 
 ---
 
 ## State Persistence
 
-### What Is Persisted
+Each team writes state to the target project:
 
-The `state.json` file for each team captures:
-
-```json
-{
-  "teamId": "team-uuid",
-  "teamName": "my-project",
-  "projectPath": "/path/to/project",
-  "currentPhase": "work",
-  "complexity": "standard",
-  "agents": {
-    "Worker-1": {
-      "role": "Worker",
-      "state": "Active",
-      "pid": null
-    },
-    "Worker-2": {
-      "role": "Worker",
-      "state": "Active",
-      "pid": null
-    },
-    "Security-1": {
-      "role": "Security",
-      "state": "Done",
-      "pid": null
-    },
-    "Reviewer-1": {
-      "role": "Reviewer",
-      "state": "Idle",
-      "pid": null
-    }
-  },
-  "currentTask": {
-    "description": "Add user authentication with JWT",
-    "complexity": "standard",
-    "requirements": "...",
-    "assignedAt": "ISO-8601"
-  },
-  "counters": {
-    "revisions": 0,
-    "rejections": 0,
-    "totalBackwardTransitions": 0
-  },
-  "createdAt": "ISO-8601",
-  "updatedAt": "ISO-8601"
-}
-```
-
-### Persistence Strategy
-
-- **Forced writes on phase transitions** — every phase change
-  triggers an immediate `state.json` write.
-- **Atomic writes** — temp file + rename pattern for
-  crash safety.
-- **Debounced writes** — agent state changes are batched
-  (at most once per second) except during transitions.
-
-### Runtime Data Structure
-
-```
+```text
 {project-root}/
-├── .claude-orchestra/
-│   └── teams/{team-id}/
-│       ├── state.json
-│       └── (future: reports, logs)
+└── .claude-orchestra/
+    └── teams/
+        └── {team-id}/
+            └── state.json
 ```
 
-The `.claude-orchestra/` directory is added to `.gitignore`
-automatically. Runtime data lives in the target project,
-NOT in the engine repo. The engine repo maintains only a
-`registry.json` mapping team IDs to project paths.
+Persisted fields include:
+
+- Team identity and target project path
+- Current phase
+- Agent statuses
+- Current task, complexity, and approved requirements
+- Loop counters
+- Branch name
+- PR number and URL
+- Timestamps
+
+Persistence behavior:
+
+- Phase transitions force immediate writes.
+- Agent/task metadata writes are debounced.
+- Writes are atomic via temp-file + rename.
+- `.claude-orchestra/` is automatically added to the target project's `.gitignore`.

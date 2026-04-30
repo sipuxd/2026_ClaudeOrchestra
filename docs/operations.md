@@ -1,266 +1,334 @@
-# ClaudeOrchestra — Operations
+# ClaudeOrchestra - Operations
 
-> Source of truth for health monitoring, graceful shutdown,
-> signal handling, resource management, structured logging,
-> and observability.
+> Source of truth for configuration, health monitoring, shutdown,
+> resource management, logging, and operational behavior.
 >
-> **Cross-references:**
-> - [State Machine](./state-machine.md) — timeout values,
->   error states
-> - [Architecture](./architecture.md) — pipeline topology
-> - [Implementation Plan](../implementation-plan.md) — build
->   milestones
+> Cross-references:
+> - [Architecture](./architecture.md) - runtime topology
+> - [State Machine](./state-machine.md) - workflow states and limits
+
+---
+
+## Runtime Modes
+
+ClaudeOrchestra runs as one Node.js process. The active agent provider is global for that process:
+
+| Provider | SDK | Auth |
+|----------|-----|------|
+| `claude` | `@anthropic-ai/claude-agent-sdk` | Claude subscription OAuth |
+| `codex` | `@openai/codex-sdk` | ChatGPT/Codex subscription OAuth |
+
+Provider selection is controlled by `agentRuntime.provider` or the `--provider` CLI flag. Teams do not choose different providers inside the same process.
 
 ---
 
 ## Health Monitoring
 
-### Pipeline-Driven Model
+ClaudeOrchestra does not use a tick-based health loop for pipeline execution. The pipeline is sequential and deterministic: the engine knows which agent is active because it is awaiting that agent's `send()` call.
 
-ClaudeOrchestra does NOT use a tick-based health check loop.
-The pipeline is sequential and deterministic — the engine
-knows exactly which agent is active at any point because it
-drives the conversation directly via SDK `query()` calls.
-
-Health is monitored implicitly:
+Health signals:
 
 | Signal | Method | When |
 |--------|--------|------|
-| **Session alive** | SDK query resolves or rejects | Per prompt |
-| **Response valid** | Verdict parser succeeds | Per agent response |
-| **Pipeline progress** | Phase transitions occur | Per step |
+| Provider session alive | `send()` resolves/rejects or stream emits error | Per prompt |
+| Response valid | Verdict parser succeeds or falls back | Per agent response |
+| Pipeline progress | Phase transition occurs | Per step |
+| Dashboard connected | SSE clients receive events | Per HTTP connection |
+| PR merged/closed | `gh pr view` polling | Every 60s while PRs are open |
 
-### Error Detection
+---
+
+## Error Detection
 
 Errors are detected when:
 
-1. **SDK query rejects** — agent session crashed or timed out.
-   The pipeline catches the error, marks the team as `errored`,
-   and surfaces it to the dashboard.
-2. **Verdict parse fails** — agent response doesn't contain
-   a recognizable verdict. Review verdict defaults to
-   `REVISION_NEEDED` (conservative). Security and verify
-   verdicts fail explicitly.
-3. **Loop limits exceeded** — backward transitions exceed
-   configured maximums. The state machine throws a
-   `TransitionError` and the pipeline transitions to `errored`.
+1. Provider session fails or rejects.
+2. Codex streamed turn emits `turn.failed` or `error`.
+3. Verdict parsing yields a blocking/negative result.
+4. Loop limits are exceeded by `TeamState.transitionPhase()`.
+5. Git operations fail during branch, commit, push, or PR creation.
+6. Dashboard request handlers catch invalid input or orchestrator errors.
 
-### Dashboard Observability
+Pipeline failure behavior:
 
-The pipeline emits events for real-time dashboard updates via
-SSE:
+- Emit `error`.
+- Emit warning feedback to the dashboard.
+- Attempt transition to `errored`.
+- Persist state immediately.
+- Close sessions when failure occurs in the standard pipeline catch path.
 
-- `agent-output` — raw agent response text
-- `agent-progress` — streaming progress during long operations
-- `agent-task` — current subtask label for each agent
-- `phase-transition` — phase changes with trigger description
-- `feedback` — notifications and blocking questions
-- `error` — pipeline failures
+---
+
+## Dashboard Observability
+
+The dashboard server uses Node's built-in `http` module and Server-Sent Events.
+
+Primary events:
+
+| Event | Description |
+|-------|-------------|
+| `init` | Initial teams and runtime state |
+| `team-created` | New team registered |
+| `task-assigned` | Task assigned to team |
+| `task-classified` | Simple/standard/complex and agent count |
+| `phase-transition` | Team moved between workflow phases |
+| `agent-output` | Final or summarized agent output |
+| `agent-progress` | Streaming provider/tool progress, throttled |
+| `agent-task` | Current agent subtask label |
+| `task-complete` | Pipeline completed or errored |
+| `feedback` | Notification or blocking question |
+| `security-review` | Final diff security review status/result |
+| `pr-created` | PR number and URL |
+| `team-archived` | Merged team archived |
+| `shutdown` | Server/orchestrator shutdown |
+
+`agent-progress` is throttled per team/agent to avoid flooding SSE clients.
 
 ---
 
 ## Shutdown Protocol
 
-### Engine Shutdown (SIGTERM / SIGINT)
+### Engine Shutdown
 
-When the orchestrator receives a termination signal:
+On `SIGTERM` or first `SIGINT`:
 
-1. **Signal handler fires** — set a `shuttingDown` flag.
-2. **Stop accepting new tasks** — reject any new team
-   creation or task assignment.
-3. **Close all agent sessions:**
-   a. Close each `PromptChannel` (signals SDK to stop).
-   b. Abort any in-flight `query()` calls.
-   c. Persist final `state.json` for each team.
-4. **Clean up:**
-   - Flush all log buffers.
-   - Close file handles.
-   - Stop the HTTP dashboard server.
-   - Exit with code 0.
+1. Set `shuttingDown`.
+2. Stop PR polling.
+3. Close all active sessions.
+4. Transition non-terminal teams to `cancelled` when valid.
+5. Persist all team states.
+6. Dispose persistence timers.
+7. Emit `shutdown`.
+8. Close the dashboard server and SSE clients.
 
-### Team Shutdown (Single Team)
+Second `SIGINT` exits immediately.
+
+### Team Shutdown
 
 When `terminateTeam(teamId)` is called:
 
-1. Set team phase to the appropriate terminal state
-   (`cancelled` if mid-task, `done` if task complete).
-2. Close all agent sessions for the team.
-3. Persist final `state.json`.
-4. Remove the team from the active team map.
+1. Close all active sessions.
+2. Transition active team to `cancelled` when valid.
+3. Persist final state.
+4. Remove registry entry.
+5. Remove team from memory.
 
-### Signal Handling
+### Archive After PR Merge
 
-| Signal | Action |
-|--------|--------|
-| `SIGTERM` | Graceful shutdown (full protocol above) |
-| `SIGINT` (Ctrl+C) | Same as SIGTERM |
-| `SIGINT` x2 (double Ctrl+C) | Immediate force exit |
+When a PR is detected as merged:
 
-```typescript
-let shutdownRequested = false;
+1. Close lingering sessions.
+2. Transition `pr_open -> merged`.
+3. Persist state.
+4. Checkout `main`.
+5. Delete local team branch.
+6. Remove registry entry.
+7. Remove team from memory.
+8. Emit `team-archived`.
 
-process.on('SIGTERM', gracefulShutdown);
-process.on('SIGINT', () => {
-  if (shutdownRequested) {
-    process.exit(1);
-  }
-  shutdownRequested = true;
-  gracefulShutdown();
-});
+---
+
+## Resource Limits
+
+| Resource | Default | Notes |
+|----------|---------|-------|
+| Max concurrent teams | 5 | Configurable through `teams.maxConcurrentTeams` or `--max-teams` |
+| Sessions per standard team | 4 | Security, Worker-1, Worker-2, Reviewer |
+| Sessions per simple team | 1 | Worker-1 only |
+| Worker verification passes | 2 | Hardcoded `MAX_VERIFY_PASSES` |
+| Revision loop limit | 3 | Configurable |
+| Rejection loop limit | 2 | Configurable |
+| Total backward transitions | 5 | Configurable |
+
+---
+
+## Filesystem Layout
+
+Engine repo:
+
+```text
+registry.json
+logs/
+src/
+agents/
+docs/
 ```
 
----
+Target project:
 
-## Resource Management
+```text
+.claude-orchestra/
+└── teams/
+    └── {teamId}/
+        └── state.json
+```
 
-### Process Limits
+Codex image attachments may also be written under:
 
-| Resource | Limit | Rationale |
-|----------|-------|-----------|
-| Max concurrent teams | 5 | Each team = up to 4 SDK sessions. 20 sessions is a reasonable ceiling. |
-| Max agent sessions total | 20 | 5 teams x 4 agents |
+```text
+.claude-orchestra/codex-images/
+```
 
-If the user attempts to create a team beyond the limit, the
-engine rejects with a clear error message.
-
-### Filesystem Usage
-
-| Directory | Growth Pattern | Cleanup |
-|-----------|---------------|---------|
-| `.claude-orchestra/teams/{id}/` | Per-team runtime data | Automatic on team termination |
-| `state.json` | Fixed size, overwritten | Automatic |
-| `registry.json` (engine repo) | Grows with team count | Manual |
-
-**Disk space monitoring:** The engine checks available disk
-space on startup. If less than 100 MB is available, log a
-warning. If less than 10 MB, refuse to start.
+The engine automatically adds `.claude-orchestra/` to the target project's `.gitignore`.
 
 ---
 
-## Structured Logging
+## Git Operations
 
-### Log Format
+Automatic:
 
-All log entries are structured JSON written to both terminal
-(formatted for readability) and a log file (raw JSON for
-machine parsing).
+- Create/check out a team branch from `main`.
+- Add `.claude-orchestra/` to `.gitignore`.
+- Auto-commit after Work phase.
+- Auto-commit after Security sweep passes.
+- Auto-commit final task checkpoint.
+
+User initiated:
+
+- Create GitHub PR with `gh pr create`.
+- Legacy push-and-merge endpoint remains for compatibility.
+
+Polling:
+
+- While any team is in `pr_open`, poll PR state every 60 seconds.
+- Merged PRs are archived automatically.
+- Closed unmerged PRs return the team to `done`.
+
+---
+
+## Configuration
+
+Config file selection priority:
+
+1. `--config <path>`
+2. `CLAUDE_ORCHESTRA_CONFIG`
+3. `./orchestra.config.json`
+
+Config value priority:
+
+1. CLI flags
+2. selected config file
+3. defaults
+
+Example:
 
 ```json
 {
-  "timestamp": "ISO-8601",
-  "level": "info | warn | error | debug",
-  "teamId": "team-uuid",
-  "phase": "pre_work | work | handoff | review",
-  "role": "Worker-1",
-  "event": "phase_transition | agent_output | verdict_parsed | pipeline_complete | ...",
-  "message": "Human-readable description",
-  "data": {}
-}
-```
-
-### Terminal Formatting
-
-Terminal output uses role-specific colors for scanability:
-
-| Role | Color | ANSI Code |
-|------|-------|-----------|
-| Worker-1 | Green | `\x1b[32m` |
-| Worker-2 | Green | `\x1b[32m` |
-| Security | Red | `\x1b[31m` |
-| Reviewer | Yellow/Amber | `\x1b[33m` |
-| System | Purple | `\x1b[35m` |
-| Error | Bright Red | `\x1b[91m` |
-
-### Event Types
-
-| Event | Level | Description |
-|-------|-------|-------------|
-| `team_created` | info | New team initialized |
-| `task_assigned` | info | Task assigned to team |
-| `task_classified` | info | Complexity classification result |
-| `phase_transition` | info | Team moved to new phase |
-| `agent_output` | debug | Agent response text |
-| `agent_progress` | debug | Streaming progress text |
-| `verdict_parsed` | info | Security/review/verify verdict extracted |
-| `pipeline_complete` | info | Task finished successfully |
-| `pipeline_error` | error | Pipeline failed |
-| `loop_limit_reached` | error | Revision/rejection max exceeded |
-| `feedback_sent` | info | Notification sent to dashboard |
-| `feedback_blocking` | info | Blocking question sent, pipeline paused |
-| `feedback_response` | info | User responded to blocking question |
-| `shutdown_initiated` | info | Graceful shutdown started |
-| `auto_commit` | info | Git auto-commit at checkpoint |
-
-### Log Files
-
-| File | Contents | Rotation |
-|------|----------|----------|
-| `orchestra.log` | All events, JSON format | Rotate at 10 MB |
-| `orchestra.error.log` | Error events only | Rotate at 5 MB |
-| Per-team logs | Team-specific events | Per task, no rotation |
-
-### Log Levels
-
-| Level | When to Use |
-|-------|-------------|
-| `debug` | Agent output, streaming progress, internal state |
-| `info` | Phase transitions, team creation, task assignment, verdicts, auto-commits |
-| `warn` | Conservative verdict defaults, reclassification |
-| `error` | Pipeline failures, loop limits, SDK errors |
-
----
-
-## Configuration Reference
-
-All configuration is provided via a JSON config file
-(`orchestra.config.json`) in the project root, with CLI flag
-overrides for common settings.
-
-### Config File Schema
-
-```json
-{
-  "engine": {
-    "dataDirectory": ".claude-orchestra",
-    "logDirectory": ".claude-orchestra/logs"
+  "agentRuntime": {
+    "provider": "codex",
+    "auth": "subscription",
+    "model": "gpt-5.5"
   },
+  "engine": {
+    "registryPath": "./registry.json",
+    "logDirectory": "./logs",
+    "rolesDir": "./agents"
+  },
+  "skipRequirements": false,
   "teams": {
     "maxConcurrentTeams": 5
-  },
-  "models": {
-    "Worker": "claude-opus-4-6",
-    "Security": "claude-opus-4-6",
-    "Reviewer": "claude-opus-4-6"
   },
   "limits": {
     "maxRevisions": 3,
     "maxRejections": 2,
-    "maxTotalBackwardTransitions": 5,
-    "maxVerifyPasses": 2
+    "maxTotalBackwardTransitions": 5
   },
-  "costBudget": {
-    "warningThreshold": 10,
-    "hardLimit": 25
+  "efforts": {
+    "Worker": "xhigh",
+    "Security": "high",
+    "Reviewer": "high"
+  },
+  "disallowedTools": {
+    "Security": ["Write", "Edit", "Bash"],
+    "Reviewer": ["Write", "Edit", "Bash"]
+  },
+  "maxTurns": {
+    "Worker": 50,
+    "Security": 20,
+    "Reviewer": 20
   }
 }
 ```
 
-### CLI Flag Overrides
+Claude example:
 
-| Flag | Config Path | Description |
-|------|------------|-------------|
-| `--data-dir <path>` | `engine.dataDirectory` | Data directory location |
-| `--max-teams <n>` | `teams.maxConcurrentTeams` | Max concurrent teams |
-| `--model-worker <id>` | `models.Worker` | Worker model |
-| `--model-security <id>` | `models.Security` | Security model |
-| `--model-reviewer <id>` | `models.Reviewer` | Reviewer model |
-| `--max-revisions <n>` | `limits.maxRevisions` | Max revision loops |
-| `--cost-limit <usd>` | `costBudget.hardLimit` | Cost hard limit |
+```json
+{
+  "agentRuntime": {
+    "provider": "claude",
+    "auth": "subscription",
+    "model": "claude-opus-4-6"
+  },
+  "efforts": {
+    "Worker": "max",
+    "Security": "low",
+    "Reviewer": "medium"
+  }
+}
+```
 
-### Environment Variables
+---
 
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `ANTHROPIC_API_KEY` | API key for Claude models | Yes (unless using Claude Max) |
-| `CLAUDE_ORCHESTRA_LOG_LEVEL` | Override log level (debug/info/warn/error) | No (default: info) |
-| `CLAUDE_ORCHESTRA_CONFIG` | Path to config file | No (default: ./orchestra.config.json) |
+## CLI Flags
+
+| Flag | Description |
+|------|-------------|
+| `--port <n>` | Dashboard port |
+| `--registry <path>` | Registry file path |
+| `--config <path>` | Config file path |
+| `--max-teams <n>` | Max concurrent teams |
+| `--provider <name>` | Agent provider: `claude` or `codex` |
+| `--auth <mode>` | Auth mode: `subscription` |
+| `--model <id>` | Global model override |
+| `--model-worker <id>` | Per-role Worker model override |
+| `--model-security <id>` | Per-role Security model override |
+| `--model-reviewer <id>` | Per-role Reviewer model override |
+
+---
+
+## Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `CLAUDE_ORCHESTRA_CONFIG` | Optional path to config file |
+| `CLAUDE_ORCHESTRA_LOG_LEVEL` | Optional log level override |
+
+Guarded variables rejected for Claude subscription runtime:
+
+- `ANTHROPIC_API_KEY`
+- `ANTHROPIC_AUTH_TOKEN`
+- `CLAUDE_CODE_USE_BEDROCK`
+- `CLAUDE_CODE_USE_VERTEX`
+- `CLAUDE_CODE_USE_FOUNDRY`
+
+Guarded variables rejected for Codex subscription runtime:
+
+- `CODEX_API_KEY`
+- `OPENAI_API_KEY`
+- `OPENAI_AUTH_TOKEN`
+
+---
+
+## Logging
+
+The logger writes structured JSON and terminal-friendly output.
+
+Log destinations:
+
+| File | Contents |
+|------|----------|
+| `logs/orchestra.log` | Main structured log |
+| `logs/orchestra.error.log` | Error log |
+| `logs/teams/{teamId}/team.log` | Per-team log |
+
+Log levels: `debug`, `info`, `warn`, `error`.
+
+The logger can attach to the orchestrator and subscribe to its events. Dashboard progress is separate and flows through SSE.
+
+---
+
+## Cost And Billing
+
+The current supported auth mode is `subscription`. That means Claude subscription OAuth for Claude and ChatGPT/Codex subscription OAuth for Codex.
+
+API-key billing is intentionally guarded against in this mode. If API billing is introduced later, it should be a separate explicit auth mode with separate budget controls and documentation.

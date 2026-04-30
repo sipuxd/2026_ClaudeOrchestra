@@ -5,7 +5,7 @@
 
 ## Context
 
-The OWASP Top 10 for Agentic Applications (2026) identifies security risks specific to multi-agent AI systems. ClaudeOrchestra is a multi-agent orchestration engine that spawns Claude sessions with tool access (including Bash, file writes, and code execution). This document maps each OWASP risk to our current coverage and documents mitigations.
+The OWASP Top 10 for Agentic Applications (2026) identifies security risks specific to multi-agent AI systems. ClaudeOrchestra is a multi-agent orchestration engine that spawns provider-backed agent sessions through either Claude Agent SDK or Codex SDK. Tool access depends on the active provider and role: Worker agents can modify code, while Security and Reviewer roles are constrained through disallowed tools or read-only sandboxing. This document maps each OWASP risk to our current coverage and documents mitigations.
 
 ## The 10 Risks and Our Coverage
 
@@ -41,11 +41,12 @@ The OWASP Top 10 for Agentic Applications (2026) identifies security risks speci
 **Risk:** Agents inherit and escalate user or system credentials, reusing high-privilege tokens across systems unintentionally.
 
 **Our coverage:** Partially mitigated.
-- All agents share the same `ANTHROPIC_API_KEY` and process environment
+- Subscription auth rejects provider API-key environment variables before startup to avoid accidental API-key billing or unintended credential mode
+- Runtime adapters strip guarded provider auth variables before spawning provider sessions
 - `security.agent.md` checks for leaked credentials in agent outputs during post-sweep
-- The SDK's `permissionMode: 'bypassPermissions'` grants all agents the same privilege level
+- Security and Reviewer roles are constrained through Claude `disallowedTools` or Codex read-only sandboxing
 
-**Remaining gap:** Per-agent credential scoping is not supported by the Claude Agent SDK natively. All agents run with the same API key and environment variables. If Worker-1 has access to a database connection string in the environment, so does the Reviewer. Mitigation would require custom environment sandboxing per agent spawn, which adds significant complexity.
+**Remaining gap:** Per-agent environment scoping is still coarse. Agents inherit the orchestrator process environment after guarded provider variables are removed, so project-specific secrets in the process environment may still be visible to roles that do not need them. A stricter per-role environment allowlist would be the stronger mitigation.
 
 ---
 
@@ -56,7 +57,7 @@ The OWASP Top 10 for Agentic Applications (2026) identifies security risks speci
 **Our coverage:** Partially mitigated.
 - `security.agent.md` checks `package.json`/lock files for known vulnerable or compromised packages
 - `security.agent.md` scans for new or modified MCP server configurations and dynamic imports during pre-scan
-- Zero production dependencies besides `@anthropic-ai/claude-agent-sdk` — minimal attack surface
+- Production dependencies are limited to the provider SDKs and Node built-ins for the dashboard
 
 **Remaining gap:** Agent prompt files (`agents/*.agent.md`) are loaded from the filesystem at runtime. If an attacker can modify these files, they control the agent's behavior. File integrity verification (checksums or signing) is not implemented.
 

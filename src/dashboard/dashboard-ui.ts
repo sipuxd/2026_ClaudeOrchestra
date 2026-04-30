@@ -60,8 +60,12 @@ a:hover{text-decoration:underline}
 
 /* --- Dashboard Header --- */
 .dashboard-header{margin-bottom:28px}
+.dashboard-heading-row{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .dashboard-header h1{font-size:1.5rem;font-weight:600;margin-bottom:4px}
 .dashboard-subtitle{color:var(--text-secondary);font-size:.875rem}
+.runtime-pill{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:999px;
+  background:var(--surface);border:1px solid var(--border);color:var(--text-secondary);
+  font-size:.75rem;text-transform:uppercase;letter-spacing:.04em}
 
 /* --- Stat Pills --- */
 .stat-pills{display:flex;align-items:center;gap:10px;margin-bottom:28px;flex-wrap:wrap}
@@ -222,7 +226,7 @@ a:hover{text-decoration:underline}
 .pipeline-stat-label{font-size:.65rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em;margin-top:2px}
 
 /* Expandable Agent Sections */
-.agent-sections-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.agent-sections-grid{display:grid;grid-template-columns:1fr;gap:10px}
 .agent-section{background:var(--bg);border:1px solid var(--border);border-radius:10px;overflow:hidden;cursor:pointer}
 .agent-section-header{display:flex;align-items:center;gap:10px;padding:12px 14px}
 .agent-section-header:hover{background:var(--surface)}
@@ -253,7 +257,7 @@ a:hover{text-decoration:underline}
 .live-dot-label.current{color:var(--blue)}
 .live-connector{flex:1;height:2px;background:var(--border);margin:0 -2px;margin-bottom:20px}
 .live-connector.past{background:var(--green)}
-.live-agent-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px}
+.live-agent-grid{display:grid;grid-template-columns:1fr;gap:10px;margin-bottom:16px}
 .live-agent-card{background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:12px}
 .live-agent-card.active-agent{border-color:var(--agent-color,var(--blue))}
 .live-agent-header{display:flex;align-items:center;gap:8px;margin-bottom:8px}
@@ -391,6 +395,7 @@ const state = {
   elapsedTimers: {},
   sseConnected: false,
   securityResults: {}, // teamId -> result string
+  runtime: null,
 };
 
 // ---- Helpers ----
@@ -672,7 +677,12 @@ function renderTeamCard(teamId, compact) {
 function renderDashboardView() {
   var container = $('viewContainer');
   var stats = getStats();
-  var html = '<div class="dashboard-header"><h1>Portfolio</h1>';
+  var rt = state.runtime || {};
+  var runtimeLabel = rt.provider
+    ? rt.provider + ' / ' + (rt.auth || 'subscription') + ' / ' + (rt.model || 'default')
+    : 'runtime loading';
+  var html = '<div class="dashboard-header"><div class="dashboard-heading-row"><h1>Portfolio</h1>';
+  html += '<span class="runtime-pill">' + esc(runtimeLabel) + '</span></div>';
   html += '<p class="dashboard-subtitle">' + Object.keys(state.teams).length + ' teams across ' + Object.keys(state.projects).length + ' projects</p></div>';
   html += '<div class="stat-pills" id="globalStatPills"></div>';
 
@@ -864,7 +874,7 @@ function renderSummaryContent(teamId) {
     var ag = t.agents ? t.agents[inst] : null;
     var agState = ag ? (ag.state === 'spawning' ? 'waiting' : ag.state) : 'waiting';
     var agOutput = (state.liveOutput[teamId] || []).filter(function(e){ return e.agent === inst; }).map(function(e){ return e.text; }).join('\\n');
-    var verdict = getAgentVerdict(agOutput, inst);
+    var verdict = getAgentVerdict(agOutput, inst, agState);
     var verdictStyle = getVerdictStyle(verdict);
 
     html += '<div class="agent-section" onclick="toggleAgentSection(this)">';
@@ -892,22 +902,31 @@ function renderSummaryContent(teamId) {
   return html;
 }
 
-function getAgentVerdict(output, instance) {
-  if (!output) return 'WAITING';
-  if (output.match(/APPROVED/i)) return 'APPROVED';
-  if (output.match(/REVISION.NEEDED/i)) return 'REVISION_NEEDED';
-  if (output.match(/REJECTED/i)) return 'REJECTED';
-  if (output.match(/BLOCKED/i)) return 'BLOCKED';
-  if (output.match(/COMPLETE/i)) return 'Complete';
-  if (output.match(/ERRORED|error/i) && instance !== 'Security-1') return 'ERRORED';
-  if (output.match(/SKIPPED/i)) return 'SKIPPED';
-  var metMatch = output.match(new RegExp('\\\\d+/\\\\d+\\\\s*met','i'));
-  if (metMatch) return metMatch[0];
+function getAgentVerdict(output, instance, agState) {
+  if (!output && (!agState || agState === 'waiting')) return 'WAITING';
+  if (output && output.match(/APPROVED/i)) return 'APPROVED';
+  if (output && output.match(/REVISION.NEEDED/i)) return 'REVISION_NEEDED';
+  if (output && output.match(/REJECTED/i)) return 'REJECTED';
+  if (output && output.match(/BLOCKED/i)) return 'BLOCKED';
+  if (output && output.match(/COMPLETE/i)) return 'Complete';
+  if (output && output.match(/ERRORED|error/i) && instance !== 'Security-1') return 'ERRORED';
+  if (output && output.match(/SKIPPED/i)) return 'SKIPPED';
+  if (output) {
+    var metMatch = output.match(new RegExp('\\\\d+/\\\\d+\\\\s*met','i'));
+    if (metMatch) return metMatch[0];
+  }
+  if (agState === 'working' || agState === 'active') return 'ACTIVE';
+  if (agState === 'spawning') return 'SPAWNING';
+  if (agState === 'done') return 'Complete';
+  if (agState === 'errored') return 'ERRORED';
+  if (output) return 'ACTIVE';
   return 'WAITING';
 }
 
 function getVerdictStyle(verdict) {
   if (verdict === 'APPROVED' || verdict === 'Complete' || verdict.includes('met')) return 'background:rgba(63,185,80,.12);color:var(--green)';
+  if (verdict === 'ACTIVE') return 'background:rgba(56,139,253,.15);color:var(--blue)';
+  if (verdict === 'SPAWNING') return 'background:rgba(72,79,88,.12);color:var(--text-muted)';
   if (verdict === 'SKIPPED' || verdict === 'WAITING') return 'background:rgba(72,79,88,.12);color:var(--text-muted)';
   if (verdict === 'ERRORED' || verdict === 'BLOCKED' || verdict === 'REJECTED') return 'background:rgba(218,54,51,.12);color:var(--red-light)';
   return 'background:rgba(210,153,34,.12);color:var(--amber)';
@@ -974,10 +993,9 @@ function renderLiveContent(teamId) {
   }
   html += '</div>';
 
-  // Stop + Steer buttons
+  // Action buttons (same as Summary tab)
   html += '<div class="live-actions">';
-  html += '<button class="btn btn-danger" style="flex:1" onclick="window.__modal.stopPipeline(\\'' + esc(teamId) + '\\')">Stop Pipeline</button>';
-  html += '<button class="btn btn-secondary" style="flex:1" onclick="window.__modal.steerAgent(\\'' + esc(teamId) + '\\')">Steer Agent</button>';
+  html += renderTeamActionButtons(teamId);
   html += '</div>';
 
   return html;
@@ -1379,6 +1397,7 @@ function connectSSE() {
     try {
       var data = JSON.parse(e.data);
       state.sseConnected = true;
+      if (data.runtime) state.runtime = data.runtime;
       if (data.teams) {
         for (var i = 0; i < data.teams.length; i++) {
           var t = data.teams[i];

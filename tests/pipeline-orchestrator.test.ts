@@ -141,14 +141,32 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => {
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 import { PipelineOrchestrator, parseSecurityVerdict, parseReviewVerdict, parseVerifyVerdict, parseClassification } from '../src/pipeline-orchestrator.js';
 
+const GUARDED_ENV_KEYS = [
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_VERTEX',
+  'CLAUDE_CODE_USE_FOUNDRY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_API_KEY',
+  'CODEX_API_KEY',
+  'OPENAI_API_KEY',
+  'OPENAI_AUTH_TOKEN',
+];
+
 describe('PipelineOrchestrator', () => {
   let tmpDir: string;
   let projectDir: string;
   let rolesDir: string;
   let orchestrator: PipelineOrchestrator;
   let mock: ReturnType<typeof createPipelineMock>;
+  let originalGuardedEnv: Record<string, string | undefined>;
 
   beforeEach(() => {
+    originalGuardedEnv = {};
+    for (const key of GUARDED_ENV_KEYS) {
+      originalGuardedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pipeline-test-'));
     projectDir = path.join(tmpDir, 'project');
     rolesDir = path.join(tmpDir, 'roles');
@@ -181,6 +199,14 @@ describe('PipelineOrchestrator', () => {
       // Best effort cleanup
     }
     fs.rmSync(tmpDir, { recursive: true, force: true });
+    for (const key of GUARDED_ENV_KEYS) {
+      const value = originalGuardedEnv[key];
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
     vi.restoreAllMocks();
   });
 
@@ -568,6 +594,81 @@ describe('PipelineOrchestrator', () => {
       // Should not throw
       const state = orch.createTeam('default-config', projectDir);
       expect(state).toBeDefined();
+    });
+
+    it('defaults to Claude subscription runtime', () => {
+      expect(orchestrator.getAgentRuntime()).toEqual({
+        provider: 'claude',
+        auth: 'subscription',
+      });
+    });
+
+    it('accepts Codex subscription runtime as the global provider', async () => {
+      const orch = new PipelineOrchestrator({
+        registryPath: path.join(tmpDir, 'registry-codex.json'),
+        rolesDir,
+        agentRuntime: {
+          provider: 'codex',
+          auth: 'subscription',
+          model: 'gpt-5.5',
+        },
+      });
+
+      expect(orch.getAgentRuntime()).toEqual({
+        provider: 'codex',
+        auth: 'subscription',
+        model: 'gpt-5.5',
+      });
+      await orch.shutdown();
+    });
+
+    it('uses global runtime model before per-role model config', async () => {
+      const orch = new PipelineOrchestrator({
+        registryPath: path.join(tmpDir, 'registry-runtime-model.json'),
+        rolesDir,
+        agentRuntime: {
+          provider: 'claude',
+          auth: 'subscription',
+          model: 'claude-runtime-model',
+        },
+        models: { [Role.Worker]: 'claude-role-model' },
+        skipRequirements: true,
+      });
+
+      orch.createTeam('runtime-model', projectDir);
+      orch.assignTask('runtime-model', 'fix a typo');
+
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      const workerSession = mock.getSession(mock.sessions.length - 1);
+      expect(workerSession.options.model).toBe('claude-runtime-model');
+      await orch.shutdown();
+    });
+
+    it('rejects Codex subscription runtime when API key env vars are set', () => {
+      process.env.OPENAI_API_KEY = 'test-key';
+
+      expect(() => new PipelineOrchestrator({
+        registryPath: path.join(tmpDir, 'registry-codex-api-key.json'),
+        rolesDir,
+        agentRuntime: {
+          provider: 'codex',
+          auth: 'subscription',
+        },
+      })).toThrow('Codex subscription auth requested');
+    });
+
+    it('rejects Claude subscription runtime when API key env vars are set', () => {
+      process.env.ANTHROPIC_API_KEY = 'test-key';
+
+      expect(() => new PipelineOrchestrator({
+        registryPath: path.join(tmpDir, 'registry-claude-api-key.json'),
+        rolesDir,
+        agentRuntime: {
+          provider: 'claude',
+          auth: 'subscription',
+        },
+      })).toThrow('Claude subscription auth requested');
     });
 
     it('respects model overrides', async () => {

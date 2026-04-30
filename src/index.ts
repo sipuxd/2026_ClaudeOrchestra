@@ -3,64 +3,12 @@
 // CLI entry point for ClaudeOrchestra.
 // Commands: create-team, assign-task, status, list, dashboard
 
-import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { PipelineOrchestrator, type PipelineOrchestraConfig } from './pipeline-orchestrator.js';
 import { DashboardServer } from './dashboard/index.js';
 import { TeamPhase } from './state/team-state.js';
-import { Role } from './roles/role-types.js';
 import { Logger } from './logger/logger.js';
-
-// --- Config Loading ---
-
-function loadConfig(configPath: string): Partial<PipelineOrchestraConfig> {
-  if (!fs.existsSync(configPath)) return {};
-  try {
-    const raw = fs.readFileSync(configPath, 'utf-8');
-    const parsed = JSON.parse(raw);
-    const config: Partial<PipelineOrchestraConfig> = {};
-
-    if (parsed.engine?.registryPath) config.registryPath = parsed.engine.registryPath;
-    if (parsed.engine?.logDirectory) config.logDirectory = parsed.engine.logDirectory;
-    if (parsed.teams?.maxConcurrentTeams) config.maxConcurrentTeams = parsed.teams.maxConcurrentTeams;
-    if (parsed.limits?.maxRevisions || parsed.limits?.maxRejections || parsed.limits?.maxTotalBackwardTransitions) {
-      config.limits = {
-        maxRevisions: parsed.limits.maxRevisions ?? 3,
-        maxRejections: parsed.limits.maxRejections ?? 2,
-        maxTotalBackwardTransitions: parsed.limits.maxTotalBackwardTransitions ?? 5,
-      };
-    }
-    if (parsed.models) {
-      config.models = {};
-      for (const [role, model] of Object.entries(parsed.models)) {
-        config.models[role as Role] = model as string;
-      }
-    }
-
-    // Performance tuning
-    if (parsed.efforts) {
-      config.efforts = {};
-      for (const [role, effort] of Object.entries(parsed.efforts)) {
-        config.efforts[role as Role] = effort as 'low' | 'medium' | 'high' | 'max';
-      }
-    }
-    if (parsed.disallowedTools) {
-      config.disallowedTools = {};
-      for (const [role, tools] of Object.entries(parsed.disallowedTools)) {
-        config.disallowedTools[role as Role] = tools as string[];
-      }
-    }
-    if (parsed.maxTurns) {
-      config.maxTurns = {};
-      for (const [role, turns] of Object.entries(parsed.maxTurns)) {
-        config.maxTurns[role as Role] = turns as number;
-      }
-    }
-    return config;
-  } catch {
-    return {};
-  }
-}
+import { applyCliOverrides, buildPipelineConfig, loadConfig, resolveConfigPath } from './config.js';
 
 // --- CLI Argument Parsing ---
 
@@ -153,6 +101,9 @@ ${colors.bold}Flags:${colors.reset}
   --registry <path>          Registry file path (default: ./registry.json)
   --tick-interval <ms>       Main loop interval (default: 1000)
   --max-teams <n>            Max concurrent teams (default: 5)
+  --provider <name>          Agent provider: claude or codex
+  --auth <mode>              Auth mode: subscription
+  --model <id>               Global model override (e.g. gpt-5.5, default)
   --config <path>            Config file path (default: ./orchestra.config.json)
 `);
 }
@@ -165,10 +116,12 @@ function showStatus(orchestrator: PipelineOrchestrator, teamId: string): void {
   }
 
   const phaseColor = PHASE_COLORS[status.currentPhase] ?? colors.reset;
+  const runtime = orchestrator.getAgentRuntime();
 
   console.log(`
 ${colors.bold}Team:${colors.reset} ${status.teamName} (${status.teamId})
 ${colors.bold}Phase:${colors.reset} ${phaseColor}${status.currentPhase}${colors.reset}
+${colors.bold}Runtime:${colors.reset} ${runtime.provider} / ${runtime.auth} / ${runtime.model ?? 'default'}
 ${colors.bold}Project:${colors.reset} ${status.projectPath}
 ${colors.bold}Task:${colors.reset} ${status.currentTask?.description ?? 'none'}
 ${colors.bold}Counters:${colors.reset} revisions=${status.counters.revisions} rejections=${status.counters.rejections} backward=${status.counters.totalBackwardTransitions}
@@ -194,12 +147,13 @@ ${colors.bold}Agents:${colors.reset}`);
 
 function showList(orchestrator: PipelineOrchestrator): void {
   const teams = orchestrator.getAllTeams();
+  const runtime = orchestrator.getAgentRuntime();
   if (teams.length === 0) {
-    console.log('No active teams.');
+    console.log(`No active teams. Runtime: ${runtime.provider} / ${runtime.auth} / ${runtime.model ?? 'default'}.`);
     return;
   }
 
-  console.log(`\n${colors.bold}Active Teams:${colors.reset}\n`);
+  console.log(`\n${colors.bold}Active Teams:${colors.reset} ${colors.dim}(runtime: ${runtime.provider} / ${runtime.auth} / ${runtime.model ?? 'default'})${colors.reset}\n`);
   for (const t of teams) {
     const phaseColor = PHASE_COLORS[t.currentPhase] ?? colors.reset;
     console.log(
@@ -224,44 +178,15 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Load config
-  const configPath = parsed.flags['--config'] ??
-    process.env.CLAUDE_ORCHESTRA_CONFIG ??
-    './orchestra.config.json';
+  // Load config. --config and CLAUDE_ORCHESTRA_CONFIG select the file;
+  // individual CLI flags then override values from that file.
+  const configPath = resolveConfigPath(parsed.flags);
   const fileConfig = loadConfig(configPath);
-
-  // Apply CLI flag overrides
-  const config: Partial<PipelineOrchestraConfig> = { ...fileConfig };
-  if (parsed.flags['--registry']) config.registryPath = parsed.flags['--registry'];
-  if (parsed.flags['--max-teams']) config.maxConcurrentTeams = parseInt(parsed.flags['--max-teams'], 10);
-  if (parsed.flags['--model-worker']) {
-    config.models = config.models ?? {};
-    config.models[Role.Worker] = parsed.flags['--model-worker'];
-  }
-  if (parsed.flags['--model-security']) {
-    config.models = config.models ?? {};
-    config.models[Role.Security] = parsed.flags['--model-security'];
-  }
-  if (parsed.flags['--model-reviewer']) {
-    config.models = config.models ?? {};
-    config.models[Role.Reviewer] = parsed.flags['--model-reviewer'];
-  }
-
-  // Resolve rolesDir relative to CWD
-  if (!config.rolesDir) {
-    config.rolesDir = path.resolve('agents');
-  }
+  const config: Partial<PipelineOrchestraConfig> = applyCliOverrides(fileConfig, parsed.flags);
+  const orchestratorConfig = buildPipelineConfig(config);
 
   // Create pipeline orchestrator
-  const orchestrator = new PipelineOrchestrator({
-    registryPath: config.registryPath,
-    rolesDir: path.resolve('agents'),
-    maxConcurrentTeams: config.maxConcurrentTeams,
-    models: config.models,
-    disallowedTools: config.disallowedTools,
-    maxTurns: config.maxTurns,
-    limits: config.limits,
-  });
+  const orchestrator = new PipelineOrchestrator(orchestratorConfig);
 
   // Create and attach structured logger
   const logDir = config.logDirectory ?? './logs';
@@ -382,7 +307,9 @@ async function main(): Promise<void> {
       });
 
       await dashboard.start();
+      const runtime = orchestrator.getAgentRuntime();
       log(`${colors.green}Dashboard running at${colors.reset} ${colors.bold}http://localhost:${port}${colors.reset}`);
+      log(`${colors.green}Agent runtime:${colors.reset} ${colors.bold}${runtime.provider}${colors.reset} / ${runtime.auth} / ${runtime.model ?? 'default'}`);
       log(`${colors.dim}Create teams and launch tasks from the browser. Press Ctrl+C to stop.${colors.reset}`);
 
       // Auto-open browser (best effort, macOS/Linux/Windows)

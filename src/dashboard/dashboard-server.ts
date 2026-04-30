@@ -183,6 +183,7 @@ export class DashboardServer {
     if (method === 'GET' && pathname === '/') return this.serveHTML(res);
     if (method === 'GET' && pathname === '/events') return this.serveSSE(req, res);
     if (method === 'GET' && pathname === '/api/teams') return this.handleGetTeams(res);
+    if (method === 'GET' && pathname === '/api/runtime') return this.handleGetRuntime(res);
     if (method === 'GET' && pathname === '/api/registry') return this.handleGetRegistry(res);
     if (method === 'POST' && pathname === '/api/pick-directory') { this.handlePickDirectory(res); return; }
 
@@ -269,7 +270,8 @@ export class DashboardServer {
 
     // Send initial state dump
     const teams = this.orchestrator.getAllTeams();
-    res.write(`event: init\ndata: ${JSON.stringify({ teams })}\n\n`);
+    const runtime = this.orchestrator.getAgentRuntime();
+    res.write(`event: init\ndata: ${JSON.stringify({ teams, runtime })}\n\n`);
 
     this.sseClients.add(res);
 
@@ -281,6 +283,10 @@ export class DashboardServer {
   private handleGetTeams(res: http.ServerResponse): void {
     const teams = this.orchestrator.getAllTeams();
     this.sendJSON(res, teams);
+  }
+
+  private handleGetRuntime(res: http.ServerResponse): void {
+    this.sendJSON(res, this.orchestrator.getAgentRuntime());
   }
 
   private handleGetTeam(teamId: string, res: http.ServerResponse): void {

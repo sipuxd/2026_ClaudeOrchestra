@@ -9,16 +9,12 @@
 // Worker-1 fixes gaps, Worker-2 re-checks (max 2 loops). Worker-2 never
 // modifies code — requirements verification only.
 //
-// Each agent gets its own SDK query() call with streaming input
-// (PromptChannel) for warm sessions. First message pays ~12s cold start;
-// subsequent messages are ~2-3s. All agents cold-start in parallel.
+// Each agent gets its own provider-backed session. The pipeline talks to a
+// small AgentSession interface; provider adapters own SDK-specific behavior.
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { EventEmitter } from 'node:events';
-import { query } from '@anthropic-ai/claude-agent-sdk';
-import type { Query, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
-import { buildGovernanceHooks } from './hooks.js';
 import { Role, type RoleInstance } from './roles/role-types.js';
 import { AgentState } from './types/index.js';
 import { TeamState, TeamPhase, type TeamStateData, type LoopLimits, DEFAULT_LOOP_LIMITS } from './state/team-state.js';
@@ -27,7 +23,11 @@ import { Registry } from './registry.js';
 import { GitOps } from './git.js';
 import { classifyComplexity } from './router/complexity-router.js';
 import { parseFrontmatter } from './spawner/frontmatter-parser.js';
+import { createAgentSession, normalizeAgentRuntime, normalizeProviderModel, validateAgentRuntime } from './agent-runtime/index.js';
+import type { AgentRuntimeConfig, AgentSession, EffortLevel } from './agent-runtime/index.js';
 import { randomUUID } from 'node:crypto';
+
+export type { AgentAuthMode, AgentProvider, AgentRuntimeConfig, EffortLevel } from './agent-runtime/index.js';
 
 // --- Orchestrator events (shared interface for all event consumers) ---
 
@@ -78,68 +78,6 @@ const ROLE_AGENT_FILES: Record<Role, string> = {
   [Role.Security]: 'security.agent.md',
   [Role.Reviewer]: 'reviewer.agent.md',
 };
-
-// --- PromptChannel: bridges sync push() to async iterable for SDK ---
-// Duplicated from agent-process.ts to keep that file untouched.
-
-class PromptChannel {
-  private queue: SDKUserMessage[] = [];
-  private waiter: ((value: IteratorResult<SDKUserMessage>) => void) | null = null;
-  private closed = false;
-
-  push(prompt: string, images?: Array<{ media_type: string; data: string }>): void {
-    let content: string | Array<{ type: string; [key: string]: any }>;
-    if (images && images.length > 0) {
-      content = [
-        { type: 'text', text: prompt },
-        ...images.map(img => ({
-          type: 'image' as const,
-          source: { type: 'base64' as const, media_type: img.media_type, data: img.data },
-        })),
-      ];
-    } else {
-      content = prompt;
-    }
-    const msg: SDKUserMessage = {
-      type: 'user',
-      message: { role: 'user', content },
-      parent_tool_use_id: null,
-      session_id: '',
-    };
-    if (this.waiter) {
-      const resolve = this.waiter;
-      this.waiter = null;
-      resolve({ value: msg, done: false });
-    } else {
-      this.queue.push(msg);
-    }
-  }
-
-  close(): void {
-    this.closed = true;
-    if (this.waiter) {
-      const resolve = this.waiter;
-      this.waiter = null;
-      resolve({ value: undefined as any, done: true });
-    }
-  }
-
-  [Symbol.asyncIterator](): AsyncIterator<SDKUserMessage> {
-    return {
-      next: (): Promise<IteratorResult<SDKUserMessage>> => {
-        if (this.queue.length > 0) {
-          return Promise.resolve({ value: this.queue.shift()!, done: false });
-        }
-        if (this.closed) {
-          return Promise.resolve({ value: undefined as any, done: true });
-        }
-        return new Promise((resolve) => {
-          this.waiter = resolve;
-        });
-      },
-    };
-  }
-}
 
 // --- Verdict types ---
 
@@ -245,169 +183,7 @@ export function parseVerifyVerdict(text: string): ParsedVerdict<VerifyVerdict> {
 
 const MAX_VERIFY_PASSES = 2;
 
-// --- AgentSession: wraps a warm SDK query() session ---
-
-interface SessionOpts {
-  model: string;
-  cwd: string;
-  effort: 'low' | 'medium' | 'high' | 'max';
-  disallowedTools?: string[];
-  maxTurns?: number;
-  onProgress?: (accumulated: string) => void;
-}
-
-class AgentSession {
-  readonly name: string;
-  private channel: PromptChannel;
-  private queryGen: Query;
-  private pendingResolve: ((text: string) => void) | null = null;
-  private pendingReject: ((err: Error) => void) | null = null;
-  private accumulated = '';
-  private activityLog = '';
-  private onProgress?: (accumulated: string) => void;
-  private consuming: Promise<void>;
-  private _closed = false;
-
-  constructor(name: string, systemPrompt: string, opts: SessionOpts) {
-    this.name = name;
-    this.onProgress = opts.onProgress;
-    this.channel = new PromptChannel();
-
-    this.queryGen = query({
-      prompt: this.channel as AsyncIterable<SDKUserMessage>,
-      options: {
-        model: opts.model,
-        systemPrompt,
-        cwd: opts.cwd,
-        effort: opts.effort,
-        maxTurns: opts.maxTurns,
-        disallowedTools: opts.disallowedTools,
-        allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Grep', 'Glob'],
-        permissionMode: 'bypassPermissions',
-        allowDangerouslySkipPermissions: true,
-        persistSession: false,
-        env: { ...process.env, CLAUDECODE: undefined },
-        hooks: buildGovernanceHooks(opts.cwd),
-      } as any,
-    });
-
-    // Start consuming the stream in the background
-    this.consuming = this.consume();
-  }
-
-  get closed(): boolean {
-    return this._closed;
-  }
-
-  /** Last activity log from the most recent send() call. */
-  get lastActivityLog(): string {
-    return this.activityLog;
-  }
-
-  /**
-   * Send a message to this agent and wait for the complete response.
-   * Returns the full accumulated text from the agent's turn.
-   */
-  async send(message: string, images?: Array<{ media_type: string; data: string }>): Promise<string> {
-    if (this._closed) {
-      throw new Error(`AgentSession "${this.name}" is closed`);
-    }
-    return new Promise<string>((resolve, reject) => {
-      this.pendingResolve = resolve;
-      this.pendingReject = reject;
-      this.accumulated = '';
-      this.activityLog = '';
-      this.channel.push(message, images);
-    });
-  }
-
-  /**
-   * Close this agent session. Terminates the SDK query.
-   */
-  close(): void {
-    if (this._closed) return;
-    this._closed = true;
-    this.channel.close();
-    try {
-      this.queryGen.close();
-    } catch {
-      // Best effort
-    }
-  }
-
-  /**
-   * Wait for the background consume loop to finish.
-   */
-  async waitForCompletion(): Promise<void> {
-    await this.consuming;
-  }
-
-  private async consume(): Promise<void> {
-    try {
-      for await (const msg of this.queryGen) {
-        // Extract tool use activity for dashboard streaming (separate from accumulated result)
-        if ((msg as any).type === 'assistant' && this.onProgress) {
-          const content = (msg as any).message?.content;
-          if (Array.isArray(content)) {
-            for (const block of content) {
-              if (block.type === 'tool_use') {
-                const tool = block.name || 'unknown';
-                const input = block.input || {};
-                let detail = '';
-                if (input.file_path) detail = input.file_path;
-                else if (input.command) detail = input.command.substring(0, 120);
-                else if (input.pattern) detail = input.pattern;
-                const line = detail ? `${tool}: ${detail}` : tool;
-                this.activityLog += (this.activityLog ? '\n' : '') + line;
-                this.onProgress(this.activityLog);
-
-              }
-              if (block.type === 'thinking' && block.thinking) {
-                const preview = block.thinking.substring(0, 200);
-                this.activityLog += (this.activityLog ? '\n' : '') + '💭 ' + preview;
-                this.onProgress(this.activityLog);
-              }
-            }
-          }
-        }
-        // Extract text from assistant messages
-        const text = extractSdkText(msg);
-        if (text) {
-          this.accumulated += text;
-          // Notify progress listener (for dashboard streaming)
-          if (this.onProgress) {
-            this.onProgress(this.accumulated);
-          }
-        }
-
-        // Result message = turn complete
-        if ((msg as any).type === 'result') {
-          if (this.pendingResolve) {
-            const result = this.accumulated;
-            this.accumulated = '';
-            const resolve = this.pendingResolve;
-            this.pendingResolve = null;
-            this.pendingReject = null;
-            resolve(result);
-          }
-        }
-      }
-    } catch (err: any) {
-      if (this.pendingReject) {
-        const reject = this.pendingReject;
-        this.pendingResolve = null;
-        this.pendingReject = null;
-        reject(err instanceof Error ? err : new Error(String(err)));
-      }
-    } finally {
-      this._closed = true;
-    }
-  }
-}
-
 // --- Pipeline Orchestrator Config ---
-
-type EffortLevel = 'low' | 'medium' | 'high' | 'max';
 
 export interface PipelineOrchestraConfig {
   registryPath: string;
@@ -415,9 +191,11 @@ export interface PipelineOrchestraConfig {
   /** Directory containing role prompt files (reuses subagent prompts) */
   rolesDir: string;
   maxConcurrentTeams: number;
+  /** Global all-or-nothing agent runtime. Applies to every team. */
+  agentRuntime?: Partial<AgentRuntimeConfig>;
   /** Model overrides per role (full model IDs like 'claude-opus-4-6') */
   models?: Partial<Record<Role, string>>;
-  /** Per-role effort levels. Pipeline advantage: each agent gets its own query(). */
+  /** Per-role effort levels. Pipeline advantage: each agent gets its own provider session. */
   efforts?: Partial<Record<Role, EffortLevel>>;
   /** Disallowed tools overrides per role */
   disallowedTools?: Partial<Record<Role, string[]>>;
@@ -456,6 +234,7 @@ interface PipelineTeamContext {
 
 export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   private readonly config: PipelineOrchestraConfig & typeof DEFAULT_PIPELINE_CONFIG;
+  private readonly agentRuntime: AgentRuntimeConfig;
   private readonly persistence: StatePersistence;
   private readonly registry: Registry;
   private readonly models: Record<Role, string>;
@@ -474,6 +253,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       Object.entries(config).filter(([, v]) => v !== undefined)
     );
     this.config = { ...DEFAULT_PIPELINE_CONFIG, ...cleanConfig } as PipelineOrchestraConfig & typeof DEFAULT_PIPELINE_CONFIG;
+    this.agentRuntime = normalizeAgentRuntime(config.agentRuntime);
+    validateAgentRuntime(this.agentRuntime);
 
     this.persistence = new StatePersistence();
     this.registry = new Registry(this.config.registryPath);
@@ -484,6 +265,10 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     this.efforts = { ...fmDefaults.efforts, ...config.efforts };
     this.disallowedTools = { ...fmDefaults.disallowedTools, ...config.disallowedTools };
     this.maxTurnsPerRole = { ...fmDefaults.maxTurns, ...config.maxTurns };
+  }
+
+  getAgentRuntime(): AgentRuntimeConfig {
+    return { ...this.agentRuntime };
   }
 
   // --- Team Lifecycle ---
@@ -681,7 +466,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     try {
       // Extract requirements from the task prompt
       this.emit('agent-output', teamId, 'Worker-1' as any, '[Pipeline] Extracting requirements...');
-      const requirements = await this.extractRequirements(task, images);
+      const requirements = await this.extractRequirements(ctx.state.snapshot.projectPath, task, images);
 
       if (requirements) {
         // Show requirements for user approval
@@ -986,10 +771,11 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
     try {
       const systemPrompt = this.loadRolePrompt('security-review.agent.md');
-      const session = new AgentSession('SecurityReview', systemPrompt, {
-        model: this.models[Role.Security],
+      const session = createAgentSession('SecurityReview', systemPrompt, {
+        runtime: this.agentRuntime,
+        model: this.getModelForRole(Role.Security),
         cwd,
-        effort: 'high' as any,
+        effort: 'high',
         maxTurns: 15,
         onProgress: (text: string) => {
           this.emit('agent-progress', teamId, 'Security-1' as any, text);
@@ -1094,8 +880,9 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
           'reviewer.agent.md'
     );
 
-    return new AgentSession(name, systemPrompt, {
-      model: this.models[role],
+    return createAgentSession(name, systemPrompt, {
+      runtime: this.agentRuntime,
+      model: this.getModelForRole(role),
       cwd,
       effort: this.efforts[role],
       disallowedTools: this.disallowedTools[role].length > 0
@@ -1629,39 +1416,32 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   // --- Private: Requirements Extraction ---
 
   private async extractRequirements(
+    cwd: string,
     taskDescription: string,
     images?: Array<{ media_type: string; data: string }>
   ): Promise<string> {
-    const channel = new PromptChannel();
-    const gen = query({
-      prompt: channel as AsyncIterable<SDKUserMessage>,
-      options: {
-        model: this.models[Role.Worker],
-        systemPrompt:
-          'You are a requirements analyst. Extract explicit requirements from the user\'s task description ' +
-          'as a numbered checklist. Each requirement should be a specific, verifiable outcome the user asked for. ' +
-          'Do NOT add requirements the user didn\'t ask for. Do NOT add code quality, testing, or best practice ' +
-          'requirements unless the user explicitly mentioned them.\n\n' +
-          'Format:\n1. [Requirement description]\n2. [Requirement description]\n...\n\n' +
-          'Be concise. Extract only what the user explicitly wants built.',
-        effort: 'low' as any,
-        maxTurns: 1,
-        permissionMode: 'bypassPermissions',
-        allowDangerouslySkipPermissions: true,
-        persistSession: false,
-        env: { ...process.env, CLAUDECODE: undefined },
-      } as any,
+    const systemPrompt =
+      'You are a requirements analyst. Extract explicit requirements from the user\'s task description ' +
+      'as a numbered checklist. Each requirement should be a specific, verifiable outcome the user asked for. ' +
+      'Do NOT add requirements the user didn\'t ask for. Do NOT add code quality, testing, or best practice ' +
+      'requirements unless the user explicitly mentioned them.\n\n' +
+      'Format:\n1. [Requirement description]\n2. [Requirement description]\n...\n\n' +
+      'Be concise. Extract only what the user explicitly wants built.';
+
+    const session = createAgentSession('Requirements', systemPrompt, {
+      runtime: this.agentRuntime,
+      model: this.getModelForRole(Role.Worker),
+      cwd,
+      effort: 'low',
+      maxTurns: 1,
     });
 
-    channel.push(taskDescription, images);
-    channel.close();
-
-    let result = '';
-    for await (const msg of gen) {
-      const text = extractSdkText(msg);
-      if (text) result += text;
+    try {
+      const result = await session.send(taskDescription, images);
+      return result.trim();
+    } finally {
+      session.close();
     }
-    return result.trim();
   }
 
   // --- Private: Role Prompt Loading ---
@@ -1714,21 +1494,11 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       throw new Error(`Failed to read role prompt at ${promptPath}: ${err?.message}`);
     }
   }
-}
 
-// --- Utility: Extract text from SDK messages ---
-
-function extractSdkText(msg: any): string | null {
-  // SDKAssistantMessage with content array
-  if (msg?.type === 'assistant' && Array.isArray(msg.content)) {
-    const textParts = msg.content
-      .filter((block: any) => block.type === 'text')
-      .map((block: any) => block.text);
-    return textParts.length > 0 ? textParts.join('\n') : null;
+  private getModelForRole(role: Role): string | undefined {
+    const runtimeModel = normalizeProviderModel(this.agentRuntime.model);
+    if (runtimeModel) return runtimeModel;
+    if (this.agentRuntime.provider === 'codex') return undefined;
+    return this.models[role];
   }
-  // Result message with text
-  if (msg?.type === 'result' && msg.result) {
-    return typeof msg.result === 'string' ? msg.result : null;
-  }
-  return null;
 }

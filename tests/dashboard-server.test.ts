@@ -16,6 +16,17 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
 import { DashboardServer } from '../src/dashboard/dashboard-server.js';
 import { PipelineOrchestrator } from '../src/pipeline-orchestrator.js';
 
+const GUARDED_ENV_KEYS = [
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_VERTEX',
+  'CLAUDE_CODE_USE_FOUNDRY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_API_KEY',
+  'CODEX_API_KEY',
+  'OPENAI_API_KEY',
+  'OPENAI_AUTH_TOKEN',
+];
+
 // --- Test helpers ---
 
 function httpRequest(
@@ -55,8 +66,15 @@ describe('DashboardServer', () => {
   let orchestrator: PipelineOrchestrator;
   let dashboard: DashboardServer;
   let port: number;
+  let originalGuardedEnv: Record<string, string | undefined>;
 
   beforeEach(async () => {
+    originalGuardedEnv = {};
+    for (const key of GUARDED_ENV_KEYS) {
+      originalGuardedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dashboard-test-'));
     rolesDir = path.join(tmpDir, 'roles');
     fs.mkdirSync(rolesDir, { recursive: true });
@@ -78,6 +96,14 @@ describe('DashboardServer', () => {
     await dashboard.close();
     await orchestrator.shutdown();
     fs.rmSync(tmpDir, { recursive: true, force: true });
+    for (const key of GUARDED_ENV_KEYS) {
+      const value = originalGuardedEnv[key];
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
   });
 
   // --- HTML ---
@@ -109,6 +135,17 @@ describe('DashboardServer', () => {
       const teams = JSON.parse(res.body);
       expect(teams).toHaveLength(1);
       expect(teams[0].teamId).toBe('test-team');
+    });
+  });
+
+  describe('GET /api/runtime', () => {
+    it('returns the active agent runtime', async () => {
+      const res = await httpRequest(port, 'GET', '/api/runtime');
+      expect(res.status).toBe(200);
+      expect(JSON.parse(res.body)).toEqual({
+        provider: 'claude',
+        auth: 'subscription',
+      });
     });
   });
 
@@ -234,6 +271,10 @@ describe('DashboardServer', () => {
                 const parsed = JSON.parse(match[1]);
                 expect(parsed.teams).toHaveLength(1);
                 expect(parsed.teams[0].teamId).toBe('sse-test');
+                expect(parsed.runtime).toEqual({
+                  provider: 'claude',
+                  auth: 'subscription',
+                });
                 req.destroy();
                 resolve();
               }

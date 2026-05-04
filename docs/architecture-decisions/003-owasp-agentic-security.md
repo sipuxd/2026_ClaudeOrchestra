@@ -31,8 +31,9 @@ The OWASP Top 10 for Agentic Applications (2026) identifies security risks speci
 - Worker-1's tool access is scoped to the cleared project directory
 - Worker-2 is instructed never to modify code (requirements verification only)
 - `worker.agent.md` includes explicit Bash constraints (no `curl | sh`, no `rm -rf /`, no network calls to unknown hosts)
+- Shared guardrail policy is enforced through Claude hooks, Codex stream monitoring, and orchestrator post-phase audits
 
-**Remaining gap:** Worker-1's Bash access is constrained by prompt instructions, not by a PreToolUse hook that programmatically validates commands. A hook-based validation layer would be stronger than prompt-based constraints. This is a future enhancement.
+**Remaining gap:** Codex does not expose a true pre-tool hook callback in the installed SDK. Codex stream aborts are post-detection, so sandboxing and orchestrator audits remain the hard guarantee.
 
 ---
 
@@ -71,22 +72,10 @@ The OWASP Top 10 for Agentic Applications (2026) identifies security risks speci
 - Security and Reviewer agents cannot execute code (Bash is disallowed)
 - `worker.agent.md` includes explicit constraints: no piped installs (`curl | sh`), no recursive deletions (`rm -rf /`), no `..` path traversal above the project root, no network calls to unknown hosts
 - The pipeline runs Worker-1 in a specific project directory, not system-wide
+- Claude Worker tool calls pass through shared `PreToolUse` command/path guardrails
+- Codex Worker turns run with network disabled, stream monitoring, abort-on-detection, and post-phase audits before commits
 
-**Remaining gap:** Worker-1's Bash constraints are prompt-based, not enforced programmatically. The proper mitigation is a PreToolUse hook on Bash that validates commands against a blocklist before execution. This would catch cases where the LLM ignores prompt instructions. Example hook:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [{
-      "matcher": "Bash",
-      "hooks": [{
-        "type": "command",
-        "command": "scripts/validate-bash-command.sh"
-      }]
-    }]
-  }
-}
-```
+**Remaining gap:** Codex stream monitoring can abort after detecting a forbidden command or file event, but it is not equivalent to Claude's pre-execution hooks.
 
 This is a planned future enhancement.
 
@@ -164,10 +153,10 @@ This is a planned future enhancement.
 | Risk | ID | Coverage | Gap Severity |
 |------|-----|----------|-------------|
 | Agent Goal Hijack | ASI01 | Partial | Medium |
-| Tool Misuse | ASI02 | Mitigated | Low (prompt-based, not hook-based) |
+| Tool Misuse | ASI02 | Mitigated | Low |
 | Identity & Privilege Abuse | ASI03 | Partial | Medium (SDK limitation) |
 | Supply Chain | ASI04 | Partial | Low |
-| Unexpected Code Execution | ASI05 | Partial | Medium (needs PreToolUse hook) |
+| Unexpected Code Execution | ASI05 | Partial | Low (Codex lacks true pre-tool hooks) |
 | Memory & Context Poisoning | ASI06 | N/A | None |
 | Insecure Inter-Agent Comms | ASI07 | N/A | None |
 | Cascading Failures | ASI08 | Mitigated | None |
@@ -176,7 +165,7 @@ This is a planned future enhancement.
 
 ## Future Mitigations (Planned)
 
-1. **PreToolUse hook for Bash validation** — Programmatic command blocklist before Worker-1 executes shell commands (addresses ASI02 and ASI05)
-2. **Task input sanitization** — Content filter before task descriptions reach agents (addresses ASI01)
-3. **Agent prompt integrity checks** — Checksum verification of `.agent.md` files at spawn time (addresses ASI04 and ASI10)
-4. **Per-agent environment sandboxing** — Scoped credentials per agent role (addresses ASI03, requires SDK support)
+1. **Task input sanitization** — Content filter before task descriptions reach agents (addresses ASI01)
+2. **Agent prompt integrity checks** — Checksum verification of `.agent.md` files at spawn time (addresses ASI04 and ASI10)
+3. **Per-agent environment sandboxing** — Scoped credentials per agent role (addresses ASI03, requires SDK support)
+4. **Codex pre-tool hook parity** — Replace post-detection stream aborts if the Codex SDK later exposes true hook callbacks.

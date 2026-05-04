@@ -26,6 +26,16 @@ import { parseFrontmatter } from './spawner/frontmatter-parser.js';
 import { createAgentSession, normalizeAgentRuntime, normalizeProviderModel, validateAgentRuntime } from './agent-runtime/index.js';
 import type { AgentRuntimeConfig, AgentSession, EffortLevel } from './agent-runtime/index.js';
 import { randomUUID } from 'node:crypto';
+import {
+  auditProjectChanges,
+  formatGuardrailReport,
+  GuardrailViolationError,
+  hasBlockingFindings,
+  normalizeGuardrails,
+  type GuardrailReport,
+  type GuardrailRuntimeConfig,
+} from './guardrails.js';
+import { normalizeRuntimeError } from './runtime-errors.js';
 
 export type { AgentAuthMode, AgentProvider, AgentRuntimeConfig, EffortLevel } from './agent-runtime/index.js';
 
@@ -66,6 +76,7 @@ export interface FeedbackPayload {
   sourceAgent?: string;
   highlightTerms?: string[];
   detail?: string;
+  metadata?: Record<string, unknown>;
 }
 // Agent config defaults are read from YAML frontmatter in agent .md files.
 // These fallbacks are used when frontmatter is missing a field.
@@ -107,7 +118,8 @@ export function parseSecurityVerdict(text: string): ParsedVerdict<SecurityVerdic
 }
 
 export function parseReviewVerdict(text: string): ParsedVerdict<ReviewVerdict> {
-  const trimmed = text.trimStart();
+  const stripped = text.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
+  const trimmed = stripped.trimStart();
   const upper = trimmed.toUpperCase();
 
   // Check explicit prefix first
@@ -183,6 +195,26 @@ export function parseVerifyVerdict(text: string): ParsedVerdict<VerifyVerdict> {
 
 const MAX_VERIFY_PASSES = 2;
 
+// --- Requirements post-processor ---
+
+/**
+ * Two-step strip applied to the raw output of the requirements-extraction agent.
+ * Step 1 removes any <thinking>...</thinking> blocks the model may have emitted
+ * literally (covers providers not trained on the convention). Step 2 strips
+ * anything before the first numbered-list line, so preamble prose like
+ * "Here are the requirements:" never reaches the user-approval modal.
+ *
+ * Order matters: step 1 must run before step 2 because a leaked <thinking>
+ * block containing its own numbered list would otherwise anchor step 2's
+ * lookahead and survive into the output.
+ */
+export function postProcessRequirements(raw: string): string {
+  const trimmed = raw.trim();
+  const noThinking = trimmed.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
+  const stripped = noThinking.replace(/^[\s\S]*?(?=^\d+\.)/m, '');
+  return stripped.trim();
+}
+
 // --- Pipeline Orchestrator Config ---
 
 export interface PipelineOrchestraConfig {
@@ -205,6 +237,24 @@ export interface PipelineOrchestraConfig {
   limits?: Partial<LoopLimits>;
   /** Skip requirements extraction (useful for testing) */
   skipRequirements?: boolean;
+  /** Provider-neutral guardrail policy and Codex stream detection controls */
+  guardrails?: Partial<GuardrailRuntimeConfig>;
+  /** Future structured-output rollout controls */
+  contracts?: {
+    mode?: 'phased-fallback' | 'strict' | 'observe';
+    validationRetries?: number;
+  };
+  /** Future complex-review routing controls */
+  review?: {
+    complexFileThreshold?: number;
+    complexDiffLineThreshold?: number;
+    maxFilesPerBatch?: number;
+  };
+  /** Future provider retry and recovery controls */
+  recovery?: {
+    maxProviderRetries?: number;
+    initialBackoffMs?: number;
+  };
 }
 
 const DEFAULT_PIPELINE_CONFIG = {
@@ -241,6 +291,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   private readonly efforts: Record<Role, EffortLevel>;
   private readonly disallowedTools: Record<Role, string[]>;
   private readonly maxTurnsPerRole: Record<Role, number>;
+  private readonly guardrails: GuardrailRuntimeConfig;
   private readonly teams: Map<string, PipelineTeamContext> = new Map();
   private shuttingDown = false;
   private prPollInterval: ReturnType<typeof setInterval> | null = null;
@@ -255,6 +306,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     this.config = { ...DEFAULT_PIPELINE_CONFIG, ...cleanConfig } as PipelineOrchestraConfig & typeof DEFAULT_PIPELINE_CONFIG;
     this.agentRuntime = normalizeAgentRuntime(config.agentRuntime);
     validateAgentRuntime(this.agentRuntime);
+    this.guardrails = normalizeGuardrails(config.guardrails);
 
     this.persistence = new StatePersistence();
     this.registry = new Registry(this.config.registryPath);
@@ -469,6 +521,28 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       const requirements = await this.extractRequirements(ctx.state.snapshot.projectPath, task, images);
 
       if (requirements) {
+        // Short-circuit: extraction emitted only a clarification-flagging line —
+        // task is too vague to proceed. Bail before user-approval and Worker-2 to
+        // avoid the "user clicks Approve, Worker-2 finds no implementation, pipeline
+        // loops to revision limit" footgun.
+        // Pattern is intentionally narrow: anchored to start, single numbered item,
+        // "Clarify" first word — won't false-fire on a real multi-item list that
+        // happens to use "Clarify" in a later item.
+        const clarificationOnly =
+          /^1\.\s+Clarify\b[^\n]*$/m.test(requirements) && !/^2\./m.test(requirements);
+        if (clarificationOnly) {
+          this.notifyUser(
+            teamId,
+            'warning',
+            'Task too vague',
+            'Requirements extraction could not derive a verifiable requirement from the task description. ' +
+              'Please reassign the task with more specific outcome criteria.'
+          );
+          ctx.pipelineRunning = false;
+          // Stay in PreWork awaiting a new task.
+          return;
+        }
+
         // Show requirements for user approval
         const response = await this.askUser(
           teamId,
@@ -889,6 +963,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
         ? this.disallowedTools[role]
         : undefined,
       maxTurns: this.maxTurnsPerRole[role],
+      guardrails: this.guardrails,
       onProgress,
     });
   }
@@ -923,6 +998,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       const result = await worker.send(fullPrompt, images);
       const simpleDisplay = result.trim() || worker.lastActivityLog || '(no text output)';
       this.emit('agent-output', teamId, 'Worker-1' as any, simpleDisplay);
+      this.runGuardrailAudit(teamId, ctx, 'simple-work');
 
       // Done — keep session alive for Q&A
       this.completePipeline(teamId, ctx, startTime);
@@ -1015,6 +1091,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
             );
             const simpleDisplay = simpleResult.trim() || worker1.lastActivityLog || '(no text output)';
             this.emit('agent-output', teamId, 'Worker-1' as any, simpleDisplay);
+            this.runGuardrailAudit(teamId, ctx, 'simple-work-reclassified');
 
             this.completePipeline(teamId, ctx, startTime);
             return;
@@ -1130,6 +1207,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
             workerResults = { w1: currentW1Result, w2: w2Result };
           }
 
+          this.runGuardrailAudit(teamId, ctx, 'work-phase');
+
           // Auto-commit after work phase (safety checkpoint)
           GitOps.commit(cwd, 'WIP: work phase complete');
 
@@ -1172,6 +1251,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
             // APPROVED or FLAGGED — proceed to review
             // Auto-commit after security sweep passes (safety checkpoint)
+            this.runGuardrailAudit(teamId, ctx, 'security-sweep');
             GitOps.commit(cwd, 'WIP: security sweep passed');
           }
 
@@ -1248,6 +1328,51 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     }
   }
 
+  // --- Private: Guardrails ---
+
+  private runGuardrailAudit(teamId: string, ctx: PipelineTeamContext, phase: string): GuardrailReport {
+    if (!this.guardrails.enabled) {
+      return {
+        ok: true,
+        phase,
+        checkedAt: new Date().toISOString(),
+        findings: [],
+      };
+    }
+
+    const report = auditProjectChanges(ctx.state.snapshot.projectPath, phase);
+    ctx.state.recordGuardrailReport({
+      phase: report.phase,
+      ok: report.ok,
+      checkedAt: report.checkedAt,
+      findingCount: report.findings.length,
+      blockingCount: report.findings.filter(finding => finding.severity === 'block').length,
+      warningCount: report.findings.filter(finding => finding.severity === 'warn').length,
+    });
+    this.persistence.persist(ctx.state);
+
+    if (report.findings.length > 0) {
+      this.notifyUser(
+        teamId,
+        'warning',
+        report.ok ? 'Guardrail Audit Warning' : 'Guardrail Audit Blocked',
+        report.ok
+          ? 'Guardrail audit found risky changes; the pipeline is continuing with a warning.'
+          : 'Guardrail audit found blocked changes; the pipeline is stopping before commit.',
+        'Pipeline',
+        ['guardrail', 'secret', 'protected', 'dependency', 'config'],
+        formatGuardrailReport(report),
+        { guardrailReport: report },
+      );
+    }
+
+    if (hasBlockingFindings(report)) {
+      throw new GuardrailViolationError('Guardrail audit blocked the pipeline before committing changes.', report);
+    }
+
+    return report;
+  }
+
   // --- Feedback ---
 
   /** Non-blocking: fire-and-forget notification to the dashboard */
@@ -1258,7 +1383,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     message: string,
     sourceAgent?: string,
     highlightTerms?: string[],
-    detail?: string
+    detail?: string,
+    metadata?: Record<string, unknown>
   ): void {
     this.emit('feedback', teamId, {
       id: randomUUID(),
@@ -1270,6 +1396,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       sourceAgent,
       highlightTerms,
       detail,
+      metadata,
     });
   }
 
@@ -1366,6 +1493,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     // Auto-commit any remaining changes before marking done
     const cwd = ctx.state.snapshot.projectPath;
     const task = ctx.state.snapshot.currentTask?.description ?? teamId;
+    this.runGuardrailAudit(teamId, ctx, 'pipeline-complete');
     GitOps.commit(cwd, task.substring(0, 72));
 
     const fromPhase = ctx.state.currentPhase;
@@ -1382,10 +1510,18 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   private failPipeline(teamId: string, ctx: PipelineTeamContext, err: any, startTime: number): void {
     if (this.shuttingDown) return;
 
-    const error = err instanceof Error ? err : new Error(String(err));
+    const error = normalizeRuntimeError(err, {
+      provider: this.agentRuntime.provider,
+      phase: ctx.state.currentPhase,
+    });
+    ctx.state.recordRuntimeError(error.data);
     this.emit('error', teamId, error);
     this.notifyUser(teamId, 'warning', 'Pipeline Failed',
-      `Error: ${error.message}`);
+      `Error: ${error.message}`,
+      undefined,
+      undefined,
+      JSON.stringify(error.data, null, 2),
+      { runtimeError: error.data });
 
     const fromPhase = ctx.state.currentPhase;
     this.tryTransitionPhase(ctx.state, teamId, fromPhase, TeamPhase.Errored, `pipeline error: ${error.message}`);
@@ -1420,25 +1556,20 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     taskDescription: string,
     images?: Array<{ media_type: string; data: string }>
   ): Promise<string> {
-    const systemPrompt =
-      'You are a requirements analyst. Extract explicit requirements from the user\'s task description ' +
-      'as a numbered checklist. Each requirement should be a specific, verifiable outcome the user asked for. ' +
-      'Do NOT add requirements the user didn\'t ask for. Do NOT add code quality, testing, or best practice ' +
-      'requirements unless the user explicitly mentioned them.\n\n' +
-      'Format:\n1. [Requirement description]\n2. [Requirement description]\n...\n\n' +
-      'Be concise. Extract only what the user explicitly wants built.';
+    const systemPrompt = this.loadRolePrompt('requirements.agent.md');
 
     const session = createAgentSession('Requirements', systemPrompt, {
       runtime: this.agentRuntime,
       model: this.getModelForRole(Role.Worker),
       cwd,
-      effort: 'low',
+      effort: 'medium',
       maxTurns: 1,
+      guardrails: this.guardrails,
     });
 
     try {
       const result = await session.send(taskDescription, images);
-      return result.trim();
+      return postProcessRequirements(result);
     } finally {
       session.close();
     }

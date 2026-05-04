@@ -33,7 +33,7 @@ Claude uses `ClaudeAgentSession`, which wraps the Claude Agent SDK `query()` API
 - A `PromptChannel` async iterable bridges `send()` calls into the SDK stream.
 - `systemPrompt` is passed directly from the role prompt file.
 - `allowedTools`, `disallowedTools`, `maxTurns`, and `effort` are sent as SDK options.
-- Governance hooks are attached for path traversal blocking and TypeScript checking.
+- Governance hooks are attached for shared guardrail policy checks and TypeScript checking.
 
 ### Codex Runtime
 
@@ -42,15 +42,15 @@ Codex uses `CodexAgentSession`, which wraps the Codex SDK/CLI thread API:
 - The first `send()` starts a Codex thread.
 - The role prompt is prepended to the first user message.
 - Later `send()` calls reuse the thread.
-- Streamed Codex items are normalized into progress text.
+- Streamed Codex items are normalized into progress text and monitored for guardrail violations.
 - Image inputs are written under `.claude-orchestra/codex-images/` and passed as local image inputs.
 - `disallowedTools` selects a read-only sandbox for review-style roles.
 
 Provider parity notes:
 
-- Claude supports SDK hook callbacks, so path traversal checks and post-edit TypeScript checks run through `buildGovernanceHooks()`.
-- Codex currently relies on sandbox mode, disabled network access, and `approvalPolicy: "never"`; it does not yet run the same hook callbacks.
-- `maxTurns` is passed to Claude. Codex turn limiting is not currently enforced by the adapter.
+- Claude supports SDK hook callbacks, so shared path/command guardrails and post-edit TypeScript checks run through `buildGovernanceHooks()`.
+- Codex does not expose equivalent pre-tool hook callbacks in the installed SDK. It relies on sandbox mode, disabled network access, `approvalPolicy: "never"`, streamed command/file monitoring with abort-on-detection, and orchestrator post-phase audits.
+- `maxTurns` is passed to Claude and enforced by the Codex adapter with local turn counting.
 
 ---
 

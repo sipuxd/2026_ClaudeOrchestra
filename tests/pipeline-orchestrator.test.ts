@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
+import { execSync } from 'node:child_process';
 import { TeamPhase } from '../src/state/team-state.js';
 import { Role } from '../src/roles/role-types.js';
 
@@ -139,7 +140,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => {
 });
 
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
-import { PipelineOrchestrator, parseSecurityVerdict, parseReviewVerdict, parseVerifyVerdict, parseClassification } from '../src/pipeline-orchestrator.js';
+import { PipelineOrchestrator, parseSecurityVerdict, parseReviewVerdict, parseVerifyVerdict, parseClassification, postProcessRequirements } from '../src/pipeline-orchestrator.js';
 
 const GUARDED_ENV_KEYS = [
   'CLAUDE_CODE_USE_BEDROCK',
@@ -151,6 +152,16 @@ const GUARDED_ENV_KEYS = [
   'OPENAI_API_KEY',
   'OPENAI_AUTH_TOKEN',
 ];
+
+function initGitProject(dir: string): void {
+  execSync('git init', { cwd: dir, stdio: 'pipe' });
+  execSync('git config user.email "test@test.com"', { cwd: dir, stdio: 'pipe' });
+  execSync('git config user.name "Test"', { cwd: dir, stdio: 'pipe' });
+  fs.writeFileSync(path.join(dir, 'README.md'), 'initial\n');
+  execSync('git add README.md', { cwd: dir, stdio: 'pipe' });
+  execSync('git commit -m initial', { cwd: dir, stdio: 'pipe' });
+  execSync('git branch -M main', { cwd: dir, stdio: 'pipe' });
+}
 
 describe('PipelineOrchestrator', () => {
   let tmpDir: string;
@@ -315,6 +326,56 @@ describe('PipelineOrchestrator', () => {
       const result = parseReviewVerdict('The code looks good overall');
       expect(result.verdict).toBe('APPROVED');
     });
+
+    // Regression fixtures for the <thinking>-strip prerequisite.
+    // Without the strip at the top of parseReviewVerdict, each of these returns
+    // the wrong verdict (silent flip toward less-severe). With the strip, the
+    // explicit prefix check sees the post-thinking content and returns correctly.
+    it('parses REVISION_NEEDED through a leaked <thinking> block containing approve language', () => {
+      const result = parseReviewVerdict('<thinking>looks good</thinking>\n\nREVISION_NEEDED — missing test');
+      expect(result.verdict).toBe('REVISION_NEEDED');
+    });
+
+    it('parses REJECTED through a leaked <thinking> block containing approve-implying reasoning', () => {
+      const result = parseReviewVerdict(
+        '<thinking>The implementation looks good but the error path has a bug</thinking>\n\nREJECTED — error path crashes on null input'
+      );
+      expect(result.verdict).toBe('REJECTED');
+    });
+
+    it('parses APPROVED through a leaked <thinking> block containing revision-implying reasoning', () => {
+      const result = parseReviewVerdict(
+        '<thinking>code is well-implemented but missing tests would normally need revision</thinking>\n\nAPPROVED — tests cover the same paths via consumers'
+      );
+      expect(result.verdict).toBe('APPROVED');
+    });
+  });
+
+  describe('postProcessRequirements', () => {
+    it('passes through a clean numbered list unchanged', () => {
+      const input = '1. Add a button\n2. Add a test';
+      expect(postProcessRequirements(input)).toBe('1. Add a button\n2. Add a test');
+    });
+
+    it('strips a leaked <thinking> block before a numbered list', () => {
+      const input = '<thinking>reasoning text</thinking>\n\n1. Add a button\n2. Add a test';
+      expect(postProcessRequirements(input)).toBe('1. Add a button\n2. Add a test');
+    });
+
+    it('strips a leaked <thinking> block whose content contains its own numbered list', () => {
+      // Without the two-step strip (thinking first, then prefix-to-numbered-line),
+      // the lookahead in step 2 would anchor on "1. fake consideration" inside
+      // the thinking block and leave its content in the output.
+      const input = '<thinking>I considered:\n1. fake consideration\n2. another fake</thinking>\n\n1. real requirement';
+      expect(postProcessRequirements(input)).toBe('1. real requirement');
+    });
+
+    it('passes non-numbered prose through unchanged', () => {
+      // No <thinking> to strip; no ^\d+\. anchor for step 2 to find — the
+      // function returns the trimmed input as-is so runWithRequirements's
+      // truthy check still fires (existing behavior preserved).
+      expect(postProcessRequirements('No requirements found')).toBe('No requirements found');
+    });
   });
 
   // --- Simple pipeline ---
@@ -385,6 +446,34 @@ describe('PipelineOrchestrator', () => {
       const workerSession = mock.getSession(0);
       expect(workerSession.options.permissionMode).toBe('bypassPermissions');
       expect(workerSession.options.allowDangerouslySkipPermissions).toBe(true);
+    });
+
+    it('blocks secret-like changed files before simple pipeline completion', async () => {
+      initGitProject(projectDir);
+      const errorPromise = new Promise<Error>((resolve) => {
+        orchestrator.on('error', (_teamId, error) => resolve(error));
+      });
+
+      orchestrator.createTeam('guarded-simple', projectDir);
+      orchestrator.assignTask('guarded-simple', 'fix a typo');
+
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      const workerSession = mock.getSession(0);
+      fs.writeFileSync(
+        path.join(projectDir, 'new-secret.txt'),
+        'api_key = "sk-proj-abcdefghijklmnopqrstuvwxyz"\n',
+        'utf-8',
+      );
+      workerSession.respond('Done.');
+      workerSession.complete();
+
+      const error = await errorPromise;
+      const status = orchestrator.getTeamStatus('guarded-simple');
+
+      expect(error.message).toContain('Guardrail audit blocked');
+      expect(status?.currentPhase).toBe(TeamPhase.Errored);
+      expect((status?.enforcement?.lastError as any)?.category).toBe('guardrail');
     });
   });
 

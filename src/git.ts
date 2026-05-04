@@ -12,16 +12,16 @@
 //
 //   Legacy: pushAndMerge() — @deprecated, kept for backward compatibility.
 
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 
 export interface GitResult {
   success: boolean;
   output: string;
 }
 
-function git(projectPath: string, args: string): GitResult {
+function git(projectPath: string, args: string[]): GitResult {
   try {
-    const output = execSync(`git ${args}`, {
+    const output = execFileSync('git', args, {
       cwd: projectPath,
       encoding: 'utf-8',
       timeout: 30_000,
@@ -41,7 +41,7 @@ export class GitOps {
    * Check if the project has uncommitted changes (staged or unstaged).
    */
   static hasChanges(projectPath: string): boolean {
-    const result = git(projectPath, 'status --porcelain');
+    const result = git(projectPath, ['status', '--porcelain']);
     return result.success && result.output.length > 0;
   }
 
@@ -49,7 +49,7 @@ export class GitOps {
    * Get the current branch name.
    */
   static currentBranch(projectPath: string): string {
-    const result = git(projectPath, 'rev-parse --abbrev-ref HEAD');
+    const result = git(projectPath, ['rev-parse', '--abbrev-ref', 'HEAD']);
     return result.success ? result.output : 'unknown';
   }
 
@@ -58,7 +58,7 @@ export class GitOps {
    * Uses three-dot form to show only changes on the current branch.
    */
   static diff(projectPath: string, base: string = 'main'): GitResult {
-    return git(projectPath, `diff ${base}...HEAD`);
+    return git(projectPath, ['diff', `${base}...HEAD`]);
   }
 
   /**
@@ -72,13 +72,13 @@ export class GitOps {
     }
 
     // Stage all changes
-    const addResult = git(projectPath, 'add -A');
+    const addResult = git(projectPath, ['add', '-A']);
     if (!addResult.success) {
       return addResult;
     }
 
     // Commit
-    return git(projectPath, `commit -m "${message.replace(/"/g, '\\"')}"`);
+    return git(projectPath, ['commit', '-m', message]);
   }
 
   // --- User-initiated (dashboard/CLI) ---
@@ -87,21 +87,21 @@ export class GitOps {
    * Push current branch to remote.
    */
   static push(projectPath: string, branch: string): GitResult {
-    return git(projectPath, `push origin ${branch}`);
+    return git(projectPath, ['push', 'origin', branch]);
   }
 
   /**
    * Checkout a branch.
    */
   static checkout(projectPath: string, branch: string): GitResult {
-    return git(projectPath, `checkout ${branch}`);
+    return git(projectPath, ['checkout', branch]);
   }
 
   /**
    * Merge source branch into the current branch.
    */
   static merge(projectPath: string, source: string): GitResult {
-    return git(projectPath, `merge ${source}`);
+    return git(projectPath, ['merge', source]);
   }
 
   // --- Branch & PR operations ---
@@ -126,19 +126,19 @@ export class GitOps {
    */
   static createTeamBranch(projectPath: string, branchName: string): GitResult & { branchName: string } {
     // Start from main
-    const checkoutMain = git(projectPath, 'checkout main');
+    const checkoutMain = git(projectPath, ['checkout', 'main']);
     if (!checkoutMain.success) {
       return { ...checkoutMain, branchName };
     }
 
     // Pull latest (best-effort — may fail if no remote)
-    git(projectPath, 'pull origin main');
+    git(projectPath, ['pull', 'origin', 'main']);
 
     // Try the branch name, append suffix on collision
     let finalName = branchName;
     for (let i = 0; i < 10; i++) {
       const candidate = i === 0 ? branchName : `${branchName}-${i + 1}`;
-      const exists = git(projectPath, `rev-parse --verify ${candidate}`);
+      const exists = git(projectPath, ['rev-parse', '--verify', candidate]);
       if (!exists.success) {
         finalName = candidate;
         break;
@@ -148,15 +148,15 @@ export class GitOps {
       }
     }
 
-    const create = git(projectPath, `checkout -b ${finalName}`);
+    const create = git(projectPath, ['checkout', '-b', finalName]);
     if (!create.success) {
       // Return to main on failure
-      git(projectPath, 'checkout main');
+      git(projectPath, ['checkout', 'main']);
       return { ...create, branchName: finalName };
     }
 
     // Best-effort push to set up tracking
-    git(projectPath, `push -u origin ${finalName}`);
+    git(projectPath, ['push', '-u', 'origin', finalName]);
 
     return { success: true, output: `Created branch ${finalName}`, branchName: finalName };
   }
@@ -168,7 +168,7 @@ export class GitOps {
   static isGhAvailable(): boolean {
     if (GitOps.ghAvailable === null) {
       try {
-        execSync('gh --version', { stdio: 'pipe', timeout: 5_000 });
+        execFileSync('gh', ['--version'], { stdio: 'pipe', timeout: 5_000 });
         GitOps.ghAvailable = true;
       } catch {
         GitOps.ghAvailable = false;
@@ -195,17 +195,16 @@ export class GitOps {
     }
 
     // Push branch to remote
-    const push = git(projectPath, `push -u origin ${branchName}`);
+    const push = git(projectPath, ['push', '-u', 'origin', branchName]);
     if (!push.success) {
       return { ...push };
     }
 
     // Create PR via gh
-    const safeTitle = title.replace(/"/g, '\\"');
-    const safeBody = body.replace(/"/g, '\\"');
     try {
-      const output = execSync(
-        `gh pr create --base main --head "${branchName}" --title "${safeTitle}" --body "${safeBody}"`,
+      const output = execFileSync(
+        'gh',
+        ['pr', 'create', '--base', 'main', '--head', branchName, '--title', title, '--body', body],
         { cwd: projectPath, encoding: 'utf-8', timeout: 30_000, stdio: ['pipe', 'pipe', 'pipe'] }
       );
       // gh pr create outputs the PR URL
@@ -226,8 +225,9 @@ export class GitOps {
   static checkPrState(projectPath: string, prNumber: number): { state: string; merged: boolean } | null {
     if (!GitOps.isGhAvailable()) return null;
     try {
-      const output = execSync(
-        `gh pr view ${prNumber} --json state,merged`,
+      const output = execFileSync(
+        'gh',
+        ['pr', 'view', String(prNumber), '--json', 'state,merged'],
         { cwd: projectPath, encoding: 'utf-8', timeout: 15_000, stdio: ['pipe', 'pipe', 'pipe'] }
       );
       const data = JSON.parse(output.trim());
@@ -241,7 +241,7 @@ export class GitOps {
    * Delete a local branch (safe delete — must be fully merged).
    */
   static deleteLocalBranch(projectPath: string, branchName: string): GitResult {
-    return git(projectPath, `branch -d ${branchName}`);
+    return git(projectPath, ['branch', '-d', branchName]);
   }
 
   // --- Legacy ---
@@ -264,46 +264,46 @@ export class GitOps {
     const outputs: string[] = [];
 
     // Step 1: Push dev
-    const pushDev = git(projectPath, `push origin ${devBranch}`);
+    const pushDev = git(projectPath, ['push', 'origin', devBranch]);
     outputs.push(`[push ${devBranch}] ${pushDev.output}`);
     if (!pushDev.success) {
       return { success: false, output: outputs.join('\n') };
     }
 
     // Step 2: Checkout main, pull latest, and merge dev
-    const checkoutMain = git(projectPath, 'checkout main');
+    const checkoutMain = git(projectPath, ['checkout', 'main']);
     outputs.push(`[checkout main] ${checkoutMain.output}`);
     if (!checkoutMain.success) {
       return { success: false, output: outputs.join('\n') };
     }
 
-    const pullMain = git(projectPath, 'pull origin main');
+    const pullMain = git(projectPath, ['pull', 'origin', 'main']);
     outputs.push(`[pull main] ${pullMain.output}`);
     if (!pullMain.success) {
-      git(projectPath, `checkout ${devBranch}`);
+      git(projectPath, ['checkout', devBranch]);
       return { success: false, output: outputs.join('\n') };
     }
 
-    const mergeDev = git(projectPath, `merge ${devBranch}`);
+    const mergeDev = git(projectPath, ['merge', devBranch]);
     outputs.push(`[merge ${devBranch}] ${mergeDev.output}`);
     if (!mergeDev.success) {
       // Abort merge and return to dev on failure
-      git(projectPath, 'merge --abort');
-      git(projectPath, `checkout ${devBranch}`);
+      git(projectPath, ['merge', '--abort']);
+      git(projectPath, ['checkout', devBranch]);
       return { success: false, output: outputs.join('\n') };
     }
 
     // Step 3: Push main
-    const pushMain = git(projectPath, 'push origin main');
+    const pushMain = git(projectPath, ['push', 'origin', 'main']);
     outputs.push(`[push main] ${pushMain.output}`);
     if (!pushMain.success) {
       // Return to dev even if push fails
-      git(projectPath, `checkout ${devBranch}`);
+      git(projectPath, ['checkout', devBranch]);
       return { success: false, output: outputs.join('\n') };
     }
 
     // Step 4: Return to dev
-    const checkoutDev = git(projectPath, `checkout ${devBranch}`);
+    const checkoutDev = git(projectPath, ['checkout', devBranch]);
     outputs.push(`[checkout ${devBranch}] ${checkoutDev.output}`);
 
     return { success: checkoutDev.success, output: outputs.join('\n') };

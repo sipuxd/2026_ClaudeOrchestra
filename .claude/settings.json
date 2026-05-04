@@ -50,7 +50,12 @@
       "Bash(curl -s -N http://localhost:3460/events)",
       "Bash(kill %1)",
       "WebFetch(domain:localhost)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(pdfinfo \"/Users/josephsip/Documents/__ClaudeOrchestra/2026_ClaudeOrchestra/Claude+Certified+Architect+–+Foundations+Certification+Exam+Guide.pdf\")",
+      "Bash(mdls -name kMDItemNumberOfPages \"/Users/josephsip/Documents/__ClaudeOrchestra/2026_ClaudeOrchestra/Claude+Certified+Architect+–+Foundations+Certification+Exam+Guide.pdf\")",
+      "Bash(python3 -c ' *)",
+      "Bash(brew install *)",
+      "Read(//opt/homebrew/Cellar/poppler/26.04.0/bin/**)"
     ],
     "additionalDirectories": [
       "/Users/josephsip/Documents/__ClaudeOrchestra/2026_ClaudeOrchestra/src/spawner",

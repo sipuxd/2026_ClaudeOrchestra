@@ -55,6 +55,20 @@ export interface LoopLimits {
   maxTotalBackwardTransitions: number;
 }
 
+export interface EnforcementReportSummary {
+  phase: string;
+  ok: boolean;
+  checkedAt: string;
+  findingCount: number;
+  blockingCount: number;
+  warningCount: number;
+}
+
+export interface EnforcementState {
+  guardrailReports: EnforcementReportSummary[];
+  lastError?: unknown;
+}
+
 export const DEFAULT_LOOP_LIMITS: LoopLimits = {
   maxRevisions: 3,
   maxRejections: 2,
@@ -76,6 +90,7 @@ export interface TeamStateData {
   branchName?: string;
   prNumber?: number;
   prUrl?: string;
+  enforcement?: EnforcementState;
 }
 
 // --- Transition errors ---
@@ -357,6 +372,19 @@ export class TeamState {
       throw new TransitionError('Cannot set requirements: no task assigned');
     }
     this.data.currentTask.requirements = requirements;
+    this.touch();
+  }
+
+  recordGuardrailReport(report: EnforcementReportSummary): void {
+    this.data.enforcement ??= { guardrailReports: [] };
+    this.data.enforcement.guardrailReports.push(report);
+    this.data.enforcement.guardrailReports = this.data.enforcement.guardrailReports.slice(-20);
+    this.touch();
+  }
+
+  recordRuntimeError(error: unknown): void {
+    this.data.enforcement ??= { guardrailReports: [] };
+    this.data.enforcement.lastError = error;
     this.touch();
   }
 

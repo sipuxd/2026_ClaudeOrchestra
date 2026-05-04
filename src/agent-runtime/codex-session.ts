@@ -3,6 +3,13 @@ import * as path from 'node:path';
 import { buildCodexSubscriptionEnv, normalizeProviderModel } from './auth.js';
 import { toCodexReasoningEffort } from './effort.js';
 import type { AgentInputImage, AgentSession, AgentSessionOptions } from './types.js';
+import {
+  evaluateCodexStreamItem,
+  formatGuardrailReport,
+  GuardrailViolationError,
+  hasBlockingFindings,
+  type GuardrailReport,
+} from '../guardrails.js';
 
 type CodexInput = string | Array<{ type: 'text'; text: string } | { type: 'local_image'; path: string }>;
 
@@ -17,6 +24,8 @@ export class CodexAgentSession implements AgentSession {
   private accumulated = '';
   private activityLog = '';
   private _closed = false;
+  private turnCount = 0;
+  private readonly monitoredStreamKeys = new Set<string>();
 
   constructor(name: string, systemPrompt: string, opts: AgentSessionOptions) {
     this.name = name;
@@ -36,9 +45,13 @@ export class CodexAgentSession implements AgentSession {
     if (this._closed) {
       throw new Error(`AgentSession "${this.name}" is closed`);
     }
+    if (this.opts.maxTurns !== undefined && this.turnCount >= this.opts.maxTurns) {
+      throw new Error(`Codex maxTurns exceeded for "${this.name}" (${this.opts.maxTurns})`);
+    }
 
     await this.ensureThread();
 
+    this.turnCount++;
     this.accumulated = '';
     this.activityLog = '';
     this.abortController = new AbortController();
@@ -50,6 +63,10 @@ export class CodexAgentSession implements AgentSession {
       });
 
       for await (const event of events) {
+        if (event.type === 'item.started' || event.type === 'item.completed' || event.type === 'item.updated') {
+          this.enforceStreamGuardrails(event.item);
+        }
+
         if (event.type === 'item.completed' || event.type === 'item.updated') {
           if (event.item?.type === 'agent_message') {
             this.accumulated = event.item.text ?? this.accumulated;
@@ -133,6 +150,40 @@ export class CodexAgentSession implements AgentSession {
       input.push({ type: 'local_image', path: imagePath });
     });
     return input;
+  }
+
+  private enforceStreamGuardrails(item: unknown): void {
+    if (this.opts.guardrails?.enabled === false) return;
+    if (!item || typeof item !== 'object') return;
+
+    const typed = item as Record<string, unknown>;
+    const id = String(typed.id ?? '');
+    const status = String(typed.status ?? '');
+    const key = `${id}:${String(typed.type ?? '')}:${status}`;
+    if (id && this.monitoredStreamKeys.has(key)) return;
+    if (id) this.monitoredStreamKeys.add(key);
+
+    const findings = evaluateCodexStreamItem(item);
+    if (findings.length === 0) return;
+
+    const report: GuardrailReport = {
+      ok: !findings.some(finding => finding.severity === 'block'),
+      phase: `codex-stream:${this.name}`,
+      checkedAt: new Date().toISOString(),
+      findings,
+    };
+
+    const detail = `Guardrail post-detection:\n${formatGuardrailReport(report)}`;
+    this.activityLog += (this.activityLog ? '\n' : '') + detail;
+    this.opts.onProgress?.(this.activityLog);
+
+    if (
+      hasBlockingFindings(report) &&
+      this.opts.guardrails?.abortCodexOnForbiddenStreamEvent !== false
+    ) {
+      this.abortController?.abort();
+      throw new GuardrailViolationError('Codex stream guardrail blocked the turn after detecting a forbidden event.', report);
+    }
   }
 }
 

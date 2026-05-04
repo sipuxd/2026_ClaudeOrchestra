@@ -1,3 +1,5 @@
+import type { GuardrailRuntimeConfig } from '../guardrails.js';
+
 export type AgentProvider = 'claude' | 'codex';
 export type AgentAuthMode = 'subscription';
 export type ClaudeEffortLevel = 'low' | 'medium' | 'high' | 'max';
@@ -26,6 +28,7 @@ export interface AgentSessionOptions {
   effort: EffortLevel;
   disallowedTools?: string[];
   maxTurns?: number;
+  guardrails?: GuardrailRuntimeConfig;
   onProgress?: (accumulated: string) => void;
 }
 

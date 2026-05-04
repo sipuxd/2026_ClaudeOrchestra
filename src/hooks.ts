@@ -11,9 +11,17 @@ import type {
   PreToolUseHookInput,
   PostToolUseHookInput,
 } from '@anthropic-ai/claude-agent-sdk';
+import {
+  evaluateCommand,
+  evaluatePathAccess,
+  formatGuardrailReport,
+  hasBlockingFindings,
+  type GuardrailRuntimeConfig,
+  type GuardrailReport,
+} from './guardrails.js';
 
 /**
- * PreToolUse hook: blocks file paths containing ".." to prevent traversal.
+ * PreToolUse hook: applies the shared guardrail policy before Claude tool use.
  */
 export async function blockTraversal(
   input: HookInput,
@@ -23,14 +31,24 @@ export async function blockTraversal(
   const pi = input as PreToolUseHookInput;
   const toolInput = pi.tool_input as Record<string, unknown> | undefined;
   const filePath = (toolInput?.file_path ?? toolInput?.path ?? '') as string;
+  const command = (toolInput?.command ?? '') as string;
+  const findings = [
+    ...evaluatePathAccess(filePath),
+    ...(pi.tool_name === 'Bash' ? evaluateCommand(command) : []),
+  ];
+  const report: GuardrailReport = {
+    ok: !findings.some(finding => finding.severity === 'block'),
+    phase: 'claude-pre-tool-use',
+    checkedAt: new Date().toISOString(),
+    findings,
+  };
 
-  if (filePath.includes('..')) {
+  if (hasBlockingFindings(report)) {
     return {
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
         permissionDecision: 'deny',
-        permissionDecisionReason:
-          `Blocked: ".." is not allowed in file paths. Remove ".." from "${filePath}" and try again.`,
+        permissionDecisionReason: formatGuardrailReport(report),
       },
     };
   }
@@ -78,11 +96,14 @@ export function makeTypeCheckHook(cwd: string) {
  */
 export function buildGovernanceHooks(
   cwd: string,
+  guardrails?: GuardrailRuntimeConfig,
 ): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
+  if (guardrails?.enabled === false) return {};
+
   return {
     PreToolUse: [
       {
-        matcher: 'Read|Edit|Write',
+        matcher: 'Read|Edit|Write|Bash',
         hooks: [blockTraversal],
         timeout: 5,
       },

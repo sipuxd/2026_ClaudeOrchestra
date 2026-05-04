@@ -97,7 +97,7 @@ export class ClaudeAgentSession implements AgentSession {
         allowDangerouslySkipPermissions: true,
         persistSession: false,
         env: buildClaudeSubscriptionEnv(),
-        hooks: buildGovernanceHooks(opts.cwd),
+        hooks: buildGovernanceHooks(opts.cwd, opts.guardrails),
       } as any,
     });
 

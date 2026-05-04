@@ -139,6 +139,7 @@ When a PR is detected as merged:
 | Revision loop limit | 3 | Configurable |
 | Rejection loop limit | 2 | Configurable |
 | Total backward transitions | 5 | Configurable |
+| Guardrails | enabled | Shared policy, Claude hooks, Codex stream monitoring, and post-phase audits |
 
 ---
 
@@ -266,6 +267,36 @@ Claude example:
   }
 }
 ```
+
+Guardrail and roadmap controls:
+
+```json
+{
+  "guardrails": {
+    "enabled": true,
+    "abortCodexOnForbiddenStreamEvent": true
+  },
+  "contracts": {
+    "mode": "phased-fallback",
+    "validationRetries": 1
+  },
+  "review": {
+    "complexFileThreshold": 8,
+    "complexDiffLineThreshold": 600,
+    "maxFilesPerBatch": 5
+  },
+  "recovery": {
+    "maxProviderRetries": 2,
+    "initialBackoffMs": 1000
+  }
+}
+```
+
+Guardrail enforcement is layered:
+
+- Claude uses SDK `PreToolUse` / `PostToolUse` hooks for true pre/post tool checks.
+- Codex uses sandbox mode, disabled network access, `approvalPolicy: "never"`, streamed command/file monitoring, and abort-on-detection.
+- Both providers go through deterministic orchestrator audits before phase commits.
 
 ---
 

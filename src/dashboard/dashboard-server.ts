@@ -11,6 +11,7 @@ import { execFile } from 'node:child_process';
 import type { PipelineOrchestrator } from '../pipeline-orchestrator.js';
 import type { RoleInstance } from '../roles/role-types.js';
 import { buildDashboardHTML } from './dashboard-ui.js';
+import { CodeServerManager } from './code-server-manager.js';
 
 export interface DashboardServerOptions {
   orchestrator: PipelineOrchestrator;
@@ -26,6 +27,7 @@ export class DashboardServer {
   private sseClients: Set<http.ServerResponse> = new Set();
   private cachedHTML: string | null = null;
   private directoryPickerInFlight = false;
+  private codeServer: CodeServerManager = new CodeServerManager();
 
   // Throttle agent-progress events to avoid flooding SSE clients
   private progressThrottles: Map<string, number> = new Map();
@@ -43,6 +45,11 @@ export class DashboardServer {
   async start(): Promise<void> {
     this.cachedHTML = buildDashboardHTML();
     this.attach();
+
+    // Detect code-server in the background — non-blocking. The Code tab
+    // checks status before lazy-spawning, so we just want to know whether
+    // the binary exists by the time the user clicks the tab.
+    this.codeServer.detect().catch(() => { /* recorded in status */ });
 
     return new Promise<void>((resolve, reject) => {
       this.server = http.createServer((req, res) => {
@@ -66,6 +73,9 @@ export class DashboardServer {
       try { client.end(); } catch { /* best effort */ }
     }
     this.sseClients.clear();
+
+    // Stop the embedded code-server if it was spawned.
+    await this.codeServer.stop();
 
     // Close HTTP server
     return new Promise<void>((resolve) => {
@@ -195,6 +205,8 @@ export class DashboardServer {
     if (method === 'GET' && pathname === '/api/registry') return this.handleGetRegistry(res);
     if (method === 'POST' && pathname === '/api/pick-directory') { this.handlePickDirectory(res); return; }
     if (method === 'POST' && pathname === '/api/resolve-directory') { this.handleResolveDirectory(req, res); return; }
+    if (method === 'GET' && pathname === '/api/code-server/status') { this.handleCodeServerStatus(res); return; }
+    if (method === 'POST' && pathname === '/api/code-server/start') { this.handleCodeServerStart(res); return; }
 
     // /api/teams/:id patterns — decode URI component for team names with spaces/special chars
     const teamMatch = pathname.match(/^\/api\/teams\/([^/]+)$/);
@@ -713,6 +725,23 @@ ${fileListHtml}
       });
     } catch (err: any) {
       this.sendJSON(res, { error: err.message }, 400);
+    }
+  }
+
+  // Cheap status read for the Code tab — no spawn side-effects.
+  private handleCodeServerStatus(res: http.ServerResponse): void {
+    this.sendJSON(res, this.codeServer.getStatus());
+  }
+
+  // Idempotent lazy spawn. The UI calls this when the user first opens the
+  // Code tab. Returns the final status (resolved after /healthz) so the UI
+  // can immediately render the iframe — no follow-up polling needed.
+  private async handleCodeServerStart(res: http.ServerResponse): Promise<void> {
+    try {
+      const status = await this.codeServer.start();
+      this.sendJSON(res, status);
+    } catch (err: any) {
+      this.sendJSON(res, { state: 'error', error: err.message }, 500);
     }
   }
 

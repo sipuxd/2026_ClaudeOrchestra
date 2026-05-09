@@ -66,7 +66,18 @@ a:hover{text-decoration:underline}
 .nav-btn:hover{background:var(--bg)}
 
 /* --- Main Content --- */
-.main-content{flex:1;height:100vh;overflow-y:auto;position:relative}
+.main-content{flex:1;height:100vh;display:flex;flex-direction:column;position:relative;overflow:hidden}
+.top-tabs{display:flex;gap:2px;padding:8px 12px 0;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0}
+.top-tab{padding:8px 18px;background:transparent;border:none;border-radius:6px 6px 0 0;color:var(--text-muted);font-size:0.875rem;font-weight:500;cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}
+.top-tab:hover{color:var(--text);background:var(--bg)}
+.top-tab.active{color:var(--text);background:var(--bg);border-bottom-color:var(--accent)}
+.top-tab-pane{flex:1;overflow:hidden;display:none;position:relative}
+.top-tab-pane.active{display:flex;flex-direction:column}
+.top-tab-pane.portfolio{overflow-y:auto}
+.code-frame{flex:1;width:100%;border:none;background:var(--bg)}
+.code-empty{flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;padding:40px;text-align:center;color:var(--text-muted)}
+.code-empty h2{color:var(--text);font-size:1.1rem;font-weight:600;margin:0}
+.code-empty code{background:var(--surface);padding:6px 10px;border-radius:4px;font-family:var(--mono);font-size:0.875rem;color:var(--text)}
 .view-container{padding:32px 40px;max-width:1400px;margin:0 auto}
 
 /* --- Dashboard Header --- */
@@ -403,6 +414,8 @@ const state = {
   liveOutput: {},      // teamId -> [ { agent, text, type } ]
   currentView: 'dashboard', // 'dashboard' | 'project'
   currentProject: null,
+  topTab: 'portfolio',      // 'portfolio' | 'code' — outer view selector
+  codeServer: { state: 'idle', port: null, error: null, installCommand: null },
   panelOpen: false,
   panelTeamId: null,
   selectedCompact: null,
@@ -1127,19 +1140,95 @@ function renderCurrentView() {
   renderPanel();
 }
 
+// ---- Code tab (code-server iframe) ----
+async function ensureCodeServerStarted() {
+  // Idempotent: returns immediately if already 'ready'. Otherwise POST start
+  // which lazy-spawns code-server and resolves once /healthz responds.
+  if (state.codeServer.state === 'ready') return state.codeServer;
+  try {
+    const res = await fetch('/api/code-server/start', { method: 'POST' });
+    state.codeServer = await res.json();
+  } catch (err) {
+    state.codeServer = { state: 'error', error: String(err) };
+  }
+  return state.codeServer;
+}
+function refreshCodeFrame() {
+  const frame = document.getElementById('codeFrame');
+  const empty = document.getElementById('codeEmpty');
+  const emptyMsg = document.getElementById('codeEmptyMsg');
+  if (!frame || !empty || !emptyMsg) return;
+
+  // 1) code-server unavailable — show install hint
+  if (state.codeServer.state === 'unavailable') {
+    frame.style.display = 'none';
+    empty.style.display = 'flex';
+    emptyMsg.innerHTML = 'code-server is not installed. Install it with <code>' +
+      esc(state.codeServer.installCommand || 'brew install code-server') +
+      '</code> and reload.';
+    return;
+  }
+  // 2) starting — loading message
+  if (state.codeServer.state === 'starting') {
+    frame.style.display = 'none';
+    empty.style.display = 'flex';
+    emptyMsg.textContent = 'Starting code-server (first launch can take a few seconds)…';
+    return;
+  }
+  // 3) error — surface message
+  if (state.codeServer.state === 'error') {
+    frame.style.display = 'none';
+    empty.style.display = 'flex';
+    emptyMsg.textContent = 'Could not start code-server: ' + (state.codeServer.error || 'unknown error');
+    return;
+  }
+  // 4) ready but no project selected — prompt to pick one
+  if (!state.currentProject) {
+    frame.style.display = 'none';
+    empty.style.display = 'flex';
+    emptyMsg.textContent = 'Select a project from the sidebar to open it in the embedded editor.';
+    return;
+  }
+  // 5) ready + project selected — point iframe at folder
+  const url = 'http://localhost:' + state.codeServer.port + '/?folder=' + encodeURIComponent(state.currentProject);
+  if (frame.src !== url) frame.src = url;
+  empty.style.display = 'none';
+  frame.style.display = 'block';
+}
+
 // ---- Navigation ----
 window.__nav = {
+  switchTopTab: async function(tab) {
+    if (tab !== 'portfolio' && tab !== 'code') return;
+    state.topTab = tab;
+    document.getElementById('topTabPortfolio').classList.toggle('active', tab === 'portfolio');
+    document.getElementById('topTabCode').classList.toggle('active', tab === 'code');
+    document.getElementById('paneportfolio').classList.toggle('active', tab === 'portfolio');
+    document.getElementById('panecode').classList.toggle('active', tab === 'code');
+    if (tab === 'code') {
+      // Render an immediate "Starting…" before awaiting the spawn so the
+      // user sees something happen even if code-server cold-starts in 3-5s.
+      if (state.codeServer.state !== 'ready') {
+        state.codeServer = { state: 'starting' };
+        refreshCodeFrame();
+      }
+      await ensureCodeServerStarted();
+      refreshCodeFrame();
+    }
+  },
   goToDashboard: function() {
     state.currentView = 'dashboard';
     state.currentProject = null;
     state.selectedCompact = null;
     renderCurrentView();
+    if (state.topTab === 'code') refreshCodeFrame();
   },
   goToProject: function(projPath) {
     state.currentView = 'project';
     state.currentProject = projPath;
     state.selectedCompact = null;
     renderCurrentView();
+    if (state.topTab === 'code') refreshCodeFrame();
   },
   selectProject: function(projPath) {
     if (state.currentView === 'project' && state.currentProject === projPath) {
@@ -1772,7 +1861,21 @@ return `<!DOCTYPE html>
 
 <!-- Main Content -->
 <main class="main-content">
-  <div class="view-container" id="viewContainer"></div>
+  <!-- Top tabs: Portfolio (orchestration dashboard) | Code (embedded VS Code via code-server) -->
+  <div class="top-tabs">
+    <button class="top-tab active" id="topTabPortfolio" onclick="window.__nav.switchTopTab('portfolio')">Portfolio</button>
+    <button class="top-tab" id="topTabCode" onclick="window.__nav.switchTopTab('code')">Code</button>
+  </div>
+  <div class="top-tab-pane portfolio active" id="paneportfolio">
+    <div class="view-container" id="viewContainer"></div>
+  </div>
+  <div class="top-tab-pane" id="panecode">
+    <div class="code-empty" id="codeEmpty">
+      <h2>Code view</h2>
+      <p id="codeEmptyMsg">Select a project from the sidebar to open it in the embedded editor.</p>
+    </div>
+    <iframe class="code-frame" id="codeFrame" style="display:none" title="Embedded VS Code"></iframe>
+  </div>
 </main>
 
 <!-- Slide-in Panel -->

@@ -97,98 +97,133 @@ export interface ParsedVerdict<V extends string> {
   details: string;
 }
 
+export interface AmbiguousVerdict {
+  verdict: 'AMBIGUOUS';
+  raw: string;
+}
+
+export type VerdictResult<V extends string> = ParsedVerdict<V> | AmbiguousVerdict;
+
+function isAmbiguous<V extends string>(result: VerdictResult<V>): result is AmbiguousVerdict {
+  return result.verdict === 'AMBIGUOUS';
+}
+
+export class MalformedVerdictError extends Error {
+  constructor(
+    readonly instance: RoleInstance,
+    readonly expected: readonly string[],
+    readonly raw: string,
+  ) {
+    super(
+      `Agent ${instance} emitted an unparseable verdict twice. ` +
+      `Expected response to begin with one of: ${expected.join(', ')}. ` +
+      `Raw output (last attempt, truncated to 200 chars): ${raw.slice(0, 200)}`,
+    );
+    this.name = 'MalformedVerdictError';
+  }
+}
+
 export function parseClassification(scanText: string): TaskClassification {
   const match = scanText.match(/^CLASSIFICATION:\s*(SIMPLE|STANDARD|COMPLEX)/im);
   if (match) return match[1].toUpperCase() as TaskClassification;
   return 'STANDARD';
 }
 
-export function parseSecurityVerdict(text: string): ParsedVerdict<SecurityVerdict> {
+// Strict prefix only. If the agent's response doesn't begin with one of
+// APPROVED|FLAGGED|BLOCKED, return AMBIGUOUS — don't guess. Guessing on a
+// security gate produces silent failure-open when the prompt drifts.
+export function parseSecurityVerdict(text: string): VerdictResult<SecurityVerdict> {
   const trimmed = text.trimStart();
   if (trimmed.startsWith('APPROVED')) return { verdict: 'APPROVED', details: trimmed };
   if (trimmed.startsWith('FLAGGED')) return { verdict: 'FLAGGED', details: trimmed };
   if (trimmed.startsWith('BLOCKED')) return { verdict: 'BLOCKED', details: trimmed };
-  // Default to APPROVED if no clear verdict (scan results may not start with verdict)
-  return { verdict: 'APPROVED', details: trimmed };
+  return { verdict: 'AMBIGUOUS', raw: trimmed };
 }
 
-export function parseReviewVerdict(text: string): ParsedVerdict<ReviewVerdict> {
+// The <thinking> strip is structural cleanup, not fuzzy matching: providers
+// not trained on the convention may emit literal blocks that would otherwise
+// anchor the prefix check on the wrong content. Strip first, then strict prefix.
+export function parseReviewVerdict(text: string): VerdictResult<ReviewVerdict> {
   const stripped = text.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
   const trimmed = stripped.trimStart();
   const upper = trimmed.toUpperCase();
-
-  // Check explicit prefix first
   if (upper.startsWith('APPROVED')) return { verdict: 'APPROVED', details: trimmed };
   if (upper.startsWith('REVISION_NEEDED')) return { verdict: 'REVISION_NEEDED', details: trimmed };
   if (upper.startsWith('REJECTED')) return { verdict: 'REJECTED', details: trimmed };
-
-  // Scan full response for verdict indicators when prefix is missing
-  const rejectPatterns = [/\brejected?\b/i, /\bfundamentally\s+flawed\b/i, /\bstart\s+over\b/i];
-  const revisionPatterns = [
-    /\brevision\s*(needed|required)\b/i,
-    /\bneeds?\s+(revision|fix|change|work|improvement)/i,
-    /\bfix\s+(required|needed|before)\b/i,
-    /\bnot\s+(ready|acceptable|approved)\b/i,
-    /\bcannot\s+approve\b/i,
-    /\bsend\s+back\b/i,
-  ];
-  const approvePatterns = [
-    /\bapproved?\b/i,
-    /\blooks?\s+good\b/i,
-    /\bwell[\s-]implemented\b/i,
-    /\bready\s+(to\s+)?(merge|ship|deploy)\b/i,
-  ];
-
-  const hasReject = rejectPatterns.some(p => p.test(trimmed));
-  const hasRevision = revisionPatterns.some(p => p.test(trimmed));
-  const hasApprove = approvePatterns.some(p => p.test(trimmed));
-
-  if (hasReject && !hasApprove) return { verdict: 'REJECTED', details: trimmed };
-  if (hasRevision && !hasApprove) return { verdict: 'REVISION_NEEDED', details: trimmed };
-  if (hasApprove && !hasRevision && !hasReject) return { verdict: 'APPROVED', details: trimmed };
-
-  // Ambiguous or no signals — err on side of caution, request revision
-  return { verdict: 'REVISION_NEEDED', details: trimmed };
+  return { verdict: 'AMBIGUOUS', raw: trimmed };
 }
 
-export function parseVerifyVerdict(text: string): ParsedVerdict<VerifyVerdict> {
+export function parseVerifyVerdict(text: string): VerdictResult<VerifyVerdict> {
   const trimmed = text.trimStart();
   const upper = trimmed.toUpperCase();
-
-  // Check explicit prefix first (strongest signal)
   if (upper.startsWith('GAPS_FOUND')) return { verdict: 'GAPS_FOUND', details: trimmed };
   if (upper.startsWith('COMPLETE')) return { verdict: 'COMPLETE', details: trimmed };
-
-  // Check for unchecked items in requirements checklist (deterministic)
-  const hasUnchecked = /- \[ \]/m.test(trimmed);
-  const hasChecked = /- \[x\]/mi.test(trimmed);
-  if (hasUnchecked) return { verdict: 'GAPS_FOUND', details: trimmed };
-  if (hasChecked && !hasUnchecked) return { verdict: 'COMPLETE', details: trimmed };
-
-  // Scan full response for gap indicators when no checklist found
-  const gapPatterns = [
-    /\bgaps?\s*found\b/i,
-    /\baction\s*required\b/i,
-    /\bfix\s+(required|needed)\b/i,
-  ];
-  const completePatterns = [
-    /\ball\s+(requirements|tasks?)\s+(are\s+)?(fully\s+)?met\b/i,
-    /\bfully\s+(complete|implemented|met)\b/i,
-    /\bno\s+gaps?\s*(found)?\b/i,
-    /\bverified\s+complete\b/i,
-    /\bcomplete\b/i,
-  ];
-
-  const hasGaps = gapPatterns.some(p => p.test(trimmed));
-  const hasComplete = completePatterns.some(p => p.test(trimmed));
-
-  if (hasGaps && !hasComplete) return { verdict: 'GAPS_FOUND', details: trimmed };
-
-  // Default to COMPLETE — if the verifier didn't explicitly flag gaps, trust it
-  return { verdict: 'COMPLETE', details: trimmed };
+  return { verdict: 'AMBIGUOUS', raw: trimmed };
 }
 
 const MAX_VERIFY_PASSES = 2;
+const VERDICT_RETRY_LIMIT = 1;
+
+// Generic corrective re-prompt used by sendWithVerdict when the parser
+// returns AMBIGUOUS. Same shape for all three pipeline-phase verdicts.
+function formatVerdictRetryPrompt(expected: readonly string[], raw: string): string {
+  const preview = raw.length > 200 ? `${raw.slice(0, 200)}…` : raw;
+  return (
+    `Your previous response did not begin with one of: ${expected.join(', ')}.\n\n` +
+    `Re-emit your verdict on the FIRST line of your next response. ` +
+    `Use the exact verdict token followed by an em-dash and a brief reason. ` +
+    `Do not preface it with prose, headings, or thinking blocks.\n\n` +
+    `For reference, your previous response started with: "${preview}"`
+  );
+}
+
+interface SendWithVerdictHooks {
+  // Called for every raw response the agent emits (including the malformed
+  // first attempt and the retry). Pipeline callers wire this to agent-output
+  // emission so the dashboard transcript shows everything the agent produced.
+  onResponse: (raw: string) => void;
+  // Called only on AMBIGUOUS responses — separate diagnostic signal that
+  // dashboard/logger/metrics can subscribe to for prompt-drift detection.
+  onMalformed: (raw: string) => void;
+}
+
+// Wraps session.send + parse with strict verdict-prefix checking. On the
+// first AMBIGUOUS response, emits a malformed-output signal and re-prompts
+// the agent ONCE with a corrective format hint. A second AMBIGUOUS response
+// throws MalformedVerdictError, which the orchestrator's outer try/catch
+// routes to failPipeline → TeamPhase.Errored. No fuzzy fallback — the prefix
+// is the contract.
+export async function sendWithVerdict<V extends string>(
+  session: AgentSession,
+  prompt: string,
+  parser: (text: string) => VerdictResult<V>,
+  expected: readonly V[],
+  hooks: SendWithVerdictHooks,
+  instance: RoleInstance,
+  images?: Array<{ media_type: string; data: string }>,
+): Promise<ParsedVerdict<V>> {
+  const first = await session.send(prompt, images);
+  hooks.onResponse(first);
+  const firstParse = parser(first);
+  if (!isAmbiguous(firstParse)) return firstParse;
+
+  hooks.onMalformed(first);
+
+  for (let attempt = 0; attempt < VERDICT_RETRY_LIMIT; attempt++) {
+    const retryPrompt = formatVerdictRetryPrompt(expected, first);
+    const retry = await session.send(retryPrompt);
+    hooks.onResponse(retry);
+    const retryParse = parser(retry);
+    if (!isAmbiguous(retryParse)) return retryParse;
+    hooks.onMalformed(retry);
+    throw new MalformedVerdictError(instance, expected, retry);
+  }
+
+  // Unreachable: VERDICT_RETRY_LIMIT >= 1 guarantees the loop body runs at
+  // least once and either returns or throws. The throw below exists only to
+  // satisfy the type system.
+  throw new MalformedVerdictError(instance, expected, first);
+}
 
 // --- Requirements post-processor ---
 
@@ -1148,7 +1183,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
               this.emit('agent-output', teamId, 'Worker-2' as any,
                 `[Pipeline] Worker-2 ${verifyLabel.toLowerCase()}...`);
 
-              w2Result = await worker2.send(
+              const verifyVerdict = await sendWithVerdict(
+                worker2,
                 `REQUIREMENTS VERIFICATION\n\n` +
                 `You are Worker-2, acting as an engineering manager. Your ONLY job is to verify ` +
                 `that Worker-1 built what the user asked for. Do NOT modify any code.\n\n` +
@@ -1161,19 +1197,23 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
                   : '') +
                 `WORKER-1 OUTPUT:\n${currentW1Result.substring(0, 3000)}\n\n` +
                 `INSTRUCTIONS:\n` +
-                `1. For each approved requirement, check whether it is implemented.\n` +
-                `2. Output a checklist in this format:\n\n` +
+                `1. Begin your response on the FIRST line with one of:\n` +
+                `   COMPLETE — if every approved requirement is implemented\n` +
+                `   GAPS_FOUND — if any requirement is missing\n` +
+                `2. Below the verdict, output a checklist in this format:\n\n` +
                 `REQUIREMENTS CHECKLIST:\n` +
                 `- [x] Requirement description — implemented\n` +
                 `- [ ] Requirement description — NOT implemented (explain what is missing)\n\n` +
-                `3. After the checklist, begin your verdict on a new line:\n` +
-                `   COMPLETE — if all requirements are checked [x]\n` +
-                `   GAPS_FOUND — if any requirement is unchecked [ ]\n\n` +
-                `Only flag gaps for requirements in the approved list. Nothing else.`
+                `Only flag gaps for requirements in the approved list. Nothing else.`,
+                parseVerifyVerdict,
+                ['COMPLETE', 'GAPS_FOUND'] as const,
+                {
+                  onResponse: (raw) => this.emit('agent-output', teamId, 'Worker-2' as any, raw),
+                  onMalformed: (raw) => this.emit('malformed-output', teamId, 'Worker-2' as any, raw),
+                },
+                'Worker-2',
               );
-              this.emit('agent-output', teamId, 'Worker-2' as any, w2Result);
-
-              const verifyVerdict = parseVerifyVerdict(w2Result);
+              w2Result = verifyVerdict.details;
 
               if (verifyVerdict.verdict === 'COMPLETE') {
                 this.emit('agent-task', teamId, 'Worker-2' as any, 'Verified complete');
@@ -1222,19 +1262,23 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
             this.emit('agent-output', teamId, 'Security-1' as any,
               `[Pipeline] Security sweep starting...`);
 
-            const sweepResult = await security.send(
+            const sweepVerdict = await sendWithVerdict(
+              security,
               `POST-WORK SWEEP REQUEST\n\n` +
               `Task: ${task}\n` +
               requirementsBlock + `\n` +
               `Worker-1 summary:\n${workerResults.w1.substring(0, 2000)}\n\n` +
               `Worker-2 summary:\n${workerResults.w2.substring(0, 2000)}\n\n` +
               `Sweep all changes made by Workers. Check for introduced vulnerabilities, ` +
-              `leaked secrets, and scope violations. Begin your response with APPROVED, FLAGGED, or BLOCKED.`
+              `leaked secrets, and scope violations. Begin your response with APPROVED, FLAGGED, or BLOCKED.`,
+              parseSecurityVerdict,
+              ['APPROVED', 'FLAGGED', 'BLOCKED'] as const,
+              {
+                onResponse: (raw) => this.emit('agent-output', teamId, 'Security-1' as any, raw),
+                onMalformed: (raw) => this.emit('malformed-output', teamId, 'Security-1' as any, raw),
+              },
+              'Security-1',
             );
-
-            this.emit('agent-output', teamId, 'Security-1' as any, sweepResult);
-
-            const sweepVerdict = parseSecurityVerdict(sweepResult);
 
             if (sweepVerdict.verdict === 'BLOCKED') {
               this.emit('agent-output', teamId, 'Security-1' as any,
@@ -1265,7 +1309,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
             this.emit('agent-output', teamId, 'Reviewer-1' as any,
               `[Pipeline] Review starting...`);
 
-            const reviewResult = await reviewer.send(
+            const reviewVerdict = await sendWithVerdict(
+              reviewer,
               `REVIEW REQUEST\n\n` +
               `Task: ${task}\n` +
               requirementsBlock + `\n` +
@@ -1273,12 +1318,15 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
               `Worker-2 summary:\n${workerResults.w2.substring(0, 2000)}\n\n` +
               `Evaluate the quality and correctness of this work. ` +
               (ctx.isComplex ? `This is a COMPLEX task — apply strict review criteria for backward compatibility, data integrity, and security. ` : '') +
-              `Begin your response with APPROVED, REVISION_NEEDED, or REJECTED.`
+              `Begin your response with APPROVED, REVISION_NEEDED, or REJECTED.`,
+              parseReviewVerdict,
+              ['APPROVED', 'REVISION_NEEDED', 'REJECTED'] as const,
+              {
+                onResponse: (raw) => this.emit('agent-output', teamId, 'Reviewer-1' as any, raw),
+                onMalformed: (raw) => this.emit('malformed-output', teamId, 'Reviewer-1' as any, raw),
+              },
+              'Reviewer-1',
             );
-
-            this.emit('agent-output', teamId, 'Reviewer-1' as any, reviewResult);
-
-            const reviewVerdict = parseReviewVerdict(reviewResult);
 
             if (reviewVerdict.verdict === 'APPROVED') {
               // Success — break out of both loops

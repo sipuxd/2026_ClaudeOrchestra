@@ -141,7 +141,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => {
 });
 
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
-import { PipelineOrchestrator, parseSecurityVerdict, parseReviewVerdict, parseVerifyVerdict, parseClassification, postProcessRequirements } from '../src/pipeline-orchestrator.js';
+import { PipelineOrchestrator, parseSecurityVerdict, parseReviewVerdict, parseVerifyVerdict, parseClassification, postProcessRequirements, sendWithVerdict, MalformedVerdictError } from '../src/pipeline-orchestrator.js';
 
 const GUARDED_ENV_KEYS = [
   'CLAUDE_CODE_USE_BEDROCK',
@@ -298,9 +298,15 @@ describe('PipelineOrchestrator', () => {
       expect(result.verdict).toBe('BLOCKED');
     });
 
-    it('defaults to APPROVED for unclear text', () => {
+    it('returns AMBIGUOUS for unclear text (no longer fails open)', () => {
+      // Previously defaulted to APPROVED — silent failure-open on a security gate.
+      // Now strict: anything not starting with the verdict prefix is AMBIGUOUS,
+      // forcing the orchestrator to retry once and then fail loud.
       const result = parseSecurityVerdict('Clearance report: all files are safe...');
-      expect(result.verdict).toBe('APPROVED');
+      expect(result.verdict).toBe('AMBIGUOUS');
+      if (result.verdict === 'AMBIGUOUS') {
+        expect(result.raw).toContain('Clearance report');
+      }
     });
 
     it('handles leading whitespace', () => {
@@ -325,9 +331,15 @@ describe('PipelineOrchestrator', () => {
       expect(result.verdict).toBe('REJECTED');
     });
 
-    it('defaults to APPROVED for unclear text', () => {
+    it('returns AMBIGUOUS when prefix is missing (no fuzzy fallback)', () => {
+      // Previously a fuzzy regex matched 'looks good' and returned APPROVED.
+      // The fuzzy matchers were removed because they masked prompt drift —
+      // strict prefix is the contract, AMBIGUOUS surfaces the drift.
       const result = parseReviewVerdict('The code looks good overall');
-      expect(result.verdict).toBe('APPROVED');
+      expect(result.verdict).toBe('AMBIGUOUS');
+      if (result.verdict === 'AMBIGUOUS') {
+        expect(result.raw).toContain('looks good');
+      }
     });
 
     // Regression fixtures for the <thinking>-strip prerequisite.
@@ -1097,9 +1109,22 @@ describe('PipelineOrchestrator', () => {
       expect(result.verdict).toBe('GAPS_FOUND');
     });
 
-    it('defaults to COMPLETE for unclear text', () => {
+    it('returns AMBIGUOUS for unclear text (no longer trusts the verifier silently)', () => {
+      // Previously defaulted to COMPLETE if no GAPS_FOUND prefix was seen and
+      // no checklist patterns matched — meaning a malformed verifier response
+      // would silently pass the gate. Now strict: AMBIGUOUS triggers retry.
       const result = parseVerifyVerdict('Everything looks good.');
-      expect(result.verdict).toBe('COMPLETE');
+      expect(result.verdict).toBe('AMBIGUOUS');
+      if (result.verdict === 'AMBIGUOUS') {
+        expect(result.raw).toContain('looks good');
+      }
+    });
+
+    it('returns AMBIGUOUS when only a checklist is present without a verdict prefix', () => {
+      // Old behavior scanned for `- [ ]` / `- [x]` lines and inferred verdict.
+      // New behavior requires the prefix — the verifier prompt mandates it.
+      const result = parseVerifyVerdict('REQUIREMENTS CHECKLIST:\n- [x] Built the button\n- [x] Wired the click handler');
+      expect(result.verdict).toBe('AMBIGUOUS');
     });
 
     it('handles case insensitivity', () => {
@@ -1144,6 +1169,151 @@ describe('PipelineOrchestrator', () => {
     it('handles extra whitespace', () => {
       const result = parseClassification('CLASSIFICATION:   SIMPLE\n\nReport...');
       expect(result).toBe('SIMPLE');
+    });
+  });
+
+  // --- sendWithVerdict (fail-loud helper) ---
+
+  describe('sendWithVerdict', () => {
+    // Build a minimal fake AgentSession that returns canned responses in order.
+    // sendWithVerdict only calls .send(), so the rest of the AgentSession
+    // surface can be stubbed.
+    function makeFakeSession(responses: string[]) {
+      let i = 0;
+      const sendCalls: string[] = [];
+      const session = {
+        send: async (prompt: string) => {
+          sendCalls.push(prompt);
+          if (i >= responses.length) {
+            throw new Error(`makeFakeSession: ran out of canned responses (call #${i + 1})`);
+          }
+          return responses[i++];
+        },
+        close: () => {},
+        closed: false,
+        lastActivityLog: '',
+      } as any; // cast: tests don't need the rest of AgentSession's surface
+      return { session, sendCalls };
+    }
+
+    it('returns parsed verdict on first try and emits no malformed-output', async () => {
+      const { session, sendCalls } = makeFakeSession(['APPROVED — clean sweep']);
+      const responses: string[] = [];
+      const malformed: string[] = [];
+
+      const result = await sendWithVerdict(
+        session,
+        'sweep prompt',
+        parseSecurityVerdict,
+        ['APPROVED', 'FLAGGED', 'BLOCKED'] as const,
+        {
+          onResponse: (raw) => responses.push(raw),
+          onMalformed: (raw) => malformed.push(raw),
+        },
+        'Security-1' as any,
+      );
+
+      expect(result.verdict).toBe('APPROVED');
+      expect(result.details).toContain('APPROVED');
+      expect(sendCalls).toHaveLength(1);
+      expect(responses).toEqual(['APPROVED — clean sweep']);
+      expect(malformed).toEqual([]);
+    });
+
+    it('retries once on AMBIGUOUS and succeeds on the corrective re-prompt', async () => {
+      const { session, sendCalls } = makeFakeSession([
+        'I think the code looks fine to me',                  // ambiguous: no verdict prefix
+        'APPROVED — verified after retry',                    // succeeds on retry
+      ]);
+      const responses: string[] = [];
+      const malformed: string[] = [];
+
+      const result = await sendWithVerdict(
+        session,
+        'review prompt',
+        parseReviewVerdict,
+        ['APPROVED', 'REVISION_NEEDED', 'REJECTED'] as const,
+        {
+          onResponse: (raw) => responses.push(raw),
+          onMalformed: (raw) => malformed.push(raw),
+        },
+        'Reviewer-1' as any,
+      );
+
+      expect(result.verdict).toBe('APPROVED');
+      expect(sendCalls).toHaveLength(2);
+      // Both raw responses surface in the transcript so the dashboard can show
+      // what the agent originally tried to say (preserving drift visibility).
+      expect(responses).toEqual([
+        'I think the code looks fine to me',
+        'APPROVED — verified after retry',
+      ]);
+      // Only the malformed first attempt fires the diagnostic event.
+      expect(malformed).toEqual(['I think the code looks fine to me']);
+      // The retry prompt names the expected tokens and quotes the malformed reply.
+      expect(sendCalls[1]).toContain('APPROVED');
+      expect(sendCalls[1]).toContain('REVISION_NEEDED');
+      expect(sendCalls[1]).toContain('REJECTED');
+      expect(sendCalls[1]).toContain('I think the code looks fine to me');
+    });
+
+    it('throws MalformedVerdictError after a second AMBIGUOUS response', async () => {
+      const { session, sendCalls } = makeFakeSession([
+        'first malformed reply, no prefix',
+        'second malformed reply, also no prefix',
+      ]);
+      const responses: string[] = [];
+      const malformed: string[] = [];
+
+      await expect(
+        sendWithVerdict(
+          session,
+          'verify prompt',
+          parseVerifyVerdict,
+          ['COMPLETE', 'GAPS_FOUND'] as const,
+          {
+            onResponse: (raw) => responses.push(raw),
+            onMalformed: (raw) => malformed.push(raw),
+          },
+          'Worker-2' as any,
+        ),
+      ).rejects.toThrow(MalformedVerdictError);
+
+      expect(sendCalls).toHaveLength(2);
+      // Both responses surface in the transcript and both fire the diagnostic.
+      expect(responses).toHaveLength(2);
+      expect(malformed).toHaveLength(2);
+      expect(malformed[0]).toContain('first malformed reply');
+      expect(malformed[1]).toContain('second malformed reply');
+    });
+
+    it('MalformedVerdictError carries instance, expected tokens, and truncated raw output', async () => {
+      const { session } = makeFakeSession([
+        'first ambiguous',
+        'x'.repeat(500),  // >200 chars to verify the truncation in the error message
+      ]);
+
+      try {
+        await sendWithVerdict(
+          session,
+          'sweep prompt',
+          parseSecurityVerdict,
+          ['APPROVED', 'FLAGGED', 'BLOCKED'] as const,
+          { onResponse: () => {}, onMalformed: () => {} },
+          'Security-1' as any,
+        );
+        expect.fail('sendWithVerdict should have thrown MalformedVerdictError');
+      } catch (err) {
+        expect(err).toBeInstanceOf(MalformedVerdictError);
+        const e = err as MalformedVerdictError;
+        expect(e.instance).toBe('Security-1');
+        expect(e.expected).toEqual(['APPROVED', 'FLAGGED', 'BLOCKED']);
+        // Error message names the agent and lists the expected tokens
+        expect(e.message).toContain('Security-1');
+        expect(e.message).toContain('APPROVED, FLAGGED, BLOCKED');
+        // Raw output is truncated to 200 chars in the message body
+        expect(e.message.length).toBeLessThan(600);
+      }
     });
   });
 });

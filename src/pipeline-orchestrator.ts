@@ -63,6 +63,7 @@ export interface OrchestratorEvents {
   'security-review': [teamId: string, data: { status: string; result?: string }];
   'pr-created': [teamId: string, prNumber: number, prUrl: string];
   'team-archived': [teamId: string, prUrl: string];
+  'team-deleted': [teamId: string];
   'shutdown': [];
 }
 
@@ -369,11 +370,6 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     if (this.shuttingDown) {
       throw new Error('Orchestrator is shutting down');
     }
-    if (this.teams.size >= this.config.maxConcurrentTeams) {
-      throw new Error(
-        `Maximum concurrent teams (${this.config.maxConcurrentTeams}) reached. Terminate an existing team first.`
-      );
-    }
 
     const teamId = name;
     if (this.teams.has(teamId)) {
@@ -381,6 +377,20 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     }
 
     const resolvedProjectPath = path.resolve(projectPath);
+
+    // Limit is now per-project, not global. A user with multiple projects
+    // can run up to maxConcurrentTeams teams in EACH project independently.
+    let teamsInThisProject = 0;
+    for (const ctx of this.teams.values()) {
+      if (ctx.state.snapshot.projectPath === resolvedProjectPath) {
+        teamsInThisProject++;
+      }
+    }
+    if (teamsInThisProject >= this.config.maxConcurrentTeams) {
+      throw new Error(
+        `Maximum concurrent teams (${this.config.maxConcurrentTeams}) reached for this project. Terminate an existing team in this project first, or use a different project.`
+      );
+    }
 
     // Project directory must already exist — engine attaches to existing repos
     if (!fs.existsSync(resolvedProjectPath)) {
@@ -453,13 +463,11 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       const data = this.persistence.loadFromDir(teamDir);
       if (!data) continue;
 
-      if (
-        data.currentPhase === TeamPhase.Done ||
-        data.currentPhase === TeamPhase.Cancelled ||
-        data.currentPhase === TeamPhase.Errored
-      ) {
-        continue;
-      }
+      // Previously skipped Done/Cancelled/Errored teams on recovery, which
+      // made them invisible in the dashboard after a restart. Now we keep
+      // them visible so the user can review them, create PRs, or remove
+      // them via the Delete button. Terminal-state teams hold no live
+      // sessions, so recovering them is essentially free.
 
       // Register team directory with persistence
       this.persistence.registerTeamDir(entry.teamId, teamDir);
@@ -657,6 +665,11 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     this.registry.remove(teamId);
 
     this.teams.delete(teamId);
+
+    // Notify clients (dashboard) so they can drop the team from their local
+    // state — without this, the team lingers in the UI as "cancelled" forever
+    // even though the server has already removed it.
+    this.emit('team-deleted', teamId);
   }
 
   async shutdown(): Promise<void> {

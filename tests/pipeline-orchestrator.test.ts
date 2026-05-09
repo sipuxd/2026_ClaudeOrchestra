@@ -239,16 +239,24 @@ describe('PipelineOrchestrator', () => {
         .toThrow('already exists');
     });
 
-    it('enforces max concurrent teams', () => {
-      const p1 = path.join(tmpDir, 'p1'); fs.mkdirSync(p1, { recursive: true });
-      const p2 = path.join(tmpDir, 'p2'); fs.mkdirSync(p2, { recursive: true });
-      const p3 = path.join(tmpDir, 'p3'); fs.mkdirSync(p3, { recursive: true });
-      const p4 = path.join(tmpDir, 'p4'); fs.mkdirSync(p4, { recursive: true });
-      orchestrator.createTeam('t1', p1);
-      orchestrator.createTeam('t2', p2);
-      orchestrator.createTeam('t3', p3);
-      expect(() => orchestrator.createTeam('t4', p4))
-        .toThrow('Maximum concurrent teams');
+    it('enforces max concurrent teams per project (not global)', () => {
+      // The limit is per-project: a single project can hold up to
+      // maxConcurrentTeams teams, but a different project gets its own slots.
+      const pA = path.join(tmpDir, 'pA'); fs.mkdirSync(pA, { recursive: true });
+      const pB = path.join(tmpDir, 'pB'); fs.mkdirSync(pB, { recursive: true });
+
+      // Fill project A to the cap (test config sets maxConcurrentTeams=3).
+      orchestrator.createTeam('a1', pA);
+      orchestrator.createTeam('a2', pA);
+      orchestrator.createTeam('a3', pA);
+
+      // 4th team in the same project must be rejected.
+      expect(() => orchestrator.createTeam('a4', pA))
+        .toThrow(/Maximum concurrent teams.*for this project/);
+
+      // But a team in a DIFFERENT project succeeds — slots are per-project.
+      const stateB = orchestrator.createTeam('b1', pB);
+      expect(stateB).toBeDefined();
     });
 
     it('emits team-created event', () => {

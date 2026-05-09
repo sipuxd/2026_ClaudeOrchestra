@@ -14,6 +14,7 @@ const CSS = `
   --amber:#d29922;--purple:#a371f7;
   --nav-width:64px;--panel-width:560px;
   --radius:8px;--radius-sm:6px;
+  color-scheme:dark;
 }
 html,body{height:100%;overflow:hidden}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
@@ -22,6 +23,16 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;color:inhe
 input,textarea,select{font-family:inherit;color:var(--text-primary);background:var(--surface);
   border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 12px;outline:none;font-size:.875rem}
 input:focus,textarea:focus,select:focus{border-color:var(--blue)}
+input:-webkit-autofill,input:-webkit-autofill:hover,input:-webkit-autofill:focus,
+textarea:-webkit-autofill,textarea:-webkit-autofill:hover,textarea:-webkit-autofill:focus,
+select:-webkit-autofill,select:-webkit-autofill:hover,select:-webkit-autofill:focus{
+  -webkit-text-fill-color:var(--text-primary);
+  caret-color:var(--text-primary);
+  -webkit-box-shadow:0 0 0 1000px var(--surface) inset;
+  box-shadow:0 0 0 1000px var(--surface) inset;
+  border-color:var(--blue);
+  transition:background-color 9999s ease-in-out 0s;
+}
 textarea{resize:vertical}
 a{color:var(--blue);text-decoration:none}
 a:hover{text-decoration:underline}
@@ -200,10 +211,16 @@ a:hover{text-decoration:underline}
 .panel-body{flex:1;overflow-y:auto;padding:16px 20px}
 
 /* --- Feedback Action Block --- */
-.feedback-block{background:rgba(218,54,51,.08);border:1px solid rgba(218,54,51,.3);border-radius:var(--radius);
+.feedback-block{background:rgba(88,166,255,.08);border:1px solid rgba(88,166,255,.3);border-radius:var(--radius);
   padding:14px 16px;margin-bottom:14px}
-.feedback-block-title{font-weight:600;font-size:.875rem;color:var(--red-light);margin-bottom:6px;
+.feedback-block-title{font-weight:600;font-size:.875rem;color:var(--blue);margin-bottom:6px;
   display:flex;align-items:center;gap:6px}
+.feedback-block.feedback-info{background:rgba(63,185,80,.08);border-color:rgba(63,185,80,.32)}
+.feedback-block.feedback-info .feedback-block-title{color:var(--green)}
+.feedback-block.feedback-warning,.feedback-block.feedback-question{background:rgba(210,153,34,.08);border-color:rgba(210,153,34,.35)}
+.feedback-block.feedback-warning .feedback-block-title,.feedback-block.feedback-question .feedback-block-title{color:var(--amber)}
+.feedback-block.feedback-error{background:rgba(218,54,51,.08);border-color:rgba(218,54,51,.3)}
+.feedback-block.feedback-error .feedback-block-title{color:var(--red-light)}
 .feedback-block-msg{color:var(--text-secondary);font-size:.8125rem;line-height:1.5;margin-bottom:10px;white-space:pre-wrap}
 .feedback-block-detail{color:var(--text-muted);font-size:.75rem;margin-bottom:10px;
   max-height:120px;overflow-y:auto;white-space:pre-wrap;font-family:'SF Mono','Fira Code',monospace;
@@ -216,6 +233,7 @@ a:hover{text-decoration:underline}
 .summary-status-icon{width:44px;height:44px;border-radius:50%;display:flex;align-items:center;
   justify-content:center;font-size:1.3rem;flex-shrink:0}
 .summary-status-top.pass .summary-status-icon{background:rgba(35,134,54,.12);color:var(--green)}
+.summary-status-top.active .summary-status-icon{background:rgba(56,139,253,.14);color:var(--blue)}
 .summary-status-top.fail .summary-status-icon{background:rgba(218,54,51,.12);color:var(--red-light)}
 .summary-task{font-size:.875rem;color:var(--text-primary);line-height:1.4}
 .summary-status-text{font-size:.75rem;margin-top:4px}
@@ -387,7 +405,6 @@ const state = {
   currentProject: null,
   panelOpen: false,
   panelTeamId: null,
-  panelMode: 'summary', // 'summary' | 'live'
   selectedCompact: null,
   activeFilter: null,
   projectFilter: {},   // projectPath -> filter
@@ -436,9 +453,81 @@ function phaseLabel(ph) {
     pr_open:'PR open', merged:'merged', errored:'error', cancelled:'cancelled' };
   return map[ph] || ph;
 }
+function getTeamComplexity(t) {
+  var explicit = (t && t.currentTask && t.currentTask.complexity) || (t && t.complexity) || null;
+  if (explicit) return explicit;
+
+  var entries = state.liveOutput[t && t.teamId] || [];
+  var workerOutput = entries.some(function(e){ return e.agent === 'Worker-1'; });
+  var nonWorkerOutput = entries.some(function(e){ return e.agent && e.agent !== 'Worker-1'; });
+  if (workerOutput && !nonWorkerOutput) return 'simple';
+
+  return null;
+}
+function getProgressModel(t) {
+  var ph = t ? (t.currentPhase || 'pre_work') : 'pre_work';
+  var simple = getTeamComplexity(t) === 'simple';
+  var labels = simple ? ['build','done'] : ['scan','build','sweep','review','done'];
+  var complete = ph === 'done' || ph === 'pr_open' || ph === 'merged';
+  var idx = simple ? (complete ? labels.length - 1 : 0) : phaseIndex(ph);
+  if (idx < 0) idx = 0;
+  if (idx >= labels.length) idx = labels.length - 1;
+  return { labels: labels, index: idx, complete: complete, simple: simple };
+}
+function feedbackNeedsAttention(fb) {
+  return !!(fb && (fb.blocking || fb.type === 'warning' || fb.type === 'error' || fb.type === 'question'));
+}
 function teamNeedsAttention(teamId) {
   const fb = state.feedbacks[teamId];
-  return fb && fb.length > 0;
+  return !!(fb && fb.some(feedbackNeedsAttention));
+}
+function getEffectiveAgentState(t, instance) {
+  var ph = t ? (t.currentPhase || 'pre_work') : 'pre_work';
+  var complexity = getTeamComplexity(t);
+  var ag = t && t.agents ? t.agents[instance] : null;
+  var raw = ag ? ag.state : 'spawning';
+
+  if (complexity === 'simple' && instance !== 'Worker-1') return 'skipped';
+
+  if (ph === 'done' || ph === 'pr_open' || ph === 'merged') {
+    if (raw !== 'errored') return 'done';
+  }
+
+  if (raw === 'spawning') return 'waiting';
+  return raw || 'waiting';
+}
+function getAgentOutput(teamId, instance) {
+  return (state.liveOutput[teamId] || [])
+    .filter(function(e){ return e.agent === instance; })
+    .map(function(e){ return e.text; })
+    .join('\\n');
+}
+function getAgentSummaryText(t, instance, agState, output) {
+  if (output) return output;
+
+  var complexity = getTeamComplexity(t);
+  if (complexity === 'simple' && instance !== 'Worker-1') {
+    if (instance === 'Security-1') return 'Skipped: this was routed as a simple task, so no separate security scan or sweep was run.';
+    if (instance === 'Worker-2') return 'Skipped: simple tasks run directly through Worker-1, so no independent verification pass was needed.';
+    if (instance === 'Reviewer-1') return 'Skipped: simple tasks do not require a separate review pass before completion.';
+  }
+
+  if (agState === 'done') {
+    if (instance === 'Security-1') return 'Completed security checks for the task. No blocking findings were reported.';
+    if (instance === 'Worker-1') return 'Completed the implementation work for the assigned task.';
+    if (instance === 'Worker-2') return 'Completed requirements verification for Worker-1 output.';
+    if (instance === 'Reviewer-1') return 'Completed final review and approved the work.';
+  }
+
+  if (agState === 'active') {
+    var ag = t && t.agents ? t.agents[instance] : null;
+    return ag && ag.currentJob ? 'Working: ' + ag.currentJob : 'Working on the current phase.';
+  }
+
+  if (agState === 'waiting') return 'Waiting for its turn in the pipeline.';
+  if (agState === 'skipped') return 'Skipped for this task route.';
+  if (agState === 'errored') return 'Errored while running this phase.';
+  return agState || 'No activity yet.';
 }
 function getCardStatusClass(ph, hasAttn, teamId) {
   if (hasAttn) return 'status-blocked';
@@ -543,6 +632,19 @@ function getProjectStats(projPath) {
   return stats;
 }
 
+// True if any team in this project has projectHasPreview=true (server detected
+// at least one *.html file in the project root or a known build output dir).
+// Server caches the disk check; client just reads the flag.
+function projectHasPreview(projPath) {
+  var proj = state.projects[projPath];
+  if (!proj) return false;
+  for (var tid of proj.teams) {
+    var t = state.teams[tid];
+    if (t && t.projectHasPreview) return true;
+  }
+  return false;
+}
+
 function filterTeams(teams, filter) {
   if (!filter) return teams;
   return teams.filter(function(tid) {
@@ -622,7 +724,7 @@ function renderTeamCard(teamId, compact) {
   var t = state.teams[teamId];
   if (!t) return '';
   var ph = t.currentPhase || 'pre_work';
-  var pi = phaseIndex(ph);
+  var progress = getProgressModel(t);
   var hasAttn = teamNeedsAttention(teamId);
 
   if (compact) {
@@ -645,22 +747,22 @@ function renderTeamCard(teamId, compact) {
   html += '<div class="card-task">' + esc(taskText) + '</div>';
   // Progress bar
   html += '<div class="card-progress"><div class="progress-bar">';
-  var labels = ['scan','build','sweep','review','done'];
-  for (var s = 0; s < 5; s++) {
+  var labels = progress.labels;
+  for (var s = 0; s < labels.length; s++) {
     var cls = 'seg-future';
-    if (ph === 'errored' || ph === 'cancelled') cls = s <= pi ? 'seg-error' : 'seg-future';
-    else if (s < pi || (pi === 4)) cls = 'seg-done';
-    else if (s === pi) cls = 'seg-active';
+    if (ph === 'errored' || ph === 'cancelled') cls = s <= progress.index ? 'seg-error' : 'seg-future';
+    else if (s < progress.index || progress.complete) cls = 'seg-done';
+    else if (s === progress.index) cls = 'seg-active';
     html += '<div class="progress-segment ' + cls + '" title="' + labels[s] + '"></div>';
   }
   html += '</div>';
   // Phase labels
   html += '<div class="progress-labels">';
-  for (var sl = 0; sl < 5; sl++) {
+  for (var sl = 0; sl < labels.length; sl++) {
     var lblCls = '';
-    if (ph === 'errored' || ph === 'cancelled') lblCls = sl <= pi ? 'lbl-error' : '';
-    else if (sl < pi || (pi === 4)) lblCls = 'lbl-done';
-    else if (sl === pi) lblCls = 'lbl-active';
+    if (ph === 'errored' || ph === 'cancelled') lblCls = sl <= progress.index ? 'lbl-error' : '';
+    else if (sl < progress.index || progress.complete) lblCls = 'lbl-done';
+    else if (sl === progress.index) lblCls = 'lbl-active';
     html += '<span class="progress-label ' + lblCls + '">' + labels[sl] + '</span>';
   }
   html += '</div></div>';
@@ -703,7 +805,7 @@ function renderDashboardView() {
     html += '<div><h2>' + esc(proj.name) + '</h2>';
     html += '<span class="project-path-label">' + esc(shortPath(p)) + '</span>';
     html += '<span class="project-team-count">' + teamIds.length + ' team' + (teamIds.length!==1?'s':'') + '</span></div>';
-    // Per-project stat pills
+    // Per-project stat pills + preview button (only if the project has UI artifacts)
     var pStats = getProjectStats(p);
     html += '<div class="project-stats">';
     if (pStats.attention > 0) html += '<span class="mini-pill pill-error">' + pStats.attention + ' errored</span>';
@@ -711,6 +813,12 @@ function renderDashboardView() {
     if (pStats.review > 0) html += '<span class="mini-pill pill-review">' + pStats.review + ' review</span>';
     if (pStats.pr > 0) html += '<span class="mini-pill pill-pr">' + pStats.pr + ' PR open</span>';
     if (pStats.done > 0) html += '<span class="mini-pill pill-done">' + pStats.done + ' done</span>';
+    if (projectHasPreview(p)) {
+      // event.stopPropagation() so the click on Preview doesn't bubble to
+      // the project-section-header which navigates into the project view.
+      var firstTeamId = teamIds[0];
+      html += '<button class="btn btn-sm btn-green" onclick="event.stopPropagation();window.open(\\'/preview/' + esc(firstTeamId) + '\\',\\'_blank\\')">Preview</button>';
+    }
     html += '</div>';
     html += '</div>';
     html += '<div class="team-grid">';
@@ -784,14 +892,27 @@ function renderInlineDetail(teamId) {
 }
 
 // ---- Render: Feedback Blocks ----
+function feedbackBlockClass(fb) {
+  if (!fb) return 'feedback-info';
+  if (fb.type === 'error') return 'feedback-error';
+  if (fb.type === 'warning') return 'feedback-warning';
+  if (fb.type === 'question' || fb.blocking) return 'feedback-question';
+  return 'feedback-info';
+}
+function feedbackBlockIcon(fb) {
+  if (!fb) return '&#9432;';
+  if (fb.type === 'error') return '&#10007;';
+  if (fb.type === 'warning' || fb.type === 'question' || fb.blocking) return '&#9888;';
+  return '&#10003;';
+}
 function renderFeedbackBlocks(teamId) {
   var fbs = state.feedbacks[teamId];
   if (!fbs || fbs.length === 0) return '';
   var html = '';
   for (var i = 0; i < fbs.length; i++) {
     var fb = fbs[i];
-    html += '<div class="feedback-block">';
-    html += '<div class="feedback-block-title">&#9888; ' + esc(fb.title || 'Action Required') + '</div>';
+    html += '<div class="feedback-block ' + feedbackBlockClass(fb) + '">';
+    html += '<div class="feedback-block-title">' + feedbackBlockIcon(fb) + ' ' + esc(fb.title || 'Status') + '</div>';
     html += '<div class="feedback-block-msg">' + esc(fb.message) + '</div>';
     if (fb.detail) {
       html += '<div class="feedback-block-detail">' + esc(fb.detail) + '</div>';
@@ -820,6 +941,9 @@ function renderTeamActionButtons(teamId) {
     html += '<button class="btn btn-sm btn-secondary" onclick="window.__modal.steerAgent(\\'' + esc(teamId) + '\\')">Steer</button>';
     html += '<button class="btn btn-sm btn-danger" onclick="window.__modal.stopPipeline(\\'' + esc(teamId) + '\\')">Stop</button>';
   }
+  // Preview is intentionally NOT a team-level action — it lives at the
+  // project level (project header) because the preview reflects the
+  // project's current filesystem state, not any single task's output.
   if (ph === 'done') {
     html += '<button class="btn btn-sm btn-purple" onclick="window.__modal.createPR(\\'' + esc(teamId) + '\\')">Create PR</button>';
     html += '<button class="btn btn-sm btn-secondary" onclick="window.__modal.securityReview(\\'' + esc(teamId) + '\\')">Security Review</button>';
@@ -832,6 +956,11 @@ function renderTeamActionButtons(teamId) {
   } else if (t.currentTask && ph !== 'pr_open' && ph !== 'merged') {
     html += '<button class="btn btn-sm btn-green" onclick="window.__modal.assignTask(\\'' + esc(teamId) + '\\')">Assign New Task</button>';
   }
+  // Delete is available in any terminal phase (done/merged/cancelled/errored)
+  // since the existing Stop button already covers active phases.
+  if (ph === 'done' || ph === 'merged' || ph === 'cancelled' || ph === 'errored') {
+    html += '<button class="btn btn-sm btn-danger" onclick="window.__modal.deleteTeam(\\'' + esc(teamId) + '\\')">Delete</button>';
+  }
   return html;
 }
 
@@ -840,23 +969,41 @@ function renderSummaryContent(teamId) {
   var t = state.teams[teamId];
   if (!t) return '';
   var ph = t.currentPhase || 'pre_work';
-  var pi = phaseIndex(ph);
+  var progress = getProgressModel(t);
   var panelTaskText = t.currentTask ? (t.currentTask.description || t.currentTask).toString() : '';
   var statusInfo = getCardStatusInfo(ph, teamNeedsAttention(teamId), teamId);
-  var isDone = ph === 'done' || ph === 'errored' || ph === 'cancelled' || ph === 'merged';
-
-  // Status summary top
-  var statusIcon = isDone && ph === 'done' ? '&#10003;' : ph === 'errored' ? '&#10007;' : '&#9888;';
-  var statusClass = ph === 'done' || ph === 'merged' ? 'pass' : 'fail';
+  var isDone = ph === 'done' || ph === 'merged';
+  var isFailed = ph === 'errored' || ph === 'cancelled';
   var statusText = ph === 'done' ? 'All gates passed' :
     ph === 'errored' ? 'Pipeline errored in ' + phaseLabel(ph) + ' phase' :
     ph === 'pr_open' ? 'PR created — awaiting merge' :
     statusInfo.label;
+  var statusColor = isDone ? 'var(--green)' : isFailed ? 'var(--red-light)' : 'var(--blue)';
 
-  var html = '<div class="summary-status-top ' + statusClass + '">';
-  html += '<div class="summary-status-icon">' + statusIcon + '</div>';
-  html += '<div class="summary-status-info"><div class="summary-task">' + esc(panelTaskText || 'No task assigned') + '</div>';
-  html += '<div class="summary-status-text" style="color:' + (statusClass==='pass'?'var(--green)':'var(--red-light)') + '">' + statusText + '</div></div></div>';
+  // Header: task description + elapsed, then a phase stepper. Replaces the
+  // old "summary-status-top" + "Live tab stepper" — single consolidated view.
+  var html = '<div class="live-header">';
+  html += '<div class="live-task">' + esc(panelTaskText || 'No task assigned') + '</div>';
+  html += '<div class="live-elapsed card-elapsed" data-created="' + (t.createdAt||'') + '">' + elapsedSince(t.createdAt) + '</div>';
+  html += '</div>';
+
+  // Phase bar with dots (lifted from the removed Live tab)
+  html += '<div class="live-phase-bar">';
+  var labels = progress.labels;
+  for (var s = 0; s < labels.length; s++) {
+    var dotCls = '';
+    if (ph === 'errored' || ph === 'cancelled') dotCls = s <= progress.index ? 'fail' : '';
+    else if (s < progress.index || progress.complete) dotCls = 'past';
+    else if (s === progress.index) dotCls = 'current';
+    html += '<div class="live-phase-step">';
+    html += '<div class="live-dot ' + dotCls + '">' + (dotCls === 'past' ? '&#10003;' : dotCls === 'fail' ? '&#10007;' : (s + 1)) + '</div>';
+    html += '<div class="live-dot-label ' + dotCls + '">' + labels[s] + '</div></div>';
+    if (s < labels.length - 1) html += '<div class="live-connector ' + ((s < progress.index || progress.complete) ? 'past' : '') + '"></div>';
+  }
+  html += '</div>';
+
+  // One-line status text under the stepper (e.g. "All gates passed")
+  html += '<div class="summary-status-text" style="color:' + statusColor + ';margin:6px 0 16px;font-size:.875rem">' + statusText + '</div>';
 
   // Pipeline stats bar
   html += '<div class="pipeline-stats">';
@@ -871,21 +1018,22 @@ function renderSummaryContent(teamId) {
   html += '<div class="agent-sections-grid">';
   for (var a = 0; a < agentInstances.length; a++) {
     var inst = agentInstances[a];
-    var ag = t.agents ? t.agents[inst] : null;
-    var agState = ag ? (ag.state === 'spawning' ? 'waiting' : ag.state) : 'waiting';
-    var agOutput = (state.liveOutput[teamId] || []).filter(function(e){ return e.agent === inst; }).map(function(e){ return e.text; }).join('\\n');
+    var agState = getEffectiveAgentState(t, inst);
+    var agOutput = getAgentOutput(teamId, inst);
+    var agSummary = getAgentSummaryText(t, inst, agState, agOutput);
     var verdict = getAgentVerdict(agOutput, inst, agState);
     var verdictStyle = getVerdictStyle(verdict);
+    var dotColor = getAgentDotColor(verdict, agState, agentColors[inst]);
 
     html += '<div class="agent-section" onclick="toggleAgentSection(this)">';
     html += '<div class="agent-section-header">';
     html += '<span class="agent-chevron">&#9654;</span>';
-    html += '<span class="agent-dot-sm" style="background:' + agentColors[inst] + '"></span>';
+    html += '<span class="agent-dot-sm" style="background:' + dotColor + '"></span>';
     html += '<span class="agent-name">' + inst + '</span>';
     html += '<span class="agent-verdict" style="' + verdictStyle + '">' + esc(verdict) + '</span>';
     html += '</div>';
     html += '<div class="agent-section-body">';
-    html += '<pre class="agent-output">' + esc(agOutput || agState) + '</pre>';
+    html += '<pre class="agent-output">' + esc(agSummary) + '</pre>';
     html += '</div></div>';
   }
   html += '</div>';
@@ -903,13 +1051,16 @@ function renderSummaryContent(teamId) {
 }
 
 function getAgentVerdict(output, instance, agState) {
+  if (agState === 'skipped') return 'SKIPPED';
+  if (agState === 'done') return 'Complete';
+  if (agState === 'errored') return 'ERRORED';
   if (!output && (!agState || agState === 'waiting')) return 'WAITING';
   if (output && output.match(/APPROVED/i)) return 'APPROVED';
   if (output && output.match(/REVISION.NEEDED/i)) return 'REVISION_NEEDED';
   if (output && output.match(/REJECTED/i)) return 'REJECTED';
   if (output && output.match(/BLOCKED/i)) return 'BLOCKED';
   if (output && output.match(/COMPLETE/i)) return 'Complete';
-  if (output && output.match(/ERRORED|error/i) && instance !== 'Security-1') return 'ERRORED';
+  if (output && output.match(/\\b(ERRORED|FATAL|PIPELINE_FAILED|UNHANDLED|EXCEPTION)\\b/i) && instance !== 'Security-1') return 'ERRORED';
   if (output && output.match(/SKIPPED/i)) return 'SKIPPED';
   if (output) {
     var metMatch = output.match(new RegExp('\\\\d+/\\\\d+\\\\s*met','i'));
@@ -917,8 +1068,6 @@ function getAgentVerdict(output, instance, agState) {
   }
   if (agState === 'working' || agState === 'active') return 'ACTIVE';
   if (agState === 'spawning') return 'SPAWNING';
-  if (agState === 'done') return 'Complete';
-  if (agState === 'errored') return 'ERRORED';
   if (output) return 'ACTIVE';
   return 'WAITING';
 }
@@ -932,74 +1081,17 @@ function getVerdictStyle(verdict) {
   return 'background:rgba(210,153,34,.12);color:var(--amber)';
 }
 
+function getAgentDotColor(verdict, agState, activeColor) {
+  if (verdict === 'APPROVED' || verdict === 'Complete' || verdict.includes('met')) return 'var(--green)';
+  if (verdict === 'ERRORED' || verdict === 'BLOCKED' || verdict === 'REJECTED') return 'var(--red)';
+  if (verdict === 'ACTIVE' || agState === 'active') return activeColor || 'var(--blue)';
+  if (verdict === 'SKIPPED' || verdict === 'WAITING' || agState === 'skipped') return 'var(--border)';
+  return 'var(--amber)';
+}
+
 window.toggleAgentSection = function(el) {
   el.classList.toggle('expanded');
 };
-
-// ---- Render: Live Content ----
-function renderLiveContent(teamId) {
-  var t = state.teams[teamId];
-  if (!t) return '';
-  var ph = t.currentPhase || 'pre_work';
-  var pi = phaseIndex(ph);
-  var panelTaskText = t.currentTask ? (t.currentTask.description || t.currentTask).toString() : '';
-
-  // Task + elapsed
-  var html = '<div class="live-header">';
-  html += '<div class="live-task">' + esc(panelTaskText || 'No task') + '</div>';
-  html += '<div class="live-elapsed card-elapsed" data-created="' + (t.createdAt||'') + '">' + elapsedSince(t.createdAt) + '</div>';
-  html += '</div>';
-
-  // Phase bar with dots
-  html += '<div class="live-phase-bar">';
-  var labels = ['scan','build','sweep','review','done'];
-  for (var s = 0; s < 5; s++) {
-    var dotCls = '';
-    if (s < pi || pi === 4) dotCls = 'past';
-    else if (s === pi) dotCls = 'current';
-    html += '<div class="live-phase-step">';
-    html += '<div class="live-dot ' + dotCls + '">' + (dotCls==='past'?'&#10003;':(s+1)) + '</div>';
-    html += '<div class="live-dot-label ' + dotCls + '">' + labels[s] + '</div></div>';
-    if (s < 4) html += '<div class="live-connector ' + (s < pi ? 'past' : '') + '"></div>';
-  }
-  html += '</div>';
-
-  // 2x2 agent cards
-  var agentInstances = ['Security-1','Worker-1','Worker-2','Reviewer-1'];
-  var agentColors = { 'Security-1':'#f85149', 'Worker-1':'#3fb950', 'Worker-2':'#3fb950', 'Reviewer-1':'#d2a8ff' };
-  html += '<div class="live-agent-grid">';
-  for (var a = 0; a < 4; a++) {
-    var inst = agentInstances[a];
-    var ag = t.agents ? t.agents[inst] : null;
-    var agState = ag ? (ag.state === 'spawning' ? 'waiting' : ag.state) : 'waiting';
-    var isWorking = agState === 'active';
-    var isDone = agState === 'done';
-    var color = agentColors[inst];
-    var output = '';
-    var entries = state.liveOutput[teamId] || [];
-    for (var ei = entries.length - 1; ei >= 0; ei--) {
-      if (entries[ei].agent === inst) { output = entries[ei].text; break; }
-    }
-
-    html += '<div class="live-agent-card' + (isWorking ? ' active-agent' : '') + '" style="--agent-color:' + color + '">';
-    html += '<div class="live-agent-header">';
-    html += '<span class="live-agent-dot ' + (isWorking ? 'working' : isDone ? 'done' : '') + '"></span>';
-    html += '<span class="live-agent-name">' + inst + '</span>';
-    html += '<span class="live-agent-status" style="color:' + (isWorking ? color : 'var(--text-muted)') + '">' + agState.toUpperCase() + '</span>';
-    html += '</div>';
-    html += '<div class="live-agent-progress"><div class="live-agent-fill" style="width:' + (isDone ? 100 : isWorking ? 50 : 0) + '%;background:' + color + '"></div></div>';
-    html += '<div class="live-agent-output">' + esc(output || (agState === 'waiting' ? 'Waiting...' : '')) + '</div>';
-    html += '</div>';
-  }
-  html += '</div>';
-
-  // Action buttons (same as Summary tab)
-  html += '<div class="live-actions">';
-  html += renderTeamActionButtons(teamId);
-  html += '</div>';
-
-  return html;
-}
 
 // ---- Render: Panel ----
 function renderPanel() {
@@ -1016,27 +1108,12 @@ function renderPanel() {
   var t = state.teams[state.panelTeamId];
   $('panelTitle').textContent = t ? (t.teamName || state.panelTeamId) : state.panelTeamId;
 
-  // Tab highlight
-  qsa('.panel-tab').forEach(function(tab) {
-    tab.classList.toggle('active', tab.dataset.mode === state.panelMode);
-  });
-
   var body = $('panelBody');
   var html = '';
   // Always show feedback blocks at top
   html += renderFeedbackBlocks(state.panelTeamId);
-
-  if (state.panelMode === 'summary') {
-    html += renderSummaryContent(state.panelTeamId);
-  } else {
-    html += '<div class="live-output" id="liveOutputArea">' + renderLiveContent(state.panelTeamId) + '</div>';
-  }
+  html += renderSummaryContent(state.panelTeamId);
   body.innerHTML = html;
-
-  if (state.panelMode === 'live' && state.settings.autoScroll) {
-    var liveArea = $('liveOutputArea');
-    if (liveArea) liveArea.scrollTop = liveArea.scrollHeight;
-  }
 }
 
 // ---- Render: Current View ----
@@ -1082,16 +1159,11 @@ window.__nav = {
   openPanel: function(teamId) {
     state.panelTeamId = teamId;
     state.panelOpen = true;
-    state.panelMode = 'summary';
     renderPanel();
   },
   closePanel: function() {
     state.panelOpen = false;
     state.panelTeamId = null;
-    renderPanel();
-  },
-  switchPanelMode: function(mode) {
-    state.panelMode = mode;
     renderPanel();
   }
 };
@@ -1180,7 +1252,43 @@ window.__modal = {
     $('ctName').value = '';
     $('ctPath').value = '';
     $('ctTask').value = '';
+
+    // Build the Project dropdown from known projects (each rendered with its
+    // last-segment name + team count). Last option is the new-project sentinel.
+    var sel = $('ctProject');
+    sel.innerHTML = '';
+    var paths = Object.keys(state.projects).sort();
+    var preselected = state.currentProject && state.projects[state.currentProject]
+      ? state.currentProject
+      : (paths.length > 0 ? paths[0] : '__new__');
+    for (var i = 0; i < paths.length; i++) {
+      var p = paths[i];
+      var proj = state.projects[p];
+      var opt = document.createElement('option');
+      opt.value = p;
+      var teamCount = proj.teams ? proj.teams.size : 0;
+      opt.textContent = (proj.name || p) + ' (' + teamCount + ' team' + (teamCount === 1 ? '' : 's') + ')';
+      sel.appendChild(opt);
+    }
+    var addNew = document.createElement('option');
+    addNew.value = '__new__';
+    addNew.textContent = paths.length > 0 ? '+ Add new project…' : '+ Create your first project…';
+    sel.appendChild(addNew);
+    sel.value = preselected;
+    this.onProjectPicked();
+
     setTimeout(function() { $('ctName').focus(); }, 100);
+  },
+  onProjectPicked: function() {
+    var sel = $('ctProject');
+    var pathGroup = $('ctPathGroup');
+    if (sel.value === '__new__') {
+      pathGroup.style.display = '';
+      $('ctPath').value = '';
+      setTimeout(function() { $('ctPath').focus(); }, 50);
+    } else {
+      pathGroup.style.display = 'none';
+    }
   },
   assignTask: function(teamId) {
     openModal('assignTaskModal');
@@ -1192,6 +1300,16 @@ window.__modal = {
     openModal('stopModal');
     $('stopTeamId').value = teamId;
     $('stopTeamLabel').textContent = state.teams[teamId] ? (state.teams[teamId].teamName || teamId) : teamId;
+  },
+  deleteTeam: function(teamId) {
+    var teamName = state.teams[teamId] ? (state.teams[teamId].teamName || teamId) : teamId;
+    if (!confirm('Delete team "' + teamName + '"? This removes it from the portfolio. The project files on disk are not touched.')) return;
+    fetch('/api/teams/' + encodeURIComponent(teamId) + '/stop', { method: 'POST' })
+      .then(function(r) {
+        if (!r.ok) return r.json().then(function(d){ throw new Error(d.error || 'Failed to delete'); });
+        showToast('Team "' + teamName + '" deleted');
+      })
+      .catch(function(e) { showToast(e.message, 'error'); });
   },
   createPR: function(teamId) {
     openModal('createPRModal');
@@ -1224,28 +1342,25 @@ window.__modal = {
     attachedImages.splice(idx, 1);
     renderImagePreviews();
   },
-  pickDirectory: function() {
-    fetch('/api/pick-directory', { method: 'POST' })
-      .then(function(r) { return r.json(); })
-      .then(function(data) {
-        if (!data.cancelled && data.path) {
-          $('ctPath').value = data.path;
-        }
-      })
-      .catch(function() {
-        showToast('Could not open folder picker', 'error');
-      });
-  }
 };
 
 // ---- API Calls ----
 window.__api = {
   createTeam: function() {
     var name = $('ctName').value.trim();
-    var projectPath = $('ctPath').value.trim();
+    var sel = $('ctProject');
+    // If user picked an existing project, use its path. If they picked
+    // "+ Add new project", read the revealed path field instead.
+    var projectPath = sel && sel.value && sel.value !== '__new__'
+      ? sel.value
+      : $('ctPath').value.trim();
     var task = $('ctTask').value.trim();
-    if (!name || !projectPath) {
-      showToast('Name and project path are required', 'error');
+    if (!name) {
+      showToast('Team name is required', 'error');
+      return;
+    }
+    if (!projectPath) {
+      showToast(sel && sel.value === '__new__' ? 'New project path is required' : 'Pick a project', 'error');
       return;
     }
     var body = { name: name, projectPath: projectPath };
@@ -1432,6 +1547,9 @@ function connectSSE() {
     var data = JSON.parse(e.data);
     if (state.teams[data.teamId]) {
       state.teams[data.teamId].complexity = data.complexity;
+      if (state.teams[data.teamId].currentTask) {
+        state.teams[data.teamId].currentTask.complexity = data.complexity;
+      }
     }
     renderCurrentView();
   });
@@ -1453,14 +1571,15 @@ function connectSSE() {
     if (state.liveOutput[data.teamId].length > 500) {
       state.liveOutput[data.teamId] = state.liveOutput[data.teamId].slice(-500);
     }
-    if (state.panelOpen && state.panelTeamId === data.teamId && state.panelMode === 'live') {
-      renderPanel();
-    }
+    renderCurrentView();
   });
 
   es.addEventListener('agent-progress', function(e) {
     var data = JSON.parse(e.data);
     if (!state.liveOutput[data.teamId]) state.liveOutput[data.teamId] = [];
+    state.liveOutput[data.teamId] = state.liveOutput[data.teamId].filter(function(entry) {
+      return !(entry.agent === data.instance && entry.type === 'progress');
+    });
     state.liveOutput[data.teamId].push({ agent: data.instance, text: data.text, type: 'progress' });
     if (state.liveOutput[data.teamId].length > 500) {
       state.liveOutput[data.teamId] = state.liveOutput[data.teamId].slice(-500);
@@ -1470,24 +1589,28 @@ function connectSSE() {
       var ag = state.teams[data.teamId].agents[data.instance];
       if (ag) ag.state = 'active';
     }
-    if (state.panelOpen && state.panelTeamId === data.teamId && state.panelMode === 'live') {
-      renderPanel();
-    }
+    renderCurrentView();
   });
 
   es.addEventListener('agent-task', function(e) {
     var data = JSON.parse(e.data);
     if (!state.liveOutput[data.teamId]) state.liveOutput[data.teamId] = [];
     state.liveOutput[data.teamId].push({ agent: data.instance, text: 'Subtask: ' + data.subtask, type: 'output' });
-    if (state.panelOpen && state.panelTeamId === data.teamId && state.panelMode === 'live') {
-      renderPanel();
+    if (state.teams[data.teamId] && state.teams[data.teamId].agents) {
+      var ag = state.teams[data.teamId].agents[data.instance];
+      if (ag) {
+        ag.state = 'active';
+        ag.currentJob = data.subtask;
+      }
     }
+    renderCurrentView();
   });
 
   es.addEventListener('task-complete', function(e) {
     var data = JSON.parse(e.data);
     if (state.teams[data.teamId]) {
       state.teams[data.teamId].lastPhaseDuration = data.durationMs;
+      state.teams[data.teamId].currentPhase = data.phase;
     }
     if (!state.liveOutput[data.teamId]) state.liveOutput[data.teamId] = [];
     state.liveOutput[data.teamId].push({ agent: null, text: 'Phase ' + data.phase + ' complete (' + formatDuration(data.durationMs) + ')', type: 'output' });
@@ -1544,6 +1667,29 @@ function connectSSE() {
       if (data.prUrl) state.teams[data.teamId].prUrl = data.prUrl;
     }
     showToast('Team archived');
+    renderCurrentView();
+  });
+
+  es.addEventListener('team-deleted', function(e) {
+    var data = JSON.parse(e.data);
+    var t = state.teams[data.teamId];
+    if (t) {
+      // Drop from per-project index too so the project disappears when its
+      // last team is deleted.
+      var projPath = t.projectPath;
+      if (projPath && state.projects[projPath]) {
+        state.projects[projPath].teams.delete(data.teamId);
+        if (state.projects[projPath].teams.size === 0) {
+          delete state.projects[projPath];
+        }
+      }
+      delete state.teams[data.teamId];
+    }
+    // Also clear any panel that was viewing this team
+    if (state.panelTeamId === data.teamId) {
+      state.panelOpen = false;
+      state.panelTeamId = null;
+    }
     renderCurrentView();
   });
 
@@ -1636,10 +1782,6 @@ return `<!DOCTYPE html>
     <h3 id="panelTitle"></h3>
     <button class="panel-close" onclick="window.__nav.closePanel()">&#10005;</button>
   </div>
-  <div class="panel-tabs">
-    <div class="panel-tab active" data-mode="summary" onclick="window.__nav.switchPanelMode('summary')">Summary</div>
-    <div class="panel-tab" data-mode="live" onclick="window.__nav.switchPanelMode('live')">Live</div>
-  </div>
   <div class="panel-body" id="panelBody"></div>
 </div>
 
@@ -1658,14 +1800,17 @@ return `<!DOCTYPE html>
     <div class="modal-body">
       <div class="form-group">
         <label>Team Name</label>
-        <input type="text" id="ctName" placeholder="my-feature-team">
+        <input type="text" id="ctName" placeholder="my-feature-team" autocomplete="off" autocapitalize="off" spellcheck="false">
       </div>
       <div class="form-group">
-        <label>Project Path</label>
-        <div class="folder-picker">
-          <input type="text" id="ctPath" placeholder="/path/to/project">
-          <button class="btn btn-secondary" onclick="window.__modal.pickDirectory()">Browse</button>
-        </div>
+        <label>Project</label>
+        <select id="ctProject" onchange="window.__modal.onProjectPicked()">
+          <!-- Populated dynamically by openCreateTeam(): one option per known project plus "+ Add new project" -->
+        </select>
+      </div>
+      <div class="form-group" id="ctPathGroup" style="display:none">
+        <label>New Project Path</label>
+        <input type="text" id="ctPath" placeholder="/path/to/project" autocomplete="off" autocapitalize="off" spellcheck="false">
       </div>
       <div class="form-group">
         <label>Task (optional)</label>

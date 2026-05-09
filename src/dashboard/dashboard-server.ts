@@ -25,6 +25,7 @@ export class DashboardServer {
   private server: http.Server | null = null;
   private sseClients: Set<http.ServerResponse> = new Set();
   private cachedHTML: string | null = null;
+  private directoryPickerInFlight = false;
 
   // Throttle agent-progress events to avoid flooding SSE clients
   private progressThrottles: Map<string, number> = new Map();
@@ -78,7 +79,10 @@ export class DashboardServer {
   private attach(): void {
     this.orchestrator.on('team-created', (teamId) => {
       const status = this.orchestrator.getTeamStatus(teamId);
-      this.broadcast('team-created', { teamId, team: status ?? null });
+      const enriched = status
+        ? { ...status, projectHasPreview: this.checkProjectHasPreview(status.projectPath) }
+        : null;
+      this.broadcast('team-created', { teamId, team: enriched });
     });
 
     this.orchestrator.on('task-assigned', (teamId, description) => {
@@ -138,6 +142,10 @@ export class DashboardServer {
       this.broadcast('team-archived', { teamId, prUrl });
     });
 
+    this.orchestrator.on('team-deleted', (teamId) => {
+      this.broadcast('team-deleted', { teamId });
+    });
+
     this.orchestrator.on('shutdown', () => {
       this.broadcast('shutdown', {});
       for (const client of this.sseClients) {
@@ -186,6 +194,7 @@ export class DashboardServer {
     if (method === 'GET' && pathname === '/api/runtime') return this.handleGetRuntime(res);
     if (method === 'GET' && pathname === '/api/registry') return this.handleGetRegistry(res);
     if (method === 'POST' && pathname === '/api/pick-directory') { this.handlePickDirectory(res); return; }
+    if (method === 'POST' && pathname === '/api/resolve-directory') { this.handleResolveDirectory(req, res); return; }
 
     // /api/teams/:id patterns — decode URI component for team names with spaces/special chars
     const teamMatch = pathname.match(/^\/api\/teams\/([^/]+)$/);
@@ -268,8 +277,11 @@ export class DashboardServer {
       'Connection': 'keep-alive',
     });
 
-    // Send initial state dump
-    const teams = this.orchestrator.getAllTeams();
+    // Send initial state dump (enriched with projectHasPreview, same as REST)
+    const teams = this.orchestrator.getAllTeams().map(t => ({
+      ...t,
+      projectHasPreview: this.checkProjectHasPreview(t.projectPath),
+    }));
     const runtime = this.orchestrator.getAgentRuntime();
     res.write(`event: init\ndata: ${JSON.stringify({ teams, runtime })}\n\n`);
 
@@ -282,7 +294,36 @@ export class DashboardServer {
 
   private handleGetTeams(res: http.ServerResponse): void {
     const teams = this.orchestrator.getAllTeams();
-    this.sendJSON(res, teams);
+    this.sendJSON(res, teams.map(t => ({ ...t, projectHasPreview: this.checkProjectHasPreview(t.projectPath) })));
+  }
+
+  // Cache project-has-preview flags so we don't hit the disk on every poll/render.
+  // 30s TTL is short enough that a Worker producing the first HTML file becomes
+  // visible quickly, long enough to absorb the SSE-driven re-render churn.
+  private previewCache = new Map<string, { has: boolean; checkedAt: number }>();
+  private static readonly PREVIEW_CACHE_TTL_MS = 30_000;
+  private static readonly PREVIEW_SCAN_DIRS = ['', 'dist', 'build', 'public', 'out'];
+
+  private checkProjectHasPreview(projectPath: string): boolean {
+    const cached = this.previewCache.get(projectPath);
+    if (cached && Date.now() - cached.checkedAt < DashboardServer.PREVIEW_CACHE_TTL_MS) {
+      return cached.has;
+    }
+    let has = false;
+    for (const sub of DashboardServer.PREVIEW_SCAN_DIRS) {
+      const dir = sub ? path.join(projectPath, sub) : projectPath;
+      try {
+        const entries = fs.readdirSync(dir, { withFileTypes: true });
+        if (entries.some(e => e.isFile() && e.name.toLowerCase().endsWith('.html'))) {
+          has = true;
+          break;
+        }
+      } catch {
+        // Directory missing or unreadable — try the next candidate
+      }
+    }
+    this.previewCache.set(projectPath, { has, checkedAt: Date.now() });
+    return has;
   }
 
   private handleGetRuntime(res: http.ServerResponse): void {
@@ -295,7 +336,7 @@ export class DashboardServer {
       this.sendJSON(res, { error: `Team "${teamId}" not found` }, 404);
       return;
     }
-    this.sendJSON(res, status);
+    this.sendJSON(res, { ...status, projectHasPreview: this.checkProjectHasPreview(status.projectPath) });
   }
 
   private async handleCreateTeam(
@@ -598,17 +639,142 @@ ${fileListHtml}
   // --- Helpers ---
 
   private handlePickDirectory(res: http.ServerResponse): void {
-    const script = 'POSIX path of (choose folder with prompt "Select project folder")';
-    execFile('osascript', ['-e', script], { timeout: 60000 }, (err, stdout) => {
-      if (err) {
-        // User cancelled the dialog or timeout
-        this.sendJSON(res, { cancelled: true, path: null });
+    if (this.directoryPickerInFlight) {
+      this.sendJSON(res, {
+        error: 'Folder picker is already opening. Finish or cancel the current picker before opening another.',
+      }, 409);
+      return;
+    }
+
+    this.directoryPickerInFlight = true;
+    const startedAt = Date.now();
+    this.pickDirectoryNative((err, selected, unsupported) => {
+      this.directoryPickerInFlight = false;
+      const durationMs = Date.now() - startedAt;
+
+      if (selected) {
+        const cleanPath = selected.endsWith('/') ? selected.slice(0, -1) : selected;
+        this.sendJSON(res, { cancelled: false, path: cleanPath, durationMs });
         return;
       }
-      const selected = stdout.trim();
-      // Remove trailing slash from osascript output
-      const cleanPath = selected.endsWith('/') ? selected.slice(0, -1) : selected;
-      this.sendJSON(res, { cancelled: false, path: cleanPath });
+
+      if (unsupported) {
+        this.sendJSON(res, {
+          cancelled: true,
+          path: null,
+          error: unsupported,
+          durationMs,
+        }, 501);
+        return;
+      }
+
+      this.sendJSON(res, { cancelled: true, path: null, durationMs });
+    });
+  }
+
+  // Resolves the absolute disk path of a directory chosen via the browser-
+  // native HTML5 directory picker (<input type="file" webkitdirectory>).
+  // The browser refuses, by design, to give JS the absolute filesystem path
+  // of any selected file/dir — we only learn the directory's NAME (from the
+  // first file's webkitRelativePath). Spotlight (mdfind) then locates the
+  // matching directory on disk in ~50-200ms. Result: same instant native
+  // picker as Phone-test's file-upload pattern, with no subprocess-spawn cost.
+  private async handleResolveDirectory(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+    try {
+      const body = JSON.parse(await this.readBody(req));
+      const name = typeof body?.name === 'string' ? body.name.trim() : '';
+      if (!name) {
+        this.sendJSON(res, { error: 'name is required' }, 400);
+        return;
+      }
+      // Escape any double quotes in the name to keep the mdfind query well-formed
+      const safeName = name.replace(/"/g, '\\"');
+      const query = `kMDItemFSName == "${safeName}"`;
+      execFile('mdfind', [query], { timeout: 8000 }, (err, stdout) => {
+        if (err) {
+          this.sendJSON(res, { paths: [], error: 'Spotlight search failed; paste the path manually.' });
+          return;
+        }
+        const candidates = stdout
+          .split('\n')
+          .map(p => p.trim())
+          .filter(Boolean);
+        // Filter to existing directories only (mdfind returns files too)
+        const dirs = candidates.filter(p => {
+          try {
+            return fs.statSync(p).isDirectory();
+          } catch {
+            return false;
+          }
+        });
+        // Cap to keep the response small even if the user has dozens of
+        // identically-named directories (rare in practice)
+        this.sendJSON(res, { paths: dirs.slice(0, 20) });
+      });
+    } catch (err: any) {
+      this.sendJSON(res, { error: err.message }, 400);
+    }
+  }
+
+  private pickDirectoryNative(
+    callback: (err: Error | null, selected: string | null, unsupported?: string) => void
+  ): void {
+    if (process.platform === 'darwin') {
+      // Spawn the precompiled `pick-folder` Swift binary that opens
+      // NSOpenPanel directly. This is the same NSOpenPanel that GitHub
+      // Desktop opens via Electron's dialog.showOpenDialog — just delivered
+      // as a standalone CLI so we can call it from a non-Electron Node
+      // server. Skipping AppleScript / JavaScriptCore / AppleScriptObjC
+      // bridges removes the ~300-500ms cold-start cost of the prior
+      // osascript implementation, plus avoids the focus-flicker issue
+      // where the dialog auto-cancelled when activation didn't stick.
+      const binPath = path.resolve(process.cwd(), 'tools', 'pick-folder');
+      execFile(binPath, [], { timeout: 60000 }, (err, stdout) => {
+        callback(err, stdout.trim() || null);
+      });
+      return;
+    }
+
+    if (process.platform === 'win32') {
+      const script = [
+        'Add-Type -AssemblyName System.Windows.Forms',
+        '$dialog = New-Object System.Windows.Forms.FolderBrowserDialog',
+        '$dialog.Description = "Select project folder"',
+        '$dialog.ShowNewFolderButton = $false',
+        '$result = $dialog.ShowDialog()',
+        'if ($result -eq [System.Windows.Forms.DialogResult]::OK) {',
+        '  [Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+        '  Write-Output $dialog.SelectedPath',
+        '  exit 0',
+        '}',
+        'exit 1',
+      ].join('; ');
+      execFile('powershell.exe', [
+        '-NoProfile',
+        '-STA',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        script,
+      ], { timeout: 60000 }, (err, stdout) => {
+        callback(err, stdout.trim() || null);
+      });
+      return;
+    }
+
+    const runKdialog = () => {
+      execFile('kdialog', ['--getexistingdirectory', process.env.HOME ?? '.'], { timeout: 60000 }, (err, stdout) => {
+        const enoent = (err as NodeJS.ErrnoException | null)?.code === 'ENOENT';
+        callback(err, stdout.trim() || null, enoent ? 'No supported Linux folder picker found. Install zenity or kdialog, or paste the path manually.' : undefined);
+      });
+    };
+
+    execFile('zenity', ['--file-selection', '--directory', '--title=Select project folder'], { timeout: 60000 }, (err, stdout) => {
+      if ((err as NodeJS.ErrnoException | null)?.code === 'ENOENT') {
+        runKdialog();
+        return;
+      }
+      callback(err, stdout.trim() || null);
     });
   }
 

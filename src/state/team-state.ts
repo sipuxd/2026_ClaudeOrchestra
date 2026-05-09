@@ -12,6 +12,8 @@ export enum TeamPhase {
   Handoff = 'handoff',
   Review = 'review',
   Done = 'done',
+  PrOpen = 'pr_open',
+  Merged = 'merged',
   Errored = 'errored',
   Cancelled = 'cancelled',
 }
@@ -53,6 +55,20 @@ export interface LoopLimits {
   maxTotalBackwardTransitions: number;
 }
 
+export interface EnforcementReportSummary {
+  phase: string;
+  ok: boolean;
+  checkedAt: string;
+  findingCount: number;
+  blockingCount: number;
+  warningCount: number;
+}
+
+export interface EnforcementState {
+  guardrailReports: EnforcementReportSummary[];
+  lastError?: unknown;
+}
+
 export const DEFAULT_LOOP_LIMITS: LoopLimits = {
   maxRevisions: 3,
   maxRejections: 2,
@@ -71,6 +87,10 @@ export interface TeamStateData {
   counters: LoopCounters;
   createdAt: string;
   updatedAt: string;
+  branchName?: string;
+  prNumber?: number;
+  prUrl?: string;
+  enforcement?: EnforcementState;
 }
 
 // --- Transition errors ---
@@ -89,7 +109,9 @@ const VALID_PHASE_TRANSITIONS: Record<TeamPhase, readonly TeamPhase[]> = {
   [TeamPhase.Work]: [TeamPhase.Handoff, TeamPhase.Done, TeamPhase.Errored, TeamPhase.Cancelled],
   [TeamPhase.Handoff]: [TeamPhase.Review, TeamPhase.Work, TeamPhase.Errored, TeamPhase.Cancelled],
   [TeamPhase.Review]: [TeamPhase.Done, TeamPhase.Work, TeamPhase.PreWork, TeamPhase.Errored, TeamPhase.Cancelled],
-  [TeamPhase.Done]: [TeamPhase.PreWork],
+  [TeamPhase.Done]: [TeamPhase.PreWork, TeamPhase.PrOpen],
+  [TeamPhase.PrOpen]: [TeamPhase.Merged, TeamPhase.Done, TeamPhase.Cancelled],
+  [TeamPhase.Merged]: [],
   [TeamPhase.Errored]: [TeamPhase.PreWork, TeamPhase.Cancelled],
   [TeamPhase.Cancelled]: [],
 };
@@ -353,14 +375,47 @@ export class TeamState {
     this.touch();
   }
 
+  recordGuardrailReport(report: EnforcementReportSummary): void {
+    this.data.enforcement ??= { guardrailReports: [] };
+    this.data.enforcement.guardrailReports.push(report);
+    this.data.enforcement.guardrailReports = this.data.enforcement.guardrailReports.slice(-20);
+    this.touch();
+  }
+
+  recordRuntimeError(error: unknown): void {
+    this.data.enforcement ??= { guardrailReports: [] };
+    this.data.enforcement.lastError = error;
+    this.touch();
+  }
+
   // --- Terminal state checks ---
 
   get isTerminal(): boolean {
     return (
       this.data.currentPhase === TeamPhase.Done ||
+      this.data.currentPhase === TeamPhase.Merged ||
       this.data.currentPhase === TeamPhase.Cancelled ||
       this.data.currentPhase === TeamPhase.Errored
     );
+  }
+
+  // --- Branch & PR management ---
+
+  setBranchName(name: string): void {
+    this.data.branchName = name;
+    this.touch();
+  }
+
+  setPrInfo(prNumber: number, prUrl: string): void {
+    this.data.prNumber = prNumber;
+    this.data.prUrl = prUrl;
+    this.touch();
+  }
+
+  clearPrInfo(): void {
+    this.data.prNumber = undefined;
+    this.data.prUrl = undefined;
+    this.touch();
   }
 
   // --- Private helpers ---

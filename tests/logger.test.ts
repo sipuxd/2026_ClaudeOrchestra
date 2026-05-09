@@ -170,7 +170,7 @@ describe('Logger', () => {
         phase: 'work',
         roleSource: 'Worker',
         roleSourceInstance: 'Worker-1',
-        roleTarget: 'Supervisor',
+        roleTarget: 'Security',
         messageId: 'msg-123',
         flag: 'progress-update',
         data: { percent: 50 },
@@ -184,7 +184,7 @@ describe('Logger', () => {
       expect(e.phase).toBe('work');
       expect(e.roleSource).toBe('Worker');
       expect(e.roleSourceInstance).toBe('Worker-1');
-      expect(e.roleTarget).toBe('Supervisor');
+      expect(e.roleTarget).toBe('Security');
       expect(e.messageId).toBe('msg-123');
       expect(e.flag).toBe('progress-update');
       expect(e.data).toEqual({ percent: 50 });
@@ -226,9 +226,10 @@ describe('Logger', () => {
       fs.mkdirSync(projDir, { recursive: true });
       const rolesDir = path.join(tmpDir, 'roles');
       fs.mkdirSync(rolesDir, { recursive: true });
-      fs.writeFileSync(path.join(rolesDir, 'worker.claude.md'), '# Worker');
-      fs.writeFileSync(path.join(rolesDir, 'security.claude.md'), '# Security');
-      fs.writeFileSync(path.join(rolesDir, 'reviewer.claude.md'), '# Reviewer');
+      fs.writeFileSync(path.join(rolesDir, 'worker-1.agent.md'), '# Worker-1');
+      fs.writeFileSync(path.join(rolesDir, 'worker-2.agent.md'), '# Worker-2');
+      fs.writeFileSync(path.join(rolesDir, 'security.agent.md'), '# Security');
+      fs.writeFileSync(path.join(rolesDir, 'reviewer.agent.md'), '# Reviewer');
       const orchestrator = new PipelineOrchestrator({
         registryPath: path.join(tmpDir, 'registry.json'),
         rolesDir,
@@ -258,9 +259,10 @@ describe('Logger', () => {
       fs.mkdirSync(projDir, { recursive: true });
       const rolesDir = path.join(tmpDir, 'roles');
       fs.mkdirSync(rolesDir, { recursive: true });
-      fs.writeFileSync(path.join(rolesDir, 'worker.claude.md'), '# Worker');
-      fs.writeFileSync(path.join(rolesDir, 'security.claude.md'), '# Security');
-      fs.writeFileSync(path.join(rolesDir, 'reviewer.claude.md'), '# Reviewer');
+      fs.writeFileSync(path.join(rolesDir, 'worker-1.agent.md'), '# Worker-1');
+      fs.writeFileSync(path.join(rolesDir, 'worker-2.agent.md'), '# Worker-2');
+      fs.writeFileSync(path.join(rolesDir, 'security.agent.md'), '# Security');
+      fs.writeFileSync(path.join(rolesDir, 'reviewer.agent.md'), '# Reviewer');
       const orchestrator = new PipelineOrchestrator({
         registryPath: path.join(tmpDir, 'registry2.json'),
         rolesDir,
@@ -288,9 +290,10 @@ describe('Logger', () => {
 
       const rolesDir = path.join(tmpDir, 'roles');
       fs.mkdirSync(rolesDir, { recursive: true });
-      fs.writeFileSync(path.join(rolesDir, 'worker.claude.md'), '# Worker');
-      fs.writeFileSync(path.join(rolesDir, 'security.claude.md'), '# Security');
-      fs.writeFileSync(path.join(rolesDir, 'reviewer.claude.md'), '# Reviewer');
+      fs.writeFileSync(path.join(rolesDir, 'worker-1.agent.md'), '# Worker-1');
+      fs.writeFileSync(path.join(rolesDir, 'worker-2.agent.md'), '# Worker-2');
+      fs.writeFileSync(path.join(rolesDir, 'security.agent.md'), '# Security');
+      fs.writeFileSync(path.join(rolesDir, 'reviewer.agent.md'), '# Reviewer');
       const orchestrator = new PipelineOrchestrator({
         registryPath: path.join(tmpDir, 'registry3.json'),
         rolesDir,

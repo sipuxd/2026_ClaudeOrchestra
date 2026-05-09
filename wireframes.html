@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ClaudeOrchestra — Current + Mission Control Layer</title>
+<style>
+/* Reset */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, sans-serif;
+  background: #0d1117; color: #c9d1d9; font-size: 14px;
+}
+
+/* Tab nav */
+.tab-bar { display: flex; background: #161b22; border-bottom: 1px solid #30363d; position: sticky; top: 0; z-index: 100; }
+.tab { padding: 14px 24px; cursor: pointer; color: #8b949e; font-size: 0.88rem; border-bottom: 2px solid transparent; transition: all 0.2s; }
+.tab:hover { color: #c9d1d9; background: #1c2128; }
+.tab.active { color: #58a6ff; border-bottom-color: #58a6ff; }
+
+.view { display: none; }
+.view.active { display: block; }
+
+/* Section labels */
+.layer-label { margin: 32px 40px 12px; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 1.5px; color: #484f58; display: flex; align-items: center; gap: 10px; }
+.layer-label::after { content: ''; flex: 1; height: 1px; background: #21262d; }
+.layer-num { background: #58a6ff; color: #0d1117; width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-weight: 700; font-size: 0.65rem; margin-right: 2px; }
+.layer-new { background: #238636; }
+.frame-note { margin: 4px 40px 0; font-size: 0.72rem; color: #484f58; font-style: italic; margin-bottom: 28px; }
+.concept-header { padding: 32px 40px 0; }
+.concept-title { font-size: 1.5rem; font-weight: 700; margin-bottom: 6px; }
+.concept-desc { color: #8b949e; font-size: 0.85rem; line-height: 1.6; max-width: 800px; margin-bottom: 24px; }
+
+/* ========================================================
+   ACTUAL DASHBOARD STYLES (faithful to dashboard-ui.ts)
+   ======================================================== */
+.frame { margin: 0 40px 8px; border: 1px solid #30363d; border-radius: 10px; overflow: hidden; background: #0d1117; }
+.layout { display: flex; height: 700px; }
+
+/* Sidebar */
+.sidebar {
+  width: 280px; min-width: 280px; background: #161b22; border-right: 1px solid #30363d;
+  display: flex; flex-direction: column;
+}
+.sidebar-header { padding: 20px 16px; border-bottom: 1px solid #30363d; }
+.logo { display: flex; align-items: center; gap: 10px; }
+.logo-icon { font-size: 1.4rem; color: #58a6ff; }
+.logo-text { font-size: 1.1rem; font-weight: 600; color: #f0f6fc; }
+.logo-accent { color: #58a6ff; }
+.team-list { flex: 1; overflow-y: auto; padding: 8px; }
+.sidebar-project-group { margin-bottom: 12px; }
+.sidebar-project-header { display: flex; align-items: center; gap: 6px; padding: 8px 12px 4px; cursor: pointer; user-select: none; }
+.sidebar-project-chevron { font-size: 0.55rem; color: #484f58; }
+.sidebar-project-name { font-size: 0.65rem; font-weight: 600; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
+.sidebar-project-count { font-size: 0.6rem; color: #484f58; margin-left: auto; }
+.team-item { padding: 12px; border-radius: 8px; cursor: pointer; display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; transition: background 0.15s; }
+.team-item:hover { background: #1c2128; }
+.team-item.active { background: #1f2937; border: 1px solid #30363d; }
+.team-item-name { font-weight: 500; font-size: 0.9rem; color: #e6edf3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.team-item-phase { font-size: 0.7rem; font-weight: 600; padding: 2px 8px; border-radius: 10px; text-transform: uppercase; letter-spacing: 0.5px; white-space: nowrap; }
+.new-team-btn { margin: 12px; padding: 10px; background: #21262d; color: #58a6ff; border: 1px dashed #30363d; border-radius: 8px; font-size: 0.9rem; cursor: pointer; text-align: center; }
+
+/* Main Panel */
+.main-panel { flex: 1; overflow-y: auto; }
+.no-selection { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; color: #484f58; gap: 12px; }
+.no-selection-icon { font-size: 3rem; color: #30363d; }
+.no-selection h2 { color: #8b949e; font-weight: 500; }
+
+.team-detail { padding: 24px; }
+.detail-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+.detail-title { display: flex; align-items: center; gap: 12px; }
+.detail-title h2 { font-size: 1.4rem; color: #f0f6fc; font-weight: 600; }
+.complexity-badge { font-size: 0.7rem; font-weight: 600; padding: 2px 8px; border-radius: 10px; text-transform: uppercase; background: #1f2937; color: #8b949e; letter-spacing: 0.5px; }
+.detail-timing { font-size: 0.85rem; color: #8b949e; font-variant-numeric: tabular-nums; }
+.detail-project { font-size: 0.8rem; color: #484f58; font-family: 'SF Mono', 'Fira Code', monospace; margin-bottom: 16px; padding: 6px 10px; background: #0d1117; border-radius: 6px; border: 1px solid #21262d; }
+.project-label { color: #8b949e; font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; font-size: 0.65rem; margin-right: 8px; }
+
+/* Phase Bar */
+.phase-bar { display: flex; align-items: center; gap: 0; margin-bottom: 24px; padding: 16px 0; }
+.phase-step { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.phase-dot { width: 28px; height: 28px; border-radius: 50%; border: 2px solid #30363d; background: #0d1117; display: flex; align-items: center; justify-content: center; font-size: 0.75rem; z-index: 1; }
+.phase-dot.past { border-color: #3fb950; background: #3fb950; color: #fff; font-weight: 700; }
+.phase-dot.active { border-color: #3fb950; background: #3fb950; color: #fff; font-weight: 700; box-shadow: 0 0 12px #3fb950; animation: pulse 1.5s infinite; }
+.phase-label { font-size: 0.7rem; color: #484f58; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 500; }
+.phase-label.past, .phase-label.active { color: #c9d1d9; }
+.phase-connector { flex: 1; height: 2px; background: #30363d; margin: 0 -2px; margin-bottom: 24px; }
+.phase-connector.past { background: #3fb950; }
+@keyframes pulse { 0%,100% { box-shadow: 0 0 8px #3fb950; } 50% { box-shadow: 0 0 20px #3fb950; } }
+
+/* Task */
+.task-section { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 20px; font-size: 0.9rem; line-height: 1.5; color: #c9d1d9; }
+
+/* Agent Cards */
+.agent-overview { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+.agent-card { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 16px; cursor: pointer; transition: border-color 0.2s, transform 0.15s; }
+.agent-card:hover { border-color: var(--agent-color); transform: translateY(-2px); }
+.agent-card.streaming { border-color: var(--agent-color); }
+.agent-card-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.agent-card-name { font-weight: 600; font-size: 0.85rem; display: flex; align-items: center; gap: 8px; }
+.agent-card-status { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+.agent-dot { width: 8px; height: 8px; border-radius: 50%; background: #30363d; }
+.agent-dot.active { background: var(--agent-color); animation: pulse-dot 1.5s infinite; }
+.agent-dot.done { background: #7ee787; }
+@keyframes pulse-dot { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
+.agent-card-progress { height: 4px; background: #21262d; border-radius: 2px; margin: 12px 0 8px; overflow: hidden; }
+.agent-card-progress-fill { height: 100%; border-radius: 2px; transition: width 0.5s ease; }
+.agent-card-footer { display: flex; justify-content: space-between; align-items: center; margin-top: 8px; }
+.agent-card-percent { font-size: 0.7rem; color: #8b949e; }
+
+/* Agent Detail View */
+.agent-detail-panel { background: #161b22; border: 1px solid #30363d; border-radius: 12px; overflow: hidden; }
+.agent-detail-header { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid #21262d; }
+.agent-detail-name { font-weight: 600; font-size: 1rem; display: flex; align-items: center; gap: 10px; }
+.agent-detail-output { padding: 14px 18px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.82rem; line-height: 1.6; color: #c9d1d9; white-space: pre-wrap; word-break: break-word; background: #0d1117; }
+.agent-detail-stream { padding: 10px 18px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.78rem; line-height: 1.5; color: #7d8590; white-space: pre-wrap; background: #010409; border-top: 1px solid #21262d; }
+.typing-dots { display: inline-flex; align-items: center; gap: 3px; margin-left: 6px; vertical-align: middle; }
+.typing-dots span { display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: #58a6ff; opacity: 0.4; animation: typing-bounce 1.4s ease-in-out infinite; }
+.typing-dots span:nth-child(2) { animation-delay: 0.2s; }
+.typing-dots span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes typing-bounce { 0%,60%,100% { transform:translateY(0); opacity:0.4; } 30% { transform:translateY(-4px); opacity:1; } }
+
+.btn-back { background: none; border: none; color: #58a6ff; font-size: 0.95rem; cursor: pointer; padding: 4px 8px; border-radius: 6px; margin-right: 8px; }
+.btn { padding: 8px 16px; border-radius: 8px; font-size: 0.85rem; font-weight: 600; cursor: pointer; border: none; }
+.btn-primary { background: #238636; color: #fff; }
+.btn-danger { background: #21262d; color: #f85149; border: 1px solid #30363d; }
+
+/* Controls */
+.controls-bar { display: flex; flex-direction: column; gap: 12px; padding: 12px 24px 16px; border-top: 1px solid #30363d; background: #0d1117; }
+.controls-actions { display: flex; gap: 10px; }
+
+/* ========================================================
+   MISSION CONTROL — NEW TOP LAYER
+   ======================================================== */
+.mc-status-strip { display: flex; gap: 8px; margin-left: auto; align-items: center; }
+.mc-stat { padding: 3px 10px; border-radius: 10px; font-size: 0.72rem; font-weight: 600; }
+
+.mc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; padding: 16px; }
+.mc-tile {
+  background: #161b22; border: 1px solid #30363d; border-radius: 12px; overflow: hidden;
+  cursor: pointer; transition: border-color 0.2s, transform 0.15s;
+}
+.mc-tile:hover { border-color: #58a6ff; transform: translateY(-2px); }
+.mc-tile-header { padding: 14px 16px 10px; display: flex; align-items: center; gap: 10px; }
+.mc-tile-name { font-weight: 600; font-size: 1rem; color: #f0f6fc; }
+.mc-tile-count { margin-left: auto; font-size: 0.7rem; color: #484f58; background: #21262d; padding: 2px 8px; border-radius: 8px; }
+.mc-tile-path { padding: 0 16px 10px; font-size: 0.72rem; color: #484f58; font-family: 'SF Mono', monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mc-tile-health { height: 4px; margin: 0 16px 10px; background: #21262d; border-radius: 2px; overflow: hidden; display: flex; }
+.mc-tile-health-seg { height: 100%; }
+.mc-tile-teams { padding: 0 16px 14px; }
+.mc-mini-team { display: flex; align-items: center; gap: 8px; padding: 5px 0; font-size: 0.85rem; }
+.mc-mini-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.mc-mini-name { flex: 1; color: #e6edf3; }
+.mc-mini-phase { font-size: 0.68rem; font-weight: 600; padding: 2px 8px; border-radius: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+.mc-tile-faded { opacity: 0.6; }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+
+/* Tool use highlights */
+.t { color: #58a6ff; }
+.f { color: #7ee787; }
+</style>
+</head>
+<body>
+
+<div class="tab-bar">
+  <div class="tab active" onclick="showTab('new')">NEW: Mission Control + Current</div>
+  <div class="tab" onclick="showTab('current')">Current (as-is reference)</div>
+</div>
+
+<!-- ================================================================ -->
+<!-- NEW: Mission Control Layer + Existing 3 Layers                   -->
+<!-- ================================================================ -->
+<div class="view active" id="new">
+  <div class="concept-header">
+    <div class="concept-title">Current Dashboard + Mission Control Layer</div>
+    <div class="concept-desc">
+      One new layer on top of your existing dashboard. The landing page becomes a project health grid (Mission Control). Everything below it stays exactly as it is today: sidebar with team list, team detail with phase bar and agent cards, agent detail with streaming output.
+    </div>
+  </div>
+
+  <!-- ===== NEW LAYER: Mission Control ===== -->
+  <div class="layer-label"><span class="layer-num layer-new">&#10024;</span> NEW — Mission Control (All Projects)</div>
+  <div class="frame">
+    <div class="layout" style="height:auto">
+      <div class="sidebar">
+        <div class="sidebar-header">
+          <div class="logo"><span class="logo-icon">&#9654;</span><span class="logo-text">Claude<span class="logo-accent">Orchestra</span></span></div>
+        </div>
+        <div class="team-list">
+          <div class="sidebar-project-group">
+            <div class="sidebar-project-header"><span class="sidebar-project-chevron">&#9660;</span><span class="sidebar-project-name">e-commerce-app</span><span class="sidebar-project-count">3</span></div>
+            <div class="team-item"><span class="team-item-name">auth-feature</span><span class="team-item-phase" style="background:#1f6feb22;color:#58a6ff">BUILD</span></div>
+            <div class="team-item"><span class="team-item-name">fix-cart-bug</span><span class="team-item-phase" style="background:#d2992222;color:#d29922">REVIEW</span></div>
+            <div class="team-item"><span class="team-item-name">payment-api</span><span class="team-item-phase" style="background:#23863622;color:#238636">DONE</span></div>
+          </div>
+          <div class="sidebar-project-group">
+            <div class="sidebar-project-header"><span class="sidebar-project-chevron">&#9660;</span><span class="sidebar-project-name">pcoi-app</span><span class="sidebar-project-count">4</span></div>
+            <div class="team-item"><span class="team-item-name">tenant-system</span><span class="team-item-phase" style="background:#1f6feb22;color:#58a6ff">BUILD</span></div>
+            <div class="team-item"><span class="team-item-name">dashboard-ui</span><span class="team-item-phase" style="background:#1f6feb22;color:#58a6ff">SWEEP</span></div>
+            <div class="team-item"><span class="team-item-name">api-refactor</span><span class="team-item-phase" style="background:#23863622;color:#238636">DONE</span></div>
+            <div class="team-item"><span class="team-item-name">fix-login</span><span class="team-item-phase" style="background:#da363322;color:#da3633">ERROR</span></div>
+          </div>
+          <div class="sidebar-project-group">
+            <div class="sidebar-project-header"><span class="sidebar-project-chevron">&#9660;</span><span class="sidebar-project-name">saas-dashboard</span><span class="sidebar-project-count">2</span></div>
+            <div class="team-item"><span class="team-item-name">analytics-page</span><span class="team-item-phase" style="background:#d2992222;color:#d29922">REVIEW</span></div>
+            <div class="team-item"><span class="team-item-name">billing-module</span><span class="team-item-phase" style="background:#1f6feb22;color:#58a6ff">SCAN</span></div>
+          </div>
+          <div class="sidebar-project-group">
+            <div class="sidebar-project-header"><span class="sidebar-project-chevron">&#9660;</span><span class="sidebar-project-name">mobile-api</span><span class="sidebar-project-count">3</span></div>
+            <div class="team-item"><span class="team-item-name">push-notifications</span><span class="team-item-phase" style="background:#1f6feb22;color:#58a6ff">BUILD</span></div>
+            <div class="team-item"><span class="team-item-name">offline-sync</span><span class="team-item-phase" style="background:#23863622;color:#238636">DONE</span></div>
+            <div class="team-item"><span class="team-item-name">fix-timeout</span><span class="team-item-phase" style="background:#23863622;color:#238636">DONE</span></div>
+          </div>
+          <div class="sidebar-project-group">
+            <div class="sidebar-project-header"><span class="sidebar-project-chevron">&#9660;</span><span class="sidebar-project-name">marketing-site</span><span class="sidebar-project-count">2</span></div>
+            <div class="team-item"><span class="team-item-name">landing-page</span><span class="team-item-phase" style="background:#23863622;color:#238636">DONE</span></div>
+            <div class="team-item"><span class="team-item-name">seo-optimization</span><span class="team-item-phase" style="background:#23863622;color:#238636">DONE</span></div>
+          </div>
+        </div>
+        <div class="new-team-btn">+ New Team</div>
+      </div>
+      <div class="main-panel">
+        <!-- THIS IS NEW: the main panel shows project tiles instead of "Create a team" when no team is selected -->
+        <div style="padding:16px 24px 8px;display:flex;align-items:center">
+          <div>
+            <div style="font-size:1.3rem;font-weight:600;color:#f0f6fc">All Projects</div>
+            <div style="font-size:0.82rem;color:#484f58;margin-top:2px">5 projects &middot; 14 teams</div>
+          </div>
+          <div class="mc-status-strip">
+            <div class="mc-stat" style="background:#1f6feb22;color:#58a6ff">5 active</div>
+            <div class="mc-stat" style="background:#d2992222;color:#d29922">2 review</div>
+            <div class="mc-stat" style="background:#23863622;color:#238636">6 done</div>
+            <div class="mc-stat" style="background:#da363322;color:#da3633">1 error</div>
+          </div>
+        </div>
+        <div class="mc-grid">
+          <div class="mc-tile">
+            <div class="mc-tile-header"><span class="mc-tile-name">e-commerce-app</span><span class="mc-tile-count">3 teams</span></div>
+            <div class="mc-tile-path">/Users/josephsip/Documents/e-commerce-app</div>
+            <div class="mc-tile-health">
+              <div class="mc-tile-health-seg" style="background:#1f6feb;width:33%"></div>
+              <div class="mc-tile-health-seg" style="background:#d29922;width:33%"></div>
+              <div class="mc-tile-health-seg" style="background:#238636;width:34%"></div>
+            </div>
+            <div class="mc-tile-teams">
+              <div class="mc-mini-team"><div class="mc-mini-dot" style="background:#1f6feb"></div><span class="mc-mini-name">auth-feature</span><span class="mc-mini-phase" style="background:#1f6feb22;color:#58a6ff">BUILD</span></div>
+              <div class="mc-mini-team"><div class="mc-mini-dot" style="background:#d29922"></div><span class="mc-mini-name">fix-cart-bug</span><span class="mc-mini-phase" style="background:#d2992222;color:#d29922">REVIEW</span></div>
+              <div class="mc-mini-team"><div class="mc-mini-dot" style="background:#238636"></div><span class="mc-mini-name">payment-api</span><span class="mc-mini-phase" style="background:#23863622;color:#238636">DONE</span></div>
+            </div>
+          </div>
+          <div class="mc-tile">
+            <div class="mc-tile-header"><span class="mc-tile-name">pcoi-app</span><span class="mc-tile-count">4 teams</span></div>
+            <div class="mc-tile-path">/Users/josephsip/Documents/pcoi-app</div>
+            <div class="mc-tile-health">
+              <div class="mc-tile-health-seg" style="background:#1f6feb;width:50%"></div>
+              <div class="mc-tile-health-seg" style="background:#238636;width:25%"></div>
+              <div class="mc-tile-health-seg" style="background:#da3633;width:25%"></div>
+            </div>
+            <div class="mc-tile-teams">
+              <div class="mc-mini-team"><div class="mc-mini-dot" style="background:#1f6feb"></div><span class="mc-mini-name">tenant-system</span><span class="mc-mini-phase" style="background:#1f6feb22;color:#58a6ff">BUILD</span></div>
+              <div class="mc-mini-team"><div class="mc-mini-dot" style="background:#1f6feb"></div><span class="mc-mini-name">dashboard-ui</span><span class="mc-mini-phase" style="background:#1f6feb22;color:#58a6ff">SWEEP</span></div>
+              <div class="mc-mini-team"><div class="mc-mini-dot" style="background:#238636"></div><span class="mc-mini-name">api-refactor</span><span class="mc-mini-phase" style="background:#23863622;color:#238636">DONE</span></div>
+              <div class="mc-mini-team"><div class="mc-mini-dot" style="background:#da3633"></div><span class="mc-mini-name">fix-login</span><span class="mc-mini-phase" style="background:#da363322;color:#da3633">ERROR</span></div>
+            </div>
+          </div>
+          <div class="mc-tile">
+            <div class="mc-tile-header"><span class="mc-tile-name">saas-dashboard</span><span class="mc-tile-count">2 teams</span></div>
+            <div class="mc-tile-path">/Users/josephsip/Documents/saas-dashboard</div>
+            <div class="mc-tile-health">
+              <div class="mc-tile-health-seg" style="background:#d29922;width:50%"></div>
+              <div class="mc-tile-health-seg" style="background:#1f6feb;width:50%"></div>
+            </div>
+            <div class="mc-tile-teams">
+              <div class="mc-mini-team"><div class="mc-mini-dot" style="background:#d29922"></div><span class="mc-mini-name">analytics-page</span><span class="mc-mini-phase" style="background:#d2992222;color:#d29922">REVIEW</span></div>
+              <div class="mc-mini-team"><div class="mc-mini-dot" style="background:#1f6feb"></div><span class="mc-mini-name">billing-module</span><span class="mc-mini-phase" style="background:#1f6feb22;color:#58a6ff">SCAN</span></div>
+            </div>
+          </div>
+          <div class="mc-tile">
+            <div class="mc-tile-header"><span class="mc-tile-name">mobile-api</span><span class="mc-tile-count">3 teams</span></div>
+            <div class="mc-tile-path">/Users/josephsip/Documents/mobile-api</div>
+            <div class="mc-tile-health">
+              <div class="mc-tile-health-seg" style="background:#1f6feb;width:33%"></div>
+              <div class="mc-tile-health-seg" style="background:#238636;width:67%"></div>
+            </div>
+            <div class="mc-tile-teams">
+              <div class="mc-mini-team"><div class="mc-mini-dot" style="background:#1f6feb"></div><span class="mc-mini-name">push-notifications</span><span class="mc-mini-phase" style="background:#1f6feb22;color:#58a6ff">BUILD</span></div>
+              <div class="mc-mini-team"><div class="mc-mini-dot" style="background:#238636"></div><span class="mc-mini-name">offline-sync</span><span class="mc-mini-phase" style="background:#23863622;color:#238636">DONE</span></div>
+              <div class="mc-mini-team"><div class="mc-mini-dot" style="background:#238636"></div><span class="mc-mini-name">fix-timeout</span><span class="mc-mini-phase" style="background:#23863622;color:#238636">DONE</span></div>
+            </div>
+          </div>
+          <div class="mc-tile mc-tile-faded">
+            <div class="mc-tile-header"><span class="mc-tile-name">marketing-site</span><span class="mc-tile-count">2 teams</span></div>
+            <div class="mc-tile-path">/Users/josephsip/Documents/marketing-site</div>
+            <div class="mc-tile-health"><div class="mc-tile-health-seg" style="background:#238636;width:100%"></div></div>
+            <div class="mc-tile-teams">
+              <div class="mc-mini-team"><div class="mc-mini-dot" style="background:#238636"></div><span class="mc-mini-name">landing-page</span><span class="mc-mini-phase" style="background:#23863622;color:#238636">DONE</span></div>
+              <div class="mc-mini-team"><div class="mc-mini-dot" style="background:#238636"></div><span class="mc-mini-name">seo-optimization</span><span class="mc-mini-phase" style="background:#23863622;color:#238636">DONE</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="frame-note">This replaces the "Create a team and launch a task" empty state. Shown when no team is selected. Click a tile OR a sidebar team to drill in. Sidebar still works exactly as it does today — this is just a better landing page.</div>
+
+  <!-- ===== EXISTING LAYER 2: Team Detail ===== -->
+  <div class="layer-label"><span class="layer-num">2</span> Team Detail — Exactly As Current (click a team)</div>
+  <div class="frame">
+    <div class="layout">
+      <div class="sidebar">
+        <div class="sidebar-header">
+          <div class="logo"><span class="logo-icon">&#9654;</span><span class="logo-text">Claude<span class="logo-accent">Orchestra</span></span></div>
+        </div>
+        <div class="team-list">
+          <div class="sidebar-project-group">
+            <div class="sidebar-project-header"><span class="sidebar-project-chevron">&#9660;</span><span class="sidebar-project-name">pcoi-app</span><span class="sidebar-project-count">4</span></div>
+            <div class="team-item active"><span class="team-item-name">tenant-system</span><span class="team-item-phase" style="background:#1f6feb22;color:#58a6ff">BUILD</span></div>
+            <div class="team-item"><span class="team-item-name">dashboard-ui</span><span class="team-item-phase" style="background:#1f6feb22;color:#58a6ff">SWEEP</span></div>
+            <div class="team-item"><span class="team-item-name">api-refactor</span><span class="team-item-phase" style="background:#23863622;color:#238636">DONE</span></div>
+            <div class="team-item"><span class="team-item-name">fix-login</span><span class="team-item-phase" style="background:#da363322;color:#da3633">ERROR</span></div>
+          </div>
+          <div class="sidebar-project-group">
+            <div class="sidebar-project-header"><span class="sidebar-project-chevron">&#9660;</span><span class="sidebar-project-name">e-commerce-app</span><span class="sidebar-project-count">3</span></div>
+            <div class="team-item"><span class="team-item-name">auth-feature</span><span class="team-item-phase" style="background:#1f6feb22;color:#58a6ff">BUILD</span></div>
+            <div class="team-item"><span class="team-item-name">fix-cart-bug</span><span class="team-item-phase" style="background:#d2992222;color:#d29922">REVIEW</span></div>
+            <div class="team-item"><span class="team-item-name">payment-api</span><span class="team-item-phase" style="background:#23863622;color:#238636">DONE</span></div>
+          </div>
+        </div>
+        <div class="new-team-btn">+ New Team</div>
+      </div>
+      <div class="main-panel">
+        <div class="team-detail">
+          <div class="detail-header">
+            <div class="detail-title">
+              <h2>tenant-system</h2>
+              <span class="complexity-badge" style="background:#d2992222;color:#d29922">standard</span>
+            </div>
+            <div class="detail-timing">6m 14s</div>
+          </div>
+          <div class="detail-project"><span class="project-label">Project</span>/Users/josephsip/Documents/pcoi-app</div>
+
+          <div class="phase-bar">
+            <div class="phase-step"><div class="phase-dot past">&#10003;</div><div class="phase-label past">SCAN</div></div>
+            <div class="phase-connector past"></div>
+            <div class="phase-step"><div class="phase-dot active">2</div><div class="phase-label active">BUILD</div></div>
+            <div class="phase-connector"></div>
+            <div class="phase-step"><div class="phase-dot">3</div><div class="phase-label">SWEEP</div></div>
+            <div class="phase-connector"></div>
+            <div class="phase-step"><div class="phase-dot">4</div><div class="phase-label">REVIEW</div></div>
+            <div class="phase-connector"></div>
+            <div class="phase-step"><div class="phase-dot">5</div><div class="phase-label">DONE</div></div>
+          </div>
+
+          <div class="task-section">Implement multi-tenant data isolation with row-level security policies and tenant-scoped API middleware</div>
+
+          <div class="agent-overview">
+            <div class="agent-card" style="--agent-color:#da3633">
+              <div class="agent-card-header">
+                <span class="agent-card-name"><span class="agent-dot done"></span>Security-1</span>
+                <span class="agent-card-status" style="color:#7ee787">DONE</span>
+              </div>
+              <div class="agent-card-progress"><div class="agent-card-progress-fill" style="width:100%;background:#238636"></div></div>
+              <div class="agent-card-footer"><span class="agent-card-percent">100% Complete</span></div>
+            </div>
+            <div class="agent-card streaming" style="--agent-color:#238636">
+              <div class="agent-card-header">
+                <span class="agent-card-name"><span class="agent-dot active" style="--agent-color:#238636"></span>Worker-1</span>
+                <span class="agent-card-status" style="color:#238636">WORKING...</span>
+              </div>
+              <div class="agent-card-progress"><div class="agent-card-progress-fill" style="width:55%;background:#238636"></div></div>
+              <div class="agent-card-footer"><span class="agent-card-percent">55% Complete</span></div>
+            </div>
+            <div class="agent-card" style="--agent-color:#238636">
+              <div class="agent-card-header">
+                <span class="agent-card-name"><span class="agent-dot"></span>Worker-2</span>
+                <span class="agent-card-status" style="color:#484f58">IDLE</span>
+              </div>
+              <div class="agent-card-progress"><div class="agent-card-progress-fill" style="width:0%"></div></div>
+              <div class="agent-card-footer"><span class="agent-card-percent">0% Complete</span></div>
+            </div>
+            <div class="agent-card" style="--agent-color:#d29922">
+              <div class="agent-card-header">
+                <span class="agent-card-name"><span class="agent-dot"></span>Reviewer-1</span>
+                <span class="agent-card-status" style="color:#484f58">IDLE</span>
+              </div>
+              <div class="agent-card-progress"><div class="agent-card-progress-fill" style="width:0%"></div></div>
+              <div class="agent-card-footer"><span class="agent-card-percent">0% Complete</span></div>
+            </div>
+          </div>
+
+          <div class="controls-bar" style="position:relative;left:0;right:0">
+            <div class="controls-actions">
+              <button class="btn btn-danger">Stop</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="frame-note">Unchanged from current. This is exactly what you see today when you click a team in the sidebar.</div>
+
+  <!-- ===== EXISTING LAYER 3: Agent Detail ===== -->
+  <div class="layer-label"><span class="layer-num">3</span> Agent Detail — Exactly As Current (click an agent card)</div>
+  <div class="frame">
+    <div class="layout">
+      <div class="sidebar">
+        <div class="sidebar-header">
+          <div class="logo"><span class="logo-icon">&#9654;</span><span class="logo-text">Claude<span class="logo-accent">Orchestra</span></span></div>
+        </div>
+        <div class="team-list">
+          <div class="sidebar-project-group">
+            <div class="sidebar-project-header"><span class="sidebar-project-chevron">&#9660;</span><span class="sidebar-project-name">pcoi-app</span><span class="sidebar-project-count">4</span></div>
+            <div class="team-item active"><span class="team-item-name">tenant-system</span><span class="team-item-phase" style="background:#1f6feb22;color:#58a6ff">BUILD</span></div>
+            <div class="team-item"><span class="team-item-name">dashboard-ui</span><span class="team-item-phase" style="background:#1f6feb22;color:#58a6ff">SWEEP</span></div>
+            <div class="team-item"><span class="team-item-name">api-refactor</span><span class="team-item-phase" style="background:#23863622;color:#238636">DONE</span></div>
+            <div class="team-item"><span class="team-item-name">fix-login</span><span class="team-item-phase" style="background:#da363322;color:#da3633">ERROR</span></div>
+          </div>
+        </div>
+        <div class="new-team-btn">+ New Team</div>
+      </div>
+      <div class="main-panel">
+        <div class="team-detail">
+          <div class="detail-header">
+            <div class="detail-title">
+              <button class="btn-back">&#8249; Back</button>
+              <h2>tenant-system</h2>
+              <span class="complexity-badge" style="background:#d2992222;color:#d29922">standard</span>
+            </div>
+            <div class="detail-timing">6m 14s</div>
+          </div>
+          <div class="detail-project"><span class="project-label">Project</span>/Users/josephsip/Documents/pcoi-app</div>
+
+          <div class="phase-bar">
+            <div class="phase-step"><div class="phase-dot past">&#10003;</div><div class="phase-label past">SCAN</div></div>
+            <div class="phase-connector past"></div>
+            <div class="phase-step"><div class="phase-dot active">2</div><div class="phase-label active">BUILD</div></div>
+            <div class="phase-connector"></div>
+            <div class="phase-step"><div class="phase-dot">3</div><div class="phase-label">SWEEP</div></div>
+            <div class="phase-connector"></div>
+            <div class="phase-step"><div class="phase-dot">4</div><div class="phase-label">REVIEW</div></div>
+            <div class="phase-connector"></div>
+            <div class="phase-step"><div class="phase-dot">5</div><div class="phase-label">DONE</div></div>
+          </div>
+
+          <div class="agent-detail-panel">
+            <div class="agent-detail-header">
+              <span class="agent-detail-name"><span class="agent-dot active" style="--agent-color:#238636"></span>Worker-1</span>
+              <span style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.5px;font-weight:600;color:#238636">Working...</span>
+            </div>
+            <div class="agent-detail-output">
+<span class="t">Tool: Read</span> <span class="f">src/middleware/tenant.ts</span>
+Reading existing tenant middleware to understand current implementation...
+
+The current middleware extracts tenant ID from the JWT token but doesn't
+enforce row-level security at the database layer.
+
+<span class="t">Tool: Write</span> <span class="f">src/db/rls-policies.ts</span>
+Creating row-level security policy definitions for all tenant-scoped
+tables...
+
+<span class="t">Tool: Edit</span> <span class="f">src/middleware/tenant.ts</span>
+Adding RLS context setter to tenant middleware — each request now calls
+SET LOCAL app.current_tenant_id before any queries execute...
+
+<span class="t">Tool: Write</span> <span class="f">src/db/migrations/003-add-rls.ts</span>
+Creating migration to enable RLS on tenant-scoped tables:
+- properties: tenant_id column with policy
+- tenants: self-referential access only
+- maintenance_requests: tenant-scoped through property
+
+<span class="t">Tool: Read</span> <span class="f">src/routes/properties.ts</span>
+Checking if property routes need changes for RLS...
+No changes needed — queries already filter by tenant.</div>
+            <div class="agent-detail-stream">
+<span class="t">Tool: Edit</span> <span class="f">src/routes/maintenance.ts</span>
+Updating maintenance request routes to work with RLS...<span class="typing-dots"><span></span><span></span><span></span></span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="frame-note">Unchanged from current. "&#8249; Back" button returns to agent cards overview. This is exactly what you see today when you click an agent card.</div>
+</div>
+
+<!-- ================================================================ -->
+<!-- CURRENT: As-is reference                                         -->
+<!-- ================================================================ -->
+<div class="view" id="current">
+  <div class="concept-header">
+    <div class="concept-title">Current Dashboard (as-is)</div>
+    <div class="concept-desc">
+      This is what you have today for reference. When no team is selected, the main panel shows a generic "Create a team" message. The Mission Control layer replaces just this empty state.
+    </div>
+  </div>
+
+  <div class="layer-label"><span class="layer-num">1</span> Empty State — No Team Selected</div>
+  <div class="frame">
+    <div class="layout" style="height:400px">
+      <div class="sidebar">
+        <div class="sidebar-header">
+          <div class="logo"><span class="logo-icon">&#9654;</span><span class="logo-text">Claude<span class="logo-accent">Orchestra</span></span></div>
+        </div>
+        <div class="team-list">
+          <div style="text-align:center;color:#484f58;padding:40px 16px;font-size:0.9rem">No teams yet</div>
+        </div>
+        <div class="new-team-btn">+ New Team</div>
+      </div>
+      <div class="main-panel">
+        <div class="no-selection">
+          <div class="no-selection-icon">&#9654;</div>
+          <h2>ClaudeOrchestra Dashboard</h2>
+          <p>Create a team and launch a task to get started.</p>
+          <button class="btn btn-primary" style="margin-top:8px">+ New Team</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="frame-note">This empty state gets replaced by the Mission Control grid. Everything else stays the same.</div>
+
+  <div class="layer-label"><span class="layer-num">2</span> Team Detail (current)</div>
+  <div class="frame">
+    <div class="layout">
+      <div class="sidebar">
+        <div class="sidebar-header">
+          <div class="logo"><span class="logo-icon">&#9654;</span><span class="logo-text">Claude<span class="logo-accent">Orchestra</span></span></div>
+        </div>
+        <div class="team-list">
+          <div class="sidebar-project-group">
+            <div class="sidebar-project-header"><span class="sidebar-project-chevron">&#9660;</span><span class="sidebar-project-name">pcoi-app</span><span class="sidebar-project-count">1</span></div>
+            <div class="team-item active"><span class="team-item-name">tenant-system</span><span class="team-item-phase" style="background:#1f6feb22;color:#58a6ff">BUILD</span></div>
+          </div>
+        </div>
+        <div class="new-team-btn">+ New Team</div>
+      </div>
+      <div class="main-panel">
+        <div class="team-detail">
+          <div class="detail-header">
+            <div class="detail-title">
+              <h2>tenant-system</h2>
+              <span class="complexity-badge" style="background:#d2992222;color:#d29922">standard</span>
+            </div>
+            <div class="detail-timing">6m 14s</div>
+          </div>
+          <div class="detail-project"><span class="project-label">Project</span>/Users/josephsip/Documents/pcoi-app</div>
+
+          <div class="phase-bar">
+            <div class="phase-step"><div class="phase-dot past">&#10003;</div><div class="phase-label past">SCAN</div></div>
+            <div class="phase-connector past"></div>
+            <div class="phase-step"><div class="phase-dot active">2</div><div class="phase-label active">BUILD</div></div>
+            <div class="phase-connector"></div>
+            <div class="phase-step"><div class="phase-dot">3</div><div class="phase-label">SWEEP</div></div>
+            <div class="phase-connector"></div>
+            <div class="phase-step"><div class="phase-dot">4</div><div class="phase-label">REVIEW</div></div>
+            <div class="phase-connector"></div>
+            <div class="phase-step"><div class="phase-dot">5</div><div class="phase-label">DONE</div></div>
+          </div>
+
+          <div class="task-section">Implement multi-tenant data isolation with row-level security policies and tenant-scoped API middleware</div>
+
+          <div class="agent-overview">
+            <div class="agent-card" style="--agent-color:#da3633">
+              <div class="agent-card-header">
+                <span class="agent-card-name"><span class="agent-dot done"></span>Security-1</span>
+                <span class="agent-card-status" style="color:#7ee787">DONE</span>
+              </div>
+              <div class="agent-card-progress"><div class="agent-card-progress-fill" style="width:100%;background:#238636"></div></div>
+              <div class="agent-card-footer"><span class="agent-card-percent">100% Complete</span></div>
+            </div>
+            <div class="agent-card streaming" style="--agent-color:#238636">
+              <div class="agent-card-header">
+                <span class="agent-card-name"><span class="agent-dot active" style="--agent-color:#238636"></span>Worker-1</span>
+                <span class="agent-card-status" style="color:#238636">WORKING...</span>
+              </div>
+              <div class="agent-card-progress"><div class="agent-card-progress-fill" style="width:55%;background:#238636"></div></div>
+              <div class="agent-card-footer"><span class="agent-card-percent">55% Complete</span></div>
+            </div>
+            <div class="agent-card" style="--agent-color:#238636">
+              <div class="agent-card-header">
+                <span class="agent-card-name"><span class="agent-dot"></span>Worker-2</span>
+                <span class="agent-card-status" style="color:#484f58">IDLE</span>
+              </div>
+              <div class="agent-card-progress"><div class="agent-card-progress-fill" style="width:0%"></div></div>
+              <div class="agent-card-footer"><span class="agent-card-percent">0% Complete</span></div>
+            </div>
+            <div class="agent-card" style="--agent-color:#d29922">
+              <div class="agent-card-header">
+                <span class="agent-card-name"><span class="agent-dot"></span>Reviewer-1</span>
+                <span class="agent-card-status" style="color:#484f58">IDLE</span>
+              </div>
+              <div class="agent-card-progress"><div class="agent-card-progress-fill" style="width:0%"></div></div>
+              <div class="agent-card-footer"><span class="agent-card-percent">0% Complete</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="layer-label"><span class="layer-num">3</span> Agent Detail (current)</div>
+  <div class="frame">
+    <div class="layout">
+      <div class="sidebar">
+        <div class="sidebar-header">
+          <div class="logo"><span class="logo-icon">&#9654;</span><span class="logo-text">Claude<span class="logo-accent">Orchestra</span></span></div>
+        </div>
+        <div class="team-list">
+          <div class="sidebar-project-group">
+            <div class="sidebar-project-header"><span class="sidebar-project-chevron">&#9660;</span><span class="sidebar-project-name">pcoi-app</span><span class="sidebar-project-count">1</span></div>
+            <div class="team-item active"><span class="team-item-name">tenant-system</span><span class="team-item-phase" style="background:#1f6feb22;color:#58a6ff">BUILD</span></div>
+          </div>
+        </div>
+        <div class="new-team-btn">+ New Team</div>
+      </div>
+      <div class="main-panel">
+        <div class="team-detail">
+          <div class="detail-header">
+            <div class="detail-title">
+              <button class="btn-back">&#8249; Back</button>
+              <h2>tenant-system</h2>
+            </div>
+            <div class="detail-timing">6m 14s</div>
+          </div>
+          <div class="agent-detail-panel">
+            <div class="agent-detail-header">
+              <span class="agent-detail-name"><span class="agent-dot active" style="--agent-color:#238636"></span>Worker-1</span>
+              <span style="font-size:0.7rem;text-transform:uppercase;letter-spacing:0.5px;font-weight:600;color:#238636">Working...</span>
+            </div>
+            <div class="agent-detail-output">
+<span class="t">Tool: Read</span> <span class="f">src/middleware/tenant.ts</span>
+Reading existing tenant middleware...
+
+<span class="t">Tool: Write</span> <span class="f">src/db/rls-policies.ts</span>
+Creating row-level security policy definitions...
+
+<span class="t">Tool: Edit</span> <span class="f">src/middleware/tenant.ts</span>
+Adding RLS context setter to tenant middleware...</div>
+            <div class="agent-detail-stream">
+<span class="t">Tool: Edit</span> <span class="f">src/routes/maintenance.ts</span>
+Updating maintenance request routes...<span class="typing-dots"><span></span><span></span><span></span></span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function showTab(id) {
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  event.target.classList.add('active');
+}
+</script>
+</body>
+</html>

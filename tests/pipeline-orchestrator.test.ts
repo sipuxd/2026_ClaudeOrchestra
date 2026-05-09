@@ -2,8 +2,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
+import { execSync } from 'node:child_process';
 import { TeamPhase } from '../src/state/team-state.js';
 import { Role } from '../src/roles/role-types.js';
+import { AgentState } from '../src/types/index.js';
 
 // --- Mock infrastructure for pipeline orchestrator ---
 // The pipeline creates multiple query() calls (one per agent session).
@@ -139,7 +141,28 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => {
 });
 
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
-import { PipelineOrchestrator, parseSecurityVerdict, parseReviewVerdict, parseVerifyVerdict, parseClassification } from '../src/pipeline-orchestrator.js';
+import { PipelineOrchestrator, parseSecurityVerdict, parseReviewVerdict, parseVerifyVerdict, parseClassification, postProcessRequirements, sendWithVerdict, MalformedVerdictError } from '../src/pipeline-orchestrator.js';
+
+const GUARDED_ENV_KEYS = [
+  'CLAUDE_CODE_USE_BEDROCK',
+  'CLAUDE_CODE_USE_VERTEX',
+  'CLAUDE_CODE_USE_FOUNDRY',
+  'ANTHROPIC_AUTH_TOKEN',
+  'ANTHROPIC_API_KEY',
+  'CODEX_API_KEY',
+  'OPENAI_API_KEY',
+  'OPENAI_AUTH_TOKEN',
+];
+
+function initGitProject(dir: string): void {
+  execSync('git init', { cwd: dir, stdio: 'pipe' });
+  execSync('git config user.email "test@test.com"', { cwd: dir, stdio: 'pipe' });
+  execSync('git config user.name "Test"', { cwd: dir, stdio: 'pipe' });
+  fs.writeFileSync(path.join(dir, 'README.md'), 'initial\n');
+  execSync('git add README.md', { cwd: dir, stdio: 'pipe' });
+  execSync('git commit -m initial', { cwd: dir, stdio: 'pipe' });
+  execSync('git branch -M main', { cwd: dir, stdio: 'pipe' });
+}
 
 describe('PipelineOrchestrator', () => {
   let tmpDir: string;
@@ -147,18 +170,30 @@ describe('PipelineOrchestrator', () => {
   let rolesDir: string;
   let orchestrator: PipelineOrchestrator;
   let mock: ReturnType<typeof createPipelineMock>;
+  let originalGuardedEnv: Record<string, string | undefined>;
 
   beforeEach(() => {
+    originalGuardedEnv = {};
+    for (const key of GUARDED_ENV_KEYS) {
+      originalGuardedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pipeline-test-'));
     projectDir = path.join(tmpDir, 'project');
     rolesDir = path.join(tmpDir, 'roles');
     fs.mkdirSync(projectDir, { recursive: true });
     fs.mkdirSync(rolesDir, { recursive: true });
 
-    // Create role prompt files (reuses subagent prompts)
-    fs.writeFileSync(path.join(rolesDir, 'worker.claude.md'), '# Worker\nYou execute coding tasks.');
-    fs.writeFileSync(path.join(rolesDir, 'security.claude.md'), '# Security\nYou scan for security issues.');
-    fs.writeFileSync(path.join(rolesDir, 'reviewer.claude.md'), '# Reviewer\nYou review code quality.');
+    // Create role prompt files with frontmatter (config is read from frontmatter)
+    fs.writeFileSync(path.join(rolesDir, 'worker-1.agent.md'),
+      '---\nname: worker-1\nmodel: claude-opus-4-6\neffort: high\nmaxTurns: 50\n---\n\n# Worker-1\nYou execute coding tasks.');
+    fs.writeFileSync(path.join(rolesDir, 'worker-2.agent.md'),
+      '---\nname: worker-2\nmodel: claude-opus-4-6\neffort: medium\nmaxTurns: 20\ndisallowedTools: Write, Edit, Bash\n---\n\n# Worker-2\nYou verify requirements.');
+    fs.writeFileSync(path.join(rolesDir, 'security.agent.md'),
+      '---\nname: security\nmodel: claude-opus-4-6\neffort: low\nmaxTurns: 5\ndisallowedTools: Write, Edit, Bash\n---\n\n# Security\nYou scan for security issues.');
+    fs.writeFileSync(path.join(rolesDir, 'reviewer.agent.md'),
+      '---\nname: reviewer\nmodel: claude-opus-4-6\neffort: low\nmaxTurns: 5\ndisallowedTools: Write, Edit, Bash\n---\n\n# Reviewer\nYou review code quality.');
 
     mock = createPipelineMock();
     vi.mocked(sdkQuery).mockImplementation(mock.mockQueryFn);
@@ -178,6 +213,14 @@ describe('PipelineOrchestrator', () => {
       // Best effort cleanup
     }
     fs.rmSync(tmpDir, { recursive: true, force: true });
+    for (const key of GUARDED_ENV_KEYS) {
+      const value = originalGuardedEnv[key];
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
     vi.restoreAllMocks();
   });
 
@@ -196,16 +239,24 @@ describe('PipelineOrchestrator', () => {
         .toThrow('already exists');
     });
 
-    it('enforces max concurrent teams', () => {
-      const p1 = path.join(tmpDir, 'p1'); fs.mkdirSync(p1, { recursive: true });
-      const p2 = path.join(tmpDir, 'p2'); fs.mkdirSync(p2, { recursive: true });
-      const p3 = path.join(tmpDir, 'p3'); fs.mkdirSync(p3, { recursive: true });
-      const p4 = path.join(tmpDir, 'p4'); fs.mkdirSync(p4, { recursive: true });
-      orchestrator.createTeam('t1', p1);
-      orchestrator.createTeam('t2', p2);
-      orchestrator.createTeam('t3', p3);
-      expect(() => orchestrator.createTeam('t4', p4))
-        .toThrow('Maximum concurrent teams');
+    it('enforces max concurrent teams per project (not global)', () => {
+      // The limit is per-project: a single project can hold up to
+      // maxConcurrentTeams teams, but a different project gets its own slots.
+      const pA = path.join(tmpDir, 'pA'); fs.mkdirSync(pA, { recursive: true });
+      const pB = path.join(tmpDir, 'pB'); fs.mkdirSync(pB, { recursive: true });
+
+      // Fill project A to the cap (test config sets maxConcurrentTeams=3).
+      orchestrator.createTeam('a1', pA);
+      orchestrator.createTeam('a2', pA);
+      orchestrator.createTeam('a3', pA);
+
+      // 4th team in the same project must be rejected.
+      expect(() => orchestrator.createTeam('a4', pA))
+        .toThrow(/Maximum concurrent teams.*for this project/);
+
+      // But a team in a DIFFERENT project succeeds — slots are per-project.
+      const stateB = orchestrator.createTeam('b1', pB);
+      expect(stateB).toBeDefined();
     });
 
     it('emits team-created event', () => {
@@ -255,9 +306,15 @@ describe('PipelineOrchestrator', () => {
       expect(result.verdict).toBe('BLOCKED');
     });
 
-    it('defaults to APPROVED for unclear text', () => {
+    it('returns AMBIGUOUS for unclear text (no longer fails open)', () => {
+      // Previously defaulted to APPROVED — silent failure-open on a security gate.
+      // Now strict: anything not starting with the verdict prefix is AMBIGUOUS,
+      // forcing the orchestrator to retry once and then fail loud.
       const result = parseSecurityVerdict('Clearance report: all files are safe...');
-      expect(result.verdict).toBe('APPROVED');
+      expect(result.verdict).toBe('AMBIGUOUS');
+      if (result.verdict === 'AMBIGUOUS') {
+        expect(result.raw).toContain('Clearance report');
+      }
     });
 
     it('handles leading whitespace', () => {
@@ -282,9 +339,65 @@ describe('PipelineOrchestrator', () => {
       expect(result.verdict).toBe('REJECTED');
     });
 
-    it('defaults to APPROVED for unclear text', () => {
+    it('returns AMBIGUOUS when prefix is missing (no fuzzy fallback)', () => {
+      // Previously a fuzzy regex matched 'looks good' and returned APPROVED.
+      // The fuzzy matchers were removed because they masked prompt drift —
+      // strict prefix is the contract, AMBIGUOUS surfaces the drift.
       const result = parseReviewVerdict('The code looks good overall');
+      expect(result.verdict).toBe('AMBIGUOUS');
+      if (result.verdict === 'AMBIGUOUS') {
+        expect(result.raw).toContain('looks good');
+      }
+    });
+
+    // Regression fixtures for the <thinking>-strip prerequisite.
+    // Without the strip at the top of parseReviewVerdict, each of these returns
+    // the wrong verdict (silent flip toward less-severe). With the strip, the
+    // explicit prefix check sees the post-thinking content and returns correctly.
+    it('parses REVISION_NEEDED through a leaked <thinking> block containing approve language', () => {
+      const result = parseReviewVerdict('<thinking>looks good</thinking>\n\nREVISION_NEEDED — missing test');
+      expect(result.verdict).toBe('REVISION_NEEDED');
+    });
+
+    it('parses REJECTED through a leaked <thinking> block containing approve-implying reasoning', () => {
+      const result = parseReviewVerdict(
+        '<thinking>The implementation looks good but the error path has a bug</thinking>\n\nREJECTED — error path crashes on null input'
+      );
+      expect(result.verdict).toBe('REJECTED');
+    });
+
+    it('parses APPROVED through a leaked <thinking> block containing revision-implying reasoning', () => {
+      const result = parseReviewVerdict(
+        '<thinking>code is well-implemented but missing tests would normally need revision</thinking>\n\nAPPROVED — tests cover the same paths via consumers'
+      );
       expect(result.verdict).toBe('APPROVED');
+    });
+  });
+
+  describe('postProcessRequirements', () => {
+    it('passes through a clean numbered list unchanged', () => {
+      const input = '1. Add a button\n2. Add a test';
+      expect(postProcessRequirements(input)).toBe('1. Add a button\n2. Add a test');
+    });
+
+    it('strips a leaked <thinking> block before a numbered list', () => {
+      const input = '<thinking>reasoning text</thinking>\n\n1. Add a button\n2. Add a test';
+      expect(postProcessRequirements(input)).toBe('1. Add a button\n2. Add a test');
+    });
+
+    it('strips a leaked <thinking> block whose content contains its own numbered list', () => {
+      // Without the two-step strip (thinking first, then prefix-to-numbered-line),
+      // the lookahead in step 2 would anchor on "1. fake consideration" inside
+      // the thinking block and leave its content in the output.
+      const input = '<thinking>I considered:\n1. fake consideration\n2. another fake</thinking>\n\n1. real requirement';
+      expect(postProcessRequirements(input)).toBe('1. real requirement');
+    });
+
+    it('passes non-numbered prose through unchanged', () => {
+      // No <thinking> to strip; no ^\d+\. anchor for step 2 to find — the
+      // function returns the trimmed input as-is so runWithRequirements's
+      // truthy check still fires (existing behavior preserved).
+      expect(postProcessRequirements('No requirements found')).toBe('No requirements found');
     });
   });
 
@@ -300,6 +413,26 @@ describe('PipelineOrchestrator', () => {
 
       // Simple task: only 1 query() call (Worker-1)
       expect(mock.sessions.length).toBe(1);
+    });
+
+    it('does not block simple tasks on requirements extraction', async () => {
+      const orch = new PipelineOrchestrator({
+        registryPath: path.join(tmpDir, 'registry-simple-no-requirements.json'),
+        rolesDir,
+        maxConcurrentTeams: 3,
+      });
+
+      try {
+        orch.createTeam('simple-no-requirements', projectDir);
+        orch.assignTask('simple-no-requirements', 'build me a calculator');
+
+        await new Promise(resolve => setTimeout(resolve, 50));
+
+        expect(mock.sessions.length).toBe(1);
+        expect(mock.getSession(0).receivedMessages.join('\n')).toContain('build me a calculator');
+      } finally {
+        await orch.shutdown();
+      }
     });
 
     it('completes simple pipeline with Worker-1 result', async () => {
@@ -327,6 +460,10 @@ describe('PipelineOrchestrator', () => {
 
       const status = orchestrator.getTeamStatus('simple');
       expect(status?.currentPhase).toBe(TeamPhase.Done);
+      expect(status?.agents['Worker-1'].state).toBe(AgentState.Done);
+      expect(status?.agents['Worker-2'].state).toBe(AgentState.Spawning);
+      expect(status?.agents['Security-1'].state).toBe(AgentState.Spawning);
+      expect(status?.agents['Reviewer-1'].state).toBe(AgentState.Spawning);
     });
 
     it('emits task-classified with simple complexity', () => {
@@ -356,6 +493,34 @@ describe('PipelineOrchestrator', () => {
       const workerSession = mock.getSession(0);
       expect(workerSession.options.permissionMode).toBe('bypassPermissions');
       expect(workerSession.options.allowDangerouslySkipPermissions).toBe(true);
+    });
+
+    it('blocks secret-like changed files before simple pipeline completion', async () => {
+      initGitProject(projectDir);
+      const errorPromise = new Promise<Error>((resolve) => {
+        orchestrator.on('error', (_teamId, error) => resolve(error));
+      });
+
+      orchestrator.createTeam('guarded-simple', projectDir);
+      orchestrator.assignTask('guarded-simple', 'fix a typo');
+
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      const workerSession = mock.getSession(0);
+      fs.writeFileSync(
+        path.join(projectDir, 'new-secret.txt'),
+        'api_key = "sk-proj-abcdefghijklmnopqrstuvwxyz"\n',
+        'utf-8',
+      );
+      workerSession.respond('Done.');
+      workerSession.complete();
+
+      const error = await errorPromise;
+      const status = orchestrator.getTeamStatus('guarded-simple');
+
+      expect(error.message).toContain('Guardrail audit blocked');
+      expect(status?.currentPhase).toBe(TeamPhase.Errored);
+      expect((status?.enforcement?.lastError as any)?.category).toBe('guardrail');
     });
   });
 
@@ -442,6 +607,10 @@ describe('PipelineOrchestrator', () => {
 
       const status = orchestrator.getTeamStatus('standard');
       expect(status?.currentPhase).toBe(TeamPhase.Done);
+      expect(status?.agents['Security-1'].state).toBe(AgentState.Done);
+      expect(status?.agents['Worker-1'].state).toBe(AgentState.Done);
+      expect(status?.agents['Worker-2'].state).toBe(AgentState.Done);
+      expect(status?.agents['Reviewer-1'].state).toBe(AgentState.Done);
 
       expect(phases).toContain(TeamPhase.Work);
       expect(phases).toContain(TeamPhase.Handoff);
@@ -461,16 +630,33 @@ describe('PipelineOrchestrator', () => {
       }
     });
 
-    it('uses per-role effort levels', async () => {
+    it('passes governance hooks to all agent sessions', async () => {
       orchestrator.createTeam('standard', projectDir);
       orchestrator.assignTask('standard', 'implement user authentication with JWT tokens and database integration');
 
       await new Promise(resolve => setTimeout(resolve, 50));
 
-      // Sessions: [0]=Security, [1]=Worker-1, [2]=Worker-2, [3]=Reviewer
+      // All 4 sessions should have PreToolUse and PostToolUse hooks
+      for (let i = 0; i < 4; i++) {
+        const hooks = mock.getSession(i).options.hooks as Record<string, unknown[]>;
+        expect(hooks).toBeDefined();
+        expect(hooks.PreToolUse).toHaveLength(1);
+        expect(hooks.PostToolUse).toHaveLength(1);
+      }
+    });
+
+    it('uses per-instance effort levels from frontmatter', async () => {
+      orchestrator.createTeam('standard', projectDir);
+      orchestrator.assignTask('standard', 'implement user authentication with JWT tokens and database integration');
+
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      // Sessions: [0]=Security, [1]=Worker-1, [2]=Worker-2, [3]=Reviewer.
+      // Worker-1 and Worker-2 now load separate prompt files and may carry
+      // different effort levels in frontmatter (verifier needs less than implementer).
       expect(mock.getSession(0).options.effort).toBe('low');    // Security
-      expect(mock.getSession(1).options.effort).toBe('high');   // Worker-1
-      expect(mock.getSession(2).options.effort).toBe('high');   // Worker-2
+      expect(mock.getSession(1).options.effort).toBe('high');   // Worker-1 (implementer)
+      expect(mock.getSession(2).options.effort).toBe('medium'); // Worker-2 (verifier)
       expect(mock.getSession(3).options.effort).toBe('low');    // Reviewer
     });
   });
@@ -552,6 +738,81 @@ describe('PipelineOrchestrator', () => {
       expect(state).toBeDefined();
     });
 
+    it('defaults to Claude subscription runtime', () => {
+      expect(orchestrator.getAgentRuntime()).toEqual({
+        provider: 'claude',
+        auth: 'subscription',
+      });
+    });
+
+    it('accepts Codex subscription runtime as the global provider', async () => {
+      const orch = new PipelineOrchestrator({
+        registryPath: path.join(tmpDir, 'registry-codex.json'),
+        rolesDir,
+        agentRuntime: {
+          provider: 'codex',
+          auth: 'subscription',
+          model: 'gpt-5.5',
+        },
+      });
+
+      expect(orch.getAgentRuntime()).toEqual({
+        provider: 'codex',
+        auth: 'subscription',
+        model: 'gpt-5.5',
+      });
+      await orch.shutdown();
+    });
+
+    it('uses global runtime model before per-role model config', async () => {
+      const orch = new PipelineOrchestrator({
+        registryPath: path.join(tmpDir, 'registry-runtime-model.json'),
+        rolesDir,
+        agentRuntime: {
+          provider: 'claude',
+          auth: 'subscription',
+          model: 'claude-runtime-model',
+        },
+        models: { [Role.Worker]: 'claude-role-model' },
+        skipRequirements: true,
+      });
+
+      orch.createTeam('runtime-model', projectDir);
+      orch.assignTask('runtime-model', 'fix a typo');
+
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      const workerSession = mock.getSession(mock.sessions.length - 1);
+      expect(workerSession.options.model).toBe('claude-runtime-model');
+      await orch.shutdown();
+    });
+
+    it('rejects Codex subscription runtime when API key env vars are set', () => {
+      process.env.OPENAI_API_KEY = 'test-key';
+
+      expect(() => new PipelineOrchestrator({
+        registryPath: path.join(tmpDir, 'registry-codex-api-key.json'),
+        rolesDir,
+        agentRuntime: {
+          provider: 'codex',
+          auth: 'subscription',
+        },
+      })).toThrow('Codex subscription auth requested');
+    });
+
+    it('rejects Claude subscription runtime when API key env vars are set', () => {
+      process.env.ANTHROPIC_API_KEY = 'test-key';
+
+      expect(() => new PipelineOrchestrator({
+        registryPath: path.join(tmpDir, 'registry-claude-api-key.json'),
+        rolesDir,
+        agentRuntime: {
+          provider: 'claude',
+          auth: 'subscription',
+        },
+      })).toThrow('Claude subscription auth requested');
+    });
+
     it('respects model overrides', async () => {
       const orch = new PipelineOrchestrator({
         registryPath: path.join(tmpDir, 'registry-model.json'),
@@ -597,6 +858,16 @@ describe('PipelineOrchestrator', () => {
       // Should use default registryPath, not crash
       expect(orch).toBeDefined();
     });
+
+    it('enforces Worker-2 SDK-level tool denial via per-instance frontmatter', () => {
+      // Worker-2's frontmatter declares disallowedTools: Write, Edit, Bash.
+      // The orchestrator must pick this up per-instance, not per-role,
+      // otherwise Worker-1's empty disallowedTools would leak to Worker-2
+      // and the verifier could write/edit code despite its prompt.
+      const tools = (orchestrator as any).disallowedTools as Record<string, string[]>;
+      expect(tools['Worker-2']).toEqual(['Write', 'Edit', 'Bash']);
+      expect(tools['Worker-1']).toEqual([]);
+    });
   });
 
   // --- getAllTeams / getTeamStatus ---
@@ -633,20 +904,6 @@ describe('PipelineOrchestrator', () => {
 
       expect(() => orchestrator.assignTask('busy', 'another task'))
         .toThrow('already has an active pipeline');
-    });
-  });
-
-  // --- No supervisor prompt needed ---
-
-  describe('no supervisor', () => {
-    it('does not require supervisor.claude.md prompt file', () => {
-      // Verify no supervisor file was created in rolesDir
-      expect(fs.existsSync(path.join(rolesDir, 'supervisor.claude.md'))).toBe(false);
-
-      // Pipeline should still work — no Supervisor LLM needed
-      orchestrator.createTeam('no-supervisor', projectDir);
-      orchestrator.assignTask('no-supervisor', 'fix a typo');
-      // No error means success
     });
   });
 
@@ -860,9 +1117,22 @@ describe('PipelineOrchestrator', () => {
       expect(result.verdict).toBe('GAPS_FOUND');
     });
 
-    it('defaults to COMPLETE for unclear text', () => {
+    it('returns AMBIGUOUS for unclear text (no longer trusts the verifier silently)', () => {
+      // Previously defaulted to COMPLETE if no GAPS_FOUND prefix was seen and
+      // no checklist patterns matched — meaning a malformed verifier response
+      // would silently pass the gate. Now strict: AMBIGUOUS triggers retry.
       const result = parseVerifyVerdict('Everything looks good.');
-      expect(result.verdict).toBe('COMPLETE');
+      expect(result.verdict).toBe('AMBIGUOUS');
+      if (result.verdict === 'AMBIGUOUS') {
+        expect(result.raw).toContain('looks good');
+      }
+    });
+
+    it('returns AMBIGUOUS when only a checklist is present without a verdict prefix', () => {
+      // Old behavior scanned for `- [ ]` / `- [x]` lines and inferred verdict.
+      // New behavior requires the prefix — the verifier prompt mandates it.
+      const result = parseVerifyVerdict('REQUIREMENTS CHECKLIST:\n- [x] Built the button\n- [x] Wired the click handler');
+      expect(result.verdict).toBe('AMBIGUOUS');
     });
 
     it('handles case insensitivity', () => {
@@ -907,6 +1177,151 @@ describe('PipelineOrchestrator', () => {
     it('handles extra whitespace', () => {
       const result = parseClassification('CLASSIFICATION:   SIMPLE\n\nReport...');
       expect(result).toBe('SIMPLE');
+    });
+  });
+
+  // --- sendWithVerdict (fail-loud helper) ---
+
+  describe('sendWithVerdict', () => {
+    // Build a minimal fake AgentSession that returns canned responses in order.
+    // sendWithVerdict only calls .send(), so the rest of the AgentSession
+    // surface can be stubbed.
+    function makeFakeSession(responses: string[]) {
+      let i = 0;
+      const sendCalls: string[] = [];
+      const session = {
+        send: async (prompt: string) => {
+          sendCalls.push(prompt);
+          if (i >= responses.length) {
+            throw new Error(`makeFakeSession: ran out of canned responses (call #${i + 1})`);
+          }
+          return responses[i++];
+        },
+        close: () => {},
+        closed: false,
+        lastActivityLog: '',
+      } as any; // cast: tests don't need the rest of AgentSession's surface
+      return { session, sendCalls };
+    }
+
+    it('returns parsed verdict on first try and emits no malformed-output', async () => {
+      const { session, sendCalls } = makeFakeSession(['APPROVED — clean sweep']);
+      const responses: string[] = [];
+      const malformed: string[] = [];
+
+      const result = await sendWithVerdict(
+        session,
+        'sweep prompt',
+        parseSecurityVerdict,
+        ['APPROVED', 'FLAGGED', 'BLOCKED'] as const,
+        {
+          onResponse: (raw) => responses.push(raw),
+          onMalformed: (raw) => malformed.push(raw),
+        },
+        'Security-1' as any,
+      );
+
+      expect(result.verdict).toBe('APPROVED');
+      expect(result.details).toContain('APPROVED');
+      expect(sendCalls).toHaveLength(1);
+      expect(responses).toEqual(['APPROVED — clean sweep']);
+      expect(malformed).toEqual([]);
+    });
+
+    it('retries once on AMBIGUOUS and succeeds on the corrective re-prompt', async () => {
+      const { session, sendCalls } = makeFakeSession([
+        'I think the code looks fine to me',                  // ambiguous: no verdict prefix
+        'APPROVED — verified after retry',                    // succeeds on retry
+      ]);
+      const responses: string[] = [];
+      const malformed: string[] = [];
+
+      const result = await sendWithVerdict(
+        session,
+        'review prompt',
+        parseReviewVerdict,
+        ['APPROVED', 'REVISION_NEEDED', 'REJECTED'] as const,
+        {
+          onResponse: (raw) => responses.push(raw),
+          onMalformed: (raw) => malformed.push(raw),
+        },
+        'Reviewer-1' as any,
+      );
+
+      expect(result.verdict).toBe('APPROVED');
+      expect(sendCalls).toHaveLength(2);
+      // Both raw responses surface in the transcript so the dashboard can show
+      // what the agent originally tried to say (preserving drift visibility).
+      expect(responses).toEqual([
+        'I think the code looks fine to me',
+        'APPROVED — verified after retry',
+      ]);
+      // Only the malformed first attempt fires the diagnostic event.
+      expect(malformed).toEqual(['I think the code looks fine to me']);
+      // The retry prompt names the expected tokens and quotes the malformed reply.
+      expect(sendCalls[1]).toContain('APPROVED');
+      expect(sendCalls[1]).toContain('REVISION_NEEDED');
+      expect(sendCalls[1]).toContain('REJECTED');
+      expect(sendCalls[1]).toContain('I think the code looks fine to me');
+    });
+
+    it('throws MalformedVerdictError after a second AMBIGUOUS response', async () => {
+      const { session, sendCalls } = makeFakeSession([
+        'first malformed reply, no prefix',
+        'second malformed reply, also no prefix',
+      ]);
+      const responses: string[] = [];
+      const malformed: string[] = [];
+
+      await expect(
+        sendWithVerdict(
+          session,
+          'verify prompt',
+          parseVerifyVerdict,
+          ['COMPLETE', 'GAPS_FOUND'] as const,
+          {
+            onResponse: (raw) => responses.push(raw),
+            onMalformed: (raw) => malformed.push(raw),
+          },
+          'Worker-2' as any,
+        ),
+      ).rejects.toThrow(MalformedVerdictError);
+
+      expect(sendCalls).toHaveLength(2);
+      // Both responses surface in the transcript and both fire the diagnostic.
+      expect(responses).toHaveLength(2);
+      expect(malformed).toHaveLength(2);
+      expect(malformed[0]).toContain('first malformed reply');
+      expect(malformed[1]).toContain('second malformed reply');
+    });
+
+    it('MalformedVerdictError carries instance, expected tokens, and truncated raw output', async () => {
+      const { session } = makeFakeSession([
+        'first ambiguous',
+        'x'.repeat(500),  // >200 chars to verify the truncation in the error message
+      ]);
+
+      try {
+        await sendWithVerdict(
+          session,
+          'sweep prompt',
+          parseSecurityVerdict,
+          ['APPROVED', 'FLAGGED', 'BLOCKED'] as const,
+          { onResponse: () => {}, onMalformed: () => {} },
+          'Security-1' as any,
+        );
+        expect.fail('sendWithVerdict should have thrown MalformedVerdictError');
+      } catch (err) {
+        expect(err).toBeInstanceOf(MalformedVerdictError);
+        const e = err as MalformedVerdictError;
+        expect(e.instance).toBe('Security-1');
+        expect(e.expected).toEqual(['APPROVED', 'FLAGGED', 'BLOCKED']);
+        // Error message names the agent and lists the expected tokens
+        expect(e.message).toContain('Security-1');
+        expect(e.message).toContain('APPROVED, FLAGGED, BLOCKED');
+        // Raw output is truncated to 200 chars in the message body
+        expect(e.message.length).toBeLessThan(600);
+      }
     });
   });
 });

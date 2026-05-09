@@ -1,7 +1,7 @@
 {
   "name": "claude-orchestra",
   "version": "0.1.0",
-  "description": "Multi-agent orchestration engine for Claude Code CLI",
+  "description": "Multi-agent orchestration engine for Claude Code or Codex",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
@@ -21,6 +21,7 @@
     "vitest": "^3.0.0"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.71"
+    "@anthropic-ai/claude-agent-sdk": "^0.2.71",
+    "@openai/codex-sdk": "^0.125.0"
   }
 }

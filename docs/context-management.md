@@ -1,297 +1,228 @@
-# ClaudeOrchestra — Context Management
+# ClaudeOrchestra - Context Management
 
-> Source of truth for LLM context window strategy, message
-> size limits, cost budgets, model selection, and context
-> recovery mechanisms.
+> Source of truth for provider session strategy, context flow,
+> prompt sizing, model selection, and agent-engine communication.
 >
-> **Cross-references:**
-> - [Message Contract](./message-contract.md) — message size
->   limits
-> - [Roles & JTBD](./roles-and-jtbd.md) — prompt sizing per
->   role
-
----
-
-## Context Window Budget
-
-Each agent is a Claude Code CLI instance with a finite context
-window. The budget must account for:
-
-1. **System prompt** — the CLAUDE.md role file
-2. **Inbox messages** — accumulated messages read during the
-   task
-3. **Work context** — files read, code written, tool outputs
-4. **Headroom** — space for the agent to generate responses
-
-### Budget Allocation Per Role
-
-| Role | Model | Context Window | System Prompt | Message Budget | Work Context | Headroom |
-|------|-------|---------------|---------------|---------------|-------------|----------|
-| Supervisor | Sonnet | 200K tokens | ~3K tokens | ~50K tokens | ~100K tokens | ~47K tokens |
-| Worker | Haiku | 200K tokens | ~2K tokens | ~20K tokens | ~140K tokens | ~38K tokens |
-| Security Agent | Opus | 200K tokens | ~3.5K tokens | ~30K tokens | ~120K tokens | ~46.5K tokens |
-| Reviewer | Sonnet | 200K tokens | ~2K tokens | ~20K tokens | ~130K tokens | ~48K tokens |
-
-Workers get the largest work context allocation because they
-need to read and write substantial amounts of code. The
-Supervisor gets the largest message budget because it
-coordinates all communication.
-
-### Context Exhaustion
-
-Claude Code CLI handles context window management internally
-through conversation summarization. However, for long-running
-tasks with many revision loops, context quality degrades as
-the window fills and compresses.
-
-**Mitigation strategies:**
-
-1. **Message pruning in the engine** — the engine only injects
-   the most recent messages from an agent's inbox when
-   prompting the agent, not the full history. Older messages
-   are available in the archive for reference but are not
-   injected into context.
-
-2. **Message size limits** — enforced at 8,000 characters per
-   message content field (see
-   [Message Contract — Size Limits](./message-contract.md#message-size-limits)).
-
-3. **Report offloading** — large payloads (clearance reports,
-   code diffs, review feedback) are written to the `reports/`
-   directory and referenced by path rather than inlined in
-   messages.
-
-4. **Fresh agent on revision** — when a Worker re-enters the
-   Work phase after a revision request, the engine MAY
-   respawn the Worker with a fresh context containing only:
-   - The CLAUDE.md role file
-   - The original task assignment
-   - The revision feedback
-   - The current clearance boundaries
-   This avoids accumulated context from the previous attempt.
-   This is a configurable behavior (`freshContextOnRevision:
-   true|false`, default: `true`).
-
----
-
-## Model Selection
-
-Model assignment per role is configurable at the team level.
-
-### Default Configuration
-
-| Role | Default Model | Rationale |
-|------|--------------|-----------|
-| Supervisor | `claude-sonnet-4-6` | Coordination requires strong reasoning but not the deepest analysis |
-| Worker-1 | `claude-haiku-4-5` | Code generation at lowest cost; volume role |
-| Worker-2 | `claude-haiku-4-5` | Same as Worker-1 |
-| Security Agent | `claude-opus-4-6` | Deep analysis of security threats requires highest capability |
-| Reviewer | `claude-sonnet-4-6` | Quality evaluation requires good judgment |
-
-### Configuration
-
-Model selection is specified in the team configuration:
-
-```json
-{
-  "models": {
-    "Supervisor": "claude-sonnet-4-6",
-    "Worker": "claude-haiku-4-5",
-    "Security": "claude-opus-4-6",
-    "Reviewer": "claude-sonnet-4-6"
-  }
-}
-```
-
-This can be overridden per team via CLI flags:
-
-```bash
-claude-orchestra create-team my-project ./my-app \
-  --model-supervisor claude-opus-4-6 \
-  --model-worker claude-sonnet-4-6
-```
-
-### Cost Implications
-
-| Model | Input (per 1M tokens) | Output (per 1M tokens) |
-|-------|----------------------|----------------------|
-| Haiku 4.5 | $0.80 | $4.00 |
-| Sonnet 4.6 | $3.00 | $15.00 |
-| Opus 4.6 | $15.00 | $75.00 |
-
-Estimated cost per task (single pass, no revisions):
-
-| Component | Estimated Tokens | Estimated Cost |
-|-----------|-----------------|---------------|
-| Supervisor (Sonnet) | ~30K in / ~10K out | ~$0.24 |
-| Worker-1 (Haiku) | ~50K in / ~20K out | ~$0.12 |
-| Worker-2 (Haiku) | ~50K in / ~20K out | ~$0.12 |
-| Security (Opus) | ~40K in / ~15K out | ~$1.73 |
-| Reviewer (Sonnet) | ~20K in / ~5K out | ~$0.14 |
-| **Total per pass** | | **~$2.35** |
-
-Each revision loop adds roughly 60-80% of the initial cost
-(Workers and Security re-run, Supervisor and Reviewer are
-lighter on revisions).
-
----
-
-## Cost Budget
-
-### Per-Task Budget
-
-Each task has a configurable cost budget. When the estimated
-token consumption approaches the budget, the engine takes
-action.
-
-| Budget Level | Default | Action |
-|-------------|---------|--------|
-| Warning | $10 | Log warning, surface to human as `high` priority |
-| Hard limit | $25 | Pause all agents, escalate to human as `critical` |
-
-### Token Tracking
-
-The engine does not have direct access to API token counts
-(those are internal to the Claude Code CLI). Instead, token
-consumption is estimated by:
-
-1. **Message volume** — count of messages sent/received,
-   multiplied by average message size.
-2. **Phase count** — number of phases completed (including
-   revisions), multiplied by estimated per-phase cost.
-3. **Agent lifetime** — total time each agent has been active,
-   as a rough proxy for API usage.
-
-This is an estimate, not a precise measurement. The hard
-limit exists as a safety net, not a precise budget tool.
-
-### Configuration
-
-```json
-{
-  "costBudget": {
-    "warningThreshold": 10,
-    "hardLimit": 25,
-    "currency": "USD"
-  }
-}
-```
-
----
-
-## Thread Management
-
-### Active Thread Injection
-
-When the engine prompts an agent to check its inbox, it
-injects only the **active thread context**, not the full
-message history:
-
-1. Read all pending messages from the agent's inbox.
-2. For each message, retrieve its `threadId`.
-3. For each thread, include only the **last 5 messages** in
-   that thread (most recent first).
-4. Inject these as context when prompting the agent.
-
-This bounds the context consumed by message history
-regardless of how long the task has been running.
-
-### Thread Pruning
-
-Threads are automatically considered "closed" when:
-- All messages in the thread have `status: resolved`
-- The thread has had no new messages for 10 minutes
-- The thread's initiating message has been resolved
-
-Closed threads are not injected into agent context on
-subsequent inbox checks.
-
-### Archive Access
-
-If an agent needs historical context from a closed thread,
-the engine can retrieve it via `getThread(threadId)`. This
-is a pull operation — the agent requests it, and the engine
-provides it as a one-time context injection. This prevents
-old threads from consuming context budget permanently.
+> Cross-references:
+> - [Architecture](./architecture.md) - runtime topology
+> - [Roles & JTBD](./roles-and-jtbd.md) - role prompts and responsibilities
 
 ---
 
 ## Agent-Engine Communication
 
-### How the Engine Talks to Agents
-
-The engine communicates with Claude Code CLI instances via
-**stdin pipe**. Each CLI instance is spawned as a child
-process, and the engine writes prompts to the process's
-stdin.
+The active pipeline communicates through a provider-agnostic `AgentSession` interface:
 
 ```typescript
-// Simplified
-const agent = spawn('claude', [
-  '--model', modelId,
-  '--system-prompt', claudeMdPath,
-  '--output-format', 'json'
-], {
-  cwd: projectPath,
-  env: {
-    ...process.env,
-    CLAUDE_ORCHESTRA_ROLE: role,
-    CLAUDE_ORCHESTRA_INSTANCE: instance,
-    CLAUDE_ORCHESTRA_TEAM_ID: teamId
+interface AgentSession {
+  readonly name: string;
+  readonly closed: boolean;
+  readonly lastActivityLog: string;
+  send(message: string, images?: AgentInputImage[]): Promise<string>;
+  close(): void;
+  waitForCompletion(): Promise<void>;
+}
+```
+
+The orchestrator does not call provider SDKs directly. It creates sessions through `createAgentSession()` in `src/agent-runtime/factory.ts`.
+
+### Claude Runtime
+
+Claude uses `ClaudeAgentSession`, which wraps the Claude Agent SDK `query()` API:
+
+- A `PromptChannel` async iterable bridges `send()` calls into the SDK stream.
+- `systemPrompt` is passed directly from the role prompt file.
+- `allowedTools`, `disallowedTools`, `maxTurns`, and `effort` are sent as SDK options.
+- Governance hooks are attached for shared guardrail policy checks and TypeScript checking.
+
+### Codex Runtime
+
+Codex uses `CodexAgentSession`, which wraps the Codex SDK/CLI thread API:
+
+- The first `send()` starts a Codex thread.
+- The role prompt is prepended to the first user message.
+- Later `send()` calls reuse the thread.
+- Streamed Codex items are normalized into progress text and monitored for guardrail violations.
+- Image inputs are written under `.claude-orchestra/codex-images/` and passed as local image inputs.
+- `disallowedTools` selects a read-only sandbox for review-style roles.
+
+Provider parity notes:
+
+- Claude supports SDK hook callbacks, so shared path/command guardrails and post-edit TypeScript checks run through `buildGovernanceHooks()`.
+- Codex does not expose equivalent pre-tool hook callbacks in the installed SDK. It relies on sandbox mode, disabled network access, `approvalPolicy: "never"`, streamed command/file monitoring with abort-on-detection, and orchestrator post-phase audits.
+- `maxTurns` is passed to Claude and enforced by the Codex adapter with local turn counting.
+
+---
+
+## Runtime Instructions
+
+Runtime agents receive explicit prompts from:
+
+```text
+agents/worker-1.agent.md
+agents/worker-2.agent.md
+agents/security.agent.md
+agents/reviewer.agent.md
+agents/security-review.agent.md
+```
+
+These are YAML-frontmatter + markdown files. Frontmatter supplies defaults such as model, effort, max turns, and disallowed tools. The markdown body becomes the role system prompt.
+
+Important distinction:
+
+- `AGENTS.md` guides Codex and is imported by `CLAUDE.md` for interactive repo work.
+- `CLAUDE.md` guides Claude Code for interactive repo work.
+- `agents/*.agent.md` guides ClaudeOrchestra's spawned runtime agents.
+
+Runtime agents do not automatically inherit `AGENTS.md` or `CLAUDE.md`.
+
+---
+
+## No Filesystem Message Bus
+
+The original architecture used a filesystem JSON message bus. Pipeline mode does not use it.
+
+Current communication model:
+
+1. Engine builds a focused prompt for the current phase.
+2. Engine calls `session.send(...)`.
+3. Provider adapter streams progress and returns final text.
+4. Engine parses verdicts with deterministic functions.
+5. Engine chooses the next phase.
+
+The message-bus reference code under `docs/architecture-decisions/message-bus-reference/` is historical reference material.
+
+---
+
+## Context Flow
+
+Each provider session accumulates context differently, but the orchestration strategy is the same:
+
+1. Start with a role prompt from `agents/*.agent.md`.
+2. Send only the information needed for the current phase.
+3. Truncate downstream summaries before sending them to later roles.
+4. Keep sessions alive after completion for Q&A where possible.
+5. Close sessions on cancellation, error, shutdown, or provider-specific failure.
+
+The orchestrator intentionally passes summaries between agents instead of full transcripts. This keeps later prompts focused and reduces context pollution.
+
+### Summary Truncation
+
+Current truncation points in the pipeline:
+
+| Context | Limit |
+|---------|-------|
+| Worker-1 output passed to Worker-2 | 3,000 characters |
+| Worker summaries passed to Security sweep | 2,000 characters each |
+| Worker summaries passed to Reviewer | 2,000 characters each |
+| Final security-review diff | 80,000 characters |
+
+When more detail is needed, agents can inspect files directly within the target project.
+
+---
+
+## Image Support
+
+The engine accepts image attachments on task creation, task assignment, and Q&A.
+
+Claude adapter:
+
+- Sends base64 image content through the SDK user message format.
+
+Codex adapter:
+
+- Writes image bytes to `.claude-orchestra/codex-images/`.
+- Sends local image paths through Codex input items.
+
+---
+
+## Model Selection
+
+Model selection is global-first.
+
+1. If `agentRuntime.model` is set and not `"default"`, every role uses it.
+2. If the provider is Codex and no global model is set, Codex chooses its default.
+3. If the provider is Claude and no global model is set, role frontmatter/per-role config can provide Claude model IDs.
+
+Example Codex config:
+
+```json
+{
+  "agentRuntime": {
+    "provider": "codex",
+    "auth": "subscription",
+    "model": "gpt-5.5"
   }
-});
-
-// Send a prompt
-agent.stdin.write(prompt + '\n');
-
-// Read response
-agent.stdout.on('data', (data) => { /* parse response */ });
+}
 ```
 
-### How Agents Check Their Inbox
+Example Claude config:
 
-The engine handles inbox polling, not the agents. The flow:
-
-1. Engine's `tick()` loop detects new messages in an agent's
-   inbox.
-2. Engine reads the message(s).
-3. Engine constructs a prompt that includes the message
-   content and instructs the agent to process it.
-4. Engine pipes the prompt to the agent via stdin.
-5. Agent processes and responds via stdout.
-6. Engine parses the response and, if it contains outgoing
-   messages, writes them to the appropriate inboxes.
-
-**Agents do NOT poll the filesystem directly.** The engine
-is the intermediary. This:
-- Eliminates the need for agents to understand filesystem
-  paths
-- Gives the engine control over message injection rate
-- Enables context management (thread pruning, message limits)
-- Simplifies the CLAUDE.md (agents just receive and respond
-  to prompts)
-
-### Agent Response Parsing
-
-Agent responses are expected to contain structured output.
-The engine parses responses looking for:
-
-1. **Outgoing messages** — JSON objects matching the message
-   schema, indicating the agent wants to send a message to
-   another agent.
-2. **Work output** — file modifications, commands executed,
-   etc. (handled by Claude Code CLI natively).
-3. **Status signals** — indications of completion, blockers,
-   or progress.
-
-The CLAUDE.md instructs agents to wrap outgoing messages in
-a specific delimiter:
-
-```
----ORCHESTRA-MESSAGE-START---
-{json message here}
----ORCHESTRA-MESSAGE-END---
+```json
+{
+  "agentRuntime": {
+    "provider": "claude",
+    "auth": "subscription",
+    "model": "claude-opus-4-6"
+  }
+}
 ```
 
-The engine scans stdout for these delimiters to extract
-messages. Everything else is treated as work output.
+---
+
+## Effort Selection
+
+Effort is configured per role and translated at the provider boundary.
+
+Recommended while building this project:
+
+```json
+{
+  "efforts": {
+    "Worker": "xhigh",
+    "Security": "high",
+    "Reviewer": "high"
+  }
+}
+```
+
+Provider-native names:
+
+| Provider | Native effort names |
+|----------|---------------------|
+| Codex | `minimal`, `low`, `medium`, `high`, `xhigh` |
+| Claude Agent SDK | `low`, `medium`, `high`, `max` |
+
+Codex VS Code may only show Low, Medium, High, and Extra High. Extra High is `xhigh` in config/SDK terms.
+
+Compatibility mapping:
+
+| Config value | Codex adapter | Claude adapter |
+|--------------|---------------|----------------|
+| `max` | `xhigh` | `max` |
+| `xhigh` | `xhigh` | `max` |
+| `minimal` | `minimal` | `low` |
+
+---
+
+## Subscription Auth And Cost
+
+ClaudeOrchestra is currently designed for subscription/OAuth operation rather than API-key billing:
+
+- Claude uses Claude subscription auth through Claude Agent SDK.
+- Codex uses ChatGPT/Codex subscription auth through Codex SDK/CLI.
+- API-key environment variables are rejected when subscription auth is selected.
+
+Older API pricing and token-budget estimates are intentionally not treated as operational guidance for the current subscription runtime. If API billing is added later, it should be modeled as a separate auth mode with explicit config, docs, and budget controls.
+
+---
+
+## Context Risks And Mitigations
+
+| Risk | Mitigation |
+|------|------------|
+| Long-running sessions accumulate stale context | Phase prompts are focused and summaries are truncated |
+| Worker summary too long for downstream agents | Orchestrator truncates to fixed character limits |
+| Runtime agents miss shared repo conventions | Put required runtime guidance directly in `agents/*.agent.md` |
+| Provider event formats differ | Adapters normalize progress/output into `AgentSession` |
+| Codex and Claude effort names diverge | `src/agent-runtime/effort.ts` owns mapping |

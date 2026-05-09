@@ -1,398 +1,365 @@
-# ClaudeOrchestra — Operations
+# ClaudeOrchestra - Operations
 
-> Source of truth for health checks, graceful shutdown, signal
-> handling, resource management, structured logging, and
-> observability.
+> Source of truth for configuration, health monitoring, shutdown,
+> resource management, logging, and operational behavior.
 >
-> **Cross-references:**
-> - [State Machine](./state-machine.md) — timeout values,
->   error states
-> - [Architecture](./architecture.md) — agent lifecycle
-> - [Implementation Plan](../implementation-plan.md) — build
->   milestones
+> Cross-references:
+> - [Architecture](./architecture.md) - runtime topology
+> - [State Machine](./state-machine.md) - workflow states and limits
 
 ---
 
-## Health Checks
+## Runtime Modes
 
-### Agent Health Model
+ClaudeOrchestra runs as one Node.js process. The active agent provider is global for that process:
 
-Each agent's health is determined by three signals:
+| Provider | SDK | Auth |
+|----------|-----|------|
+| `claude` | `@anthropic-ai/claude-agent-sdk` | Claude subscription OAuth |
+| `codex` | `@openai/codex-sdk` | ChatGPT/Codex subscription OAuth |
 
-| Signal | Method | Interval |
-|--------|--------|----------|
-| **Process alive** | PID check (`kill(pid, 0)`) | Every tick (1s) |
-| **Responsive** | Message activity tracking | Continuous |
-| **Output valid** | JSON parse success rate | Per message |
-
-### Process Health
-
-The spawner monitors each agent's child process:
-
-- **Alive check:** On every `tick()`, verify the PID is still
-  running via `kill(pid, 0)` (signal 0 = check existence).
-- **Exit detection:** Listen for the `exit` event on the child
-  process. Log exit code and signal.
-- **Crash detection:** If a process exits unexpectedly (exit
-  code !== 0), mark the agent as `errored`.
-
-### Responsiveness
-
-An agent is considered "responsive" if it has produced output
-(stdout data) within the silence threshold:
-
-| Role | Silence Threshold | During Phase |
-|------|------------------|--------------|
-| Worker | 5 minutes | Work |
-| Worker | 2 minutes | Pre-Work (should respond quickly) |
-| Security Agent | 3 minutes | Any active phase |
-| Supervisor | 3 minutes | Any phase |
-| Reviewer | 5 minutes | Review |
-
-**Action on silence exceeded:**
-1. Supervisor sends `check-in` to silent Workers.
-2. For non-Worker roles, log a warning.
-3. If silence persists for 2x the threshold, mark agent as
-   potentially unhealthy and surface to human as `high`
-   priority.
-4. If silence persists for 3x the threshold, mark agent as
-   `errored`.
-
-### Output Validity
-
-Track the ratio of valid to malformed messages per agent:
-
-- **Healthy:** 0-1 malformed messages in last 10
-- **Warning:** 2 malformed messages in last 10
-- **Unhealthy:** 3+ consecutive malformed messages → agent
-  marked as `errored`
-
-See [Roles & JTBD — Output Format Enforcement](./roles-and-jtbd.md#agent-output-format-enforcement)
-for the retry protocol on malformed output.
+Provider selection is controlled by `agentRuntime.provider` or the `--provider` CLI flag. Teams do not choose different providers inside the same process.
 
 ---
 
-## Crash Recovery
+## Health Monitoring
 
-### Agent Crash Recovery
+ClaudeOrchestra does not use a tick-based health loop for pipeline execution. The pipeline is sequential and deterministic: the engine knows which agent is active because it is awaiting that agent's `send()` call.
 
-When an agent process crashes (exits unexpectedly):
+Health signals:
 
-1. **Detect:** Spawner receives `exit` event with non-zero
-   code.
-2. **Log:** Record crash details — exit code, signal, last
-   stdout/stderr output.
-3. **Assess:** Check respawn budget:
-   - Each agent gets **3 respawn attempts** per task.
-   - If budget exhausted, mark agent as `errored` and
-     escalate to human.
-4. **Respawn:** If budget allows:
-   a. Spawn a new CLI instance with the same CLAUDE.md and
-      environment variables.
-   b. Inject a **recovery prompt** summarizing:
-      - The current task and phase
-      - The agent's last known state
-      - Recent messages from its inbox (last 5)
-      - What the agent was working on (from last
-        `progress-update` or similar)
-   c. Set agent state to `active`.
-   d. Decrement respawn budget.
-5. **Resume:** The respawned agent continues from the
-   recovery prompt. It does not have the previous instance's
-   context window — it starts fresh with the recovery summary.
-
-### Engine Crash Recovery
-
-If the orchestrator process itself crashes:
-
-1. **On restart:** The engine scans `data/teams/` for
-   existing team directories.
-2. **For each team with `state.json`:**
-   a. Read the persisted state.
-   b. If `currentPhase` is a non-terminal state (not `done`,
-      `cancelled`, or `errored`):
-      - Check if agent PIDs are still alive.
-      - For alive agents: attempt to reconnect (may not be
-        possible if stdin pipe is broken — in that case,
-        terminate and respawn).
-      - For dead agents: respawn with recovery prompts.
-      - Resume the `tick()` loop.
-   c. If `currentPhase` is terminal: skip (team is finished).
-3. **Message bus recovery:**
-   - Clean up orphaned temp files (`.tmp-*`).
-   - Rebuild the deduplication set from existing messages.
-   - Process any unacknowledged messages in inboxes.
-
-### Data Recovery Priority
-
-| Data | Recovery Method | Reliability |
-|------|----------------|-------------|
-| Team phase | Read from `state.json` | High (forced write on transitions) |
-| Loop counters | Read from `state.json` | High (written with phase) |
-| Agent states | Read from `state.json` | Medium (may be up to 1s stale) |
-| Pending messages | Scan inbox directories | High (individual files on disk) |
-| Agent context | Lost — reconstructed via recovery prompt | Low (summarized, not exact) |
-| In-flight work | Depends on Claude Code CLI | Variable (CLI may have written files) |
+| Signal | Method | When |
+|--------|--------|------|
+| Provider session alive | `send()` resolves/rejects or stream emits error | Per prompt |
+| Response valid | Verdict parser succeeds or falls back | Per agent response |
+| Pipeline progress | Phase transition occurs | Per step |
+| Dashboard connected | SSE clients receive events | Per HTTP connection |
+| PR merged/closed | `gh pr view` polling | Every 60s while PRs are open |
 
 ---
 
-## Graceful Shutdown Protocol
+## Error Detection
 
-### Engine Shutdown (SIGTERM / SIGINT)
+Errors are detected when:
 
-When the orchestrator receives a termination signal:
+1. Provider session fails or rejects.
+2. Codex streamed turn emits `turn.failed` or `error`.
+3. Verdict parsing yields a blocking/negative result.
+4. Loop limits are exceeded by `TeamState.transitionPhase()`.
+5. Git operations fail during branch, commit, push, or PR creation.
+6. Dashboard request handlers catch invalid input or orchestrator errors.
 
-1. **Signal handler fires** — set a `shuttingDown` flag.
-2. **Stop accepting new tasks** — reject any `create-team`
-   or `assign-task` calls.
-3. **For each active team:**
-   a. Persist current `state.json` (forced, synchronous
-      write).
-   b. Send each agent a **shutdown prompt** via stdin:
-      "The orchestrator is shutting down. Please finish your
-      current operation and save your progress. You will be
-      terminated shortly."
-   c. Wait up to **5 seconds** for agents to finish.
-   d. Send `SIGTERM` to each agent process.
-   e. Wait up to **3 seconds** for graceful exit.
-   f. Send `SIGKILL` to any agents still running.
-4. **Clean up:**
-   - Flush all log buffers.
-   - Close file handles.
-   - Exit with code 0.
+Pipeline failure behavior:
 
-### Team Shutdown (Single Team)
+- Emit `error`.
+- Emit warning feedback to the dashboard.
+- Attempt transition to `errored`.
+- Persist state immediately.
+- Close sessions when failure occurs in the standard pipeline catch path.
+
+---
+
+## Dashboard Observability
+
+The dashboard server uses Node's built-in `http` module and Server-Sent Events.
+
+Primary events:
+
+| Event | Description |
+|-------|-------------|
+| `init` | Initial teams and runtime state |
+| `team-created` | New team registered |
+| `task-assigned` | Task assigned to team |
+| `task-classified` | Simple/standard/complex and agent count |
+| `phase-transition` | Team moved between workflow phases |
+| `agent-output` | Final or summarized agent output |
+| `agent-progress` | Streaming provider/tool progress, throttled |
+| `agent-task` | Current agent subtask label |
+| `task-complete` | Pipeline completed or errored |
+| `feedback` | Notification or blocking question |
+| `security-review` | Final diff security review status/result |
+| `pr-created` | PR number and URL |
+| `team-archived` | Merged team archived |
+| `shutdown` | Server/orchestrator shutdown |
+
+`agent-progress` is throttled per team/agent to avoid flooding SSE clients.
+
+---
+
+## Shutdown Protocol
+
+### Engine Shutdown
+
+On `SIGTERM` or first `SIGINT`:
+
+1. Set `shuttingDown`.
+2. Stop PR polling.
+3. Close all active sessions.
+4. Transition non-terminal teams to `cancelled` when valid.
+5. Persist all team states.
+6. Dispose persistence timers.
+7. Emit `shutdown`.
+8. Close the dashboard server and SSE clients.
+
+Second `SIGINT` exits immediately.
+
+### Team Shutdown
 
 When `terminateTeam(teamId)` is called:
 
-1. Set team phase to the appropriate terminal state
-   (`cancelled` if mid-task, `done` if task complete).
-2. Send shutdown prompt to each agent (same as above).
-3. Follow the same SIGTERM → wait → SIGKILL sequence.
-4. Archive all messages to `messages/archive/`.
-5. Persist final `state.json`.
-6. Remove the team from the active team list.
+1. Close all active sessions.
+2. Transition active team to `cancelled` when valid.
+3. Persist final state.
+4. Remove registry entry.
+5. Remove team from memory.
 
-### Agent Shutdown (Single Agent)
+### Archive After PR Merge
 
-When a single agent needs to be terminated (e.g., to respawn):
+When a PR is detected as merged:
 
-1. Send a shutdown prompt via stdin.
-2. Wait 3 seconds.
-3. Send SIGTERM.
-4. Wait 2 seconds.
-5. Send SIGKILL if still alive.
-6. Update agent state in team state store.
+1. Close lingering sessions.
+2. Transition `pr_open -> merged`.
+3. Persist state.
+4. Checkout `main`.
+5. Delete local team branch.
+6. Remove registry entry.
+7. Remove team from memory.
+8. Emit `team-archived`.
 
-### Signal Handling
+---
 
-Register handlers for:
+## Resource Limits
 
-| Signal | Action |
-|--------|--------|
-| `SIGTERM` | Graceful shutdown (full protocol above) |
-| `SIGINT` (Ctrl+C) | Same as SIGTERM |
-| `SIGINT` x2 (double Ctrl+C) | Immediate SIGKILL all agents, exit |
-| `SIGHUP` | Ignore (daemon mode) or graceful shutdown |
+| Resource | Default | Notes |
+|----------|---------|-------|
+| Max concurrent teams | 5 | Configurable through `teams.maxConcurrentTeams` or `--max-teams` |
+| Sessions per standard team | 4 | Security, Worker-1, Worker-2, Reviewer |
+| Sessions per simple team | 1 | Worker-1 only |
+| Worker verification passes | 2 | Hardcoded `MAX_VERIFY_PASSES` |
+| Revision loop limit | 3 | Configurable |
+| Rejection loop limit | 2 | Configurable |
+| Total backward transitions | 5 | Configurable |
+| Guardrails | enabled | Shared policy, Claude hooks, Codex stream monitoring, and post-phase audits |
 
-```typescript
-let shutdownRequested = false;
+---
 
-process.on('SIGTERM', gracefulShutdown);
-process.on('SIGINT', () => {
-  if (shutdownRequested) {
-    // Second Ctrl+C — force kill
-    forceKillAll();
-    process.exit(1);
-  }
-  shutdownRequested = true;
-  gracefulShutdown();
-});
+## Filesystem Layout
+
+Engine repo:
+
+```text
+registry.json
+logs/
+src/
+agents/
+docs/
 ```
 
----
+Target project:
 
-## Resource Management
+```text
+.claude-orchestra/
+└── teams/
+    └── {teamId}/
+        └── state.json
+```
 
-### Process Limits
+Codex image attachments may also be written under:
 
-| Resource | Limit | Rationale |
-|----------|-------|-----------|
-| Max concurrent teams | 5 | Each team = 5 agents = 5 child processes. 25 processes is a reasonable ceiling for a dev machine. |
-| Max agents total | 25 | 5 teams x 5 agents |
-| Max open file descriptors | System default (~256 on macOS) | May need `ulimit -n` increase for 3+ teams |
+```text
+.claude-orchestra/codex-images/
+```
 
-If the user attempts to create a team beyond the limit, the
-engine rejects with a clear error message suggesting they
-terminate an existing team first.
-
-### Filesystem Usage
-
-| Directory | Growth Pattern | Cleanup |
-|-----------|---------------|---------|
-| `messages/inbox/{agent}/` | Grows during task, cleared on acknowledge | Automatic |
-| `messages/archive/` | Grows indefinitely per task | Manual (or per-team on termination) |
-| `reports/` | Grows during task | Manual |
-| `state.json` | Fixed size, overwritten | Automatic |
-
-**Disk space monitoring:** The engine checks available disk
-space on startup. If less than 100 MB is available, log a
-warning. If less than 10 MB, refuse to start.
+The engine automatically adds `.claude-orchestra/` to the target project's `.gitignore`.
 
 ---
 
-## Structured Logging
+## Git Operations
 
-### Log Format
+Automatic:
 
-All log entries are structured JSON written to both terminal
-(formatted for readability) and a log file (raw JSON for
-machine parsing).
+- Create/check out a team branch from `main`.
+- Add `.claude-orchestra/` to `.gitignore`.
+- Auto-commit after Work phase.
+- Auto-commit after Security sweep passes.
+- Auto-commit final task checkpoint.
+
+User initiated:
+
+- Create GitHub PR with `gh pr create`.
+- Legacy push-and-merge endpoint remains for compatibility.
+
+Polling:
+
+- While any team is in `pr_open`, poll PR state every 60 seconds.
+- Merged PRs are archived automatically.
+- Closed unmerged PRs return the team to `done`.
+
+---
+
+## Configuration
+
+Config file selection priority:
+
+1. `--config <path>`
+2. `CLAUDE_ORCHESTRA_CONFIG`
+3. `./orchestra.config.json`
+
+Config value priority:
+
+1. CLI flags
+2. selected config file
+3. defaults
+
+Example:
 
 ```json
 {
-  "timestamp": "ISO-8601",
-  "level": "info | warn | error | debug",
-  "teamId": "team-uuid",
-  "phase": "pre-work | work | handoff | review",
-  "roleSource": "Worker",
-  "roleSourceInstance": "Worker-1",
-  "roleTarget": "Supervisor",
-  "messageId": "msg-uuid",
-  "flag": "progress-update",
-  "event": "message_sent | message_received | phase_transition | agent_spawned | agent_errored | timeout | deadlock | ...",
-  "message": "Human-readable description",
-  "data": {}
-}
-```
-
-### Terminal Formatting
-
-Terminal output uses role-specific colors for scanability:
-
-| Role | Color | ANSI Code |
-|------|-------|-----------|
-| Supervisor | Blue | `\x1b[34m` |
-| Worker | Green | `\x1b[32m` |
-| Security | Red | `\x1b[31m` |
-| Reviewer | Yellow/Amber | `\x1b[33m` |
-| Human/System | Purple | `\x1b[35m` |
-| Error | Bright Red | `\x1b[91m` |
-
-### Event Types
-
-| Event | Level | Description |
-|-------|-------|-------------|
-| `team_created` | info | New team initialized |
-| `task_assigned` | info | Task assigned to team |
-| `agent_spawned` | info | CLI instance started |
-| `agent_errored` | error | Agent crashed or malformed output |
-| `agent_respawned` | warn | Agent respawned after crash |
-| `message_sent` | debug | Message written to inbox |
-| `message_received` | debug | Message read from inbox |
-| `message_malformed` | warn | Agent produced unparseable output |
-| `phase_transition` | info | Team moved to new phase |
-| `timeout_warning` | warn | Message or phase timeout approaching |
-| `timeout_exceeded` | error | Timeout limit reached |
-| `deadlock_detected` | error | All agents blocked |
-| `loop_limit_reached` | error | Revision/rejection max exceeded |
-| `shutdown_initiated` | info | Graceful shutdown started |
-| `health_check_failed` | warn | Agent unresponsive |
-| `validation_error` | warn | Invalid message rejected |
-
-### Log Files
-
-| File | Contents | Rotation |
-|------|----------|----------|
-| `data/logs/orchestra.log` | All events, JSON format | Rotate at 10 MB |
-| `data/logs/orchestra.error.log` | Error events only | Rotate at 5 MB |
-| `data/teams/{team-id}/team.log` | Team-specific events | Per task, no rotation |
-
-### Log Levels
-
-| Level | When to Use |
-|-------|-------------|
-| `debug` | Individual message sends/receives, internal state changes |
-| `info` | Phase transitions, team creation, task assignment, agent lifecycle |
-| `warn` | Timeouts approaching, malformed output, health check concerns, validation errors |
-| `error` | Crashes, deadlocks, loop limits, timeouts exceeded, unrecoverable failures |
-
----
-
-## Configuration Reference
-
-All configuration is provided via a JSON config file
-(`orchestra.config.json`) in the project root, with CLI flag
-overrides for common settings.
-
-### Config File Schema
-
-```json
-{
-  "engine": {
-    "tickIntervalMs": 1000,
-    "dataDirectory": "./data",
-    "logDirectory": "./data/logs"
+  "agentRuntime": {
+    "provider": "codex",
+    "auth": "subscription",
+    "model": "gpt-5.5"
   },
+  "engine": {
+    "registryPath": "./registry.json",
+    "logDirectory": "./logs",
+    "rolesDir": "./agents"
+  },
+  "skipRequirements": false,
   "teams": {
     "maxConcurrentTeams": 5
-  },
-  "models": {
-    "Supervisor": "claude-sonnet-4-6",
-    "Worker": "claude-haiku-4-5",
-    "Security": "claude-opus-4-6",
-    "Reviewer": "claude-sonnet-4-6"
-  },
-  "timeouts": {
-    "messageDefault": 180000,
-    "phasePre_work": 900000,
-    "phaseWork": 3600000,
-    "phaseHandoff": 600000,
-    "phaseReview": 900000,
-    "silenceWorker": 300000,
-    "silenceSecurity": 180000,
-    "silenceSupervisor": 180000,
-    "silenceReviewer": 300000
   },
   "limits": {
     "maxRevisions": 3,
     "maxRejections": 2,
-    "maxTotalBackwardTransitions": 5,
-    "maxRespawnsPerAgent": 3,
-    "maxMalformedRetries": 3
+    "maxTotalBackwardTransitions": 5
   },
-  "context": {
-    "freshContextOnRevision": true,
-    "maxInboxMessagesInjected": 10,
-    "maxThreadMessagesInjected": 5,
-    "messageContentMaxChars": 8000,
-    "messageTotalMaxBytes": 16384
+  "efforts": {
+    "Worker": "xhigh",
+    "Security": "high",
+    "Reviewer": "high"
   },
-  "costBudget": {
-    "warningThreshold": 10,
-    "hardLimit": 25
+  "disallowedTools": {
+    "Security": ["Write", "Edit", "Bash"],
+    "Reviewer": ["Write", "Edit", "Bash"]
+  },
+  "maxTurns": {
+    "Worker": 50,
+    "Security": 20,
+    "Reviewer": 20
   }
 }
 ```
 
-### CLI Flag Overrides
+Claude example:
 
-| Flag | Config Path | Description |
-|------|------------|-------------|
-| `--data-dir <path>` | `engine.dataDirectory` | Data directory location |
-| `--tick-interval <ms>` | `engine.tickIntervalMs` | Main loop interval |
-| `--max-teams <n>` | `teams.maxConcurrentTeams` | Max concurrent teams |
-| `--model-supervisor <id>` | `models.Supervisor` | Supervisor model |
-| `--model-worker <id>` | `models.Worker` | Worker model |
-| `--model-security <id>` | `models.Security` | Security model |
-| `--model-reviewer <id>` | `models.Reviewer` | Reviewer model |
-| `--max-revisions <n>` | `limits.maxRevisions` | Max revision loops |
-| `--cost-limit <usd>` | `costBudget.hardLimit` | Cost hard limit |
+```json
+{
+  "agentRuntime": {
+    "provider": "claude",
+    "auth": "subscription",
+    "model": "claude-opus-4-6"
+  },
+  "efforts": {
+    "Worker": "max",
+    "Security": "low",
+    "Reviewer": "medium"
+  }
+}
+```
 
-### Environment Variables
+Guardrail and roadmap controls:
 
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `ANTHROPIC_API_KEY` | API key for Claude models | Yes |
-| `CLAUDE_ORCHESTRA_LOG_LEVEL` | Override log level (debug/info/warn/error) | No (default: info) |
-| `CLAUDE_ORCHESTRA_CONFIG` | Path to config file | No (default: ./orchestra.config.json) |
+```json
+{
+  "guardrails": {
+    "enabled": true,
+    "abortCodexOnForbiddenStreamEvent": true
+  },
+  "contracts": {
+    "mode": "phased-fallback",
+    "validationRetries": 1
+  },
+  "review": {
+    "complexFileThreshold": 8,
+    "complexDiffLineThreshold": 600,
+    "maxFilesPerBatch": 5
+  },
+  "recovery": {
+    "maxProviderRetries": 2,
+    "initialBackoffMs": 1000
+  }
+}
+```
+
+Guardrail enforcement is layered:
+
+- Claude uses SDK `PreToolUse` / `PostToolUse` hooks for true pre/post tool checks.
+- Codex uses sandbox mode, disabled network access, `approvalPolicy: "never"`, streamed command/file monitoring, and abort-on-detection.
+- Both providers go through deterministic orchestrator audits before phase commits.
+
+---
+
+## CLI Flags
+
+| Flag | Description |
+|------|-------------|
+| `--port <n>` | Dashboard port |
+| `--registry <path>` | Registry file path |
+| `--config <path>` | Config file path |
+| `--max-teams <n>` | Max concurrent teams |
+| `--provider <name>` | Agent provider: `claude` or `codex` |
+| `--auth <mode>` | Auth mode: `subscription` |
+| `--model <id>` | Global model override |
+| `--model-worker <id>` | Per-role Worker model override |
+| `--model-security <id>` | Per-role Security model override |
+| `--model-reviewer <id>` | Per-role Reviewer model override |
+
+---
+
+## Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `CLAUDE_ORCHESTRA_CONFIG` | Optional path to config file |
+| `CLAUDE_ORCHESTRA_LOG_LEVEL` | Optional log level override |
+
+Guarded variables rejected for Claude subscription runtime:
+
+- `ANTHROPIC_API_KEY`
+- `ANTHROPIC_AUTH_TOKEN`
+- `CLAUDE_CODE_USE_BEDROCK`
+- `CLAUDE_CODE_USE_VERTEX`
+- `CLAUDE_CODE_USE_FOUNDRY`
+
+Guarded variables rejected for Codex subscription runtime:
+
+- `CODEX_API_KEY`
+- `OPENAI_API_KEY`
+- `OPENAI_AUTH_TOKEN`
+
+---
+
+## Logging
+
+The logger writes structured JSON and terminal-friendly output.
+
+Log destinations:
+
+| File | Contents |
+|------|----------|
+| `logs/orchestra.log` | Main structured log |
+| `logs/orchestra.error.log` | Error log |
+| `logs/teams/{teamId}/team.log` | Per-team log |
+
+Log levels: `debug`, `info`, `warn`, `error`.
+
+The logger can attach to the orchestrator and subscribe to its events. Dashboard progress is separate and flows through SSE.
+
+---
+
+## Cost And Billing
+
+The current supported auth mode is `subscription`. That means Claude subscription OAuth for Claude and ChatGPT/Codex subscription OAuth for Codex.
+
+API-key billing is intentionally guarded against in this mode. If API billing is introduced later, it should be a separate explicit auth mode with separate budget controls and documentation.

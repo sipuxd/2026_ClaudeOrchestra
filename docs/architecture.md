@@ -1,311 +1,294 @@
-# ClaudeOrchestra — System Architecture
+# ClaudeOrchestra - System Architecture
 
-> Source of truth for MAS topology, agent autonomy, authority
-> hierarchy, and coordination patterns.
+> Source of truth for system structure, pipeline topology, provider runtime,
+> authority model, and coordination patterns.
 >
-> **Cross-references:**
-> - [Message Contract](./message-contract.md) — communication layer
-> - [Roles & JTBD](./roles-and-jtbd.md) — role definitions
-> - [State Machine](./state-machine.md) — workflow model
-> - [Visual Diagram](../orchestration-workflow.html) — interactive
->   lifecycle flow
+> Cross-references:
+> - [Roles & JTBD](./roles-and-jtbd.md) - role definitions and prompt rules
+> - [State Machine](./state-machine.md) - workflow model and transitions
+> - [Context Management](./context-management.md) - runtime context strategy
+> - [Operations](./operations.md) - configuration, health, and shutdown
+> - [ADR 001](./architecture-decisions/001-eliminate-supervisor-llm.md) - why the Supervisor LLM was removed
+
+---
+
+## System Overview
+
+ClaudeOrchestra is a deterministic, code-driven orchestration engine for AI coding agents. It governs autonomous code generation with security scanning, requirements verification, code review, git checkpoints, and a live dashboard.
+
+There is no Supervisor LLM. The `PipelineOrchestrator` class drives the workflow directly:
+
+```text
+Security scan
+  -> Worker-1 implementation
+  -> Worker-2 requirements verification
+  -> Security sweep
+  -> Reviewer quality gate
+  -> Done
+```
+
+The orchestrator is plain TypeScript. It sends prompts to runtime agents, parses verdicts with deterministic functions, and moves the team through a validated state machine.
+
+---
+
+## High-Level Structure
+
+```text
+CLI / Dashboard
+    |
+    v
+PipelineOrchestrator
+    |-- Complexity Router
+    |-- Requirements Extractor
+    |-- Team State Machine
+    |-- Registry + Persistence
+    |-- GitOps
+    |-- Provider-backed AgentSession interface
+            |-- ClaudeAgentSession -> @anthropic-ai/claude-agent-sdk query()
+            |-- CodexAgentSession  -> @openai/codex-sdk thread/runStreamed()
+```
+
+Primary modules:
+
+| Area | Files | Responsibility |
+|------|-------|----------------|
+| CLI | `src/index.ts` | CLI commands, dashboard startup, signal handling |
+| Config | `src/config.ts` | Config loading, config path priority, CLI override merging |
+| Orchestration | `src/pipeline-orchestrator.ts` | Pipeline flow, verdict parsing, feedback, Q&A, session creation |
+| Runtime adapters | `src/agent-runtime/` | Claude/Codex adapter boundary, auth guards, effort mapping |
+| State | `src/state/` | Validated phase transitions, persistence to target projects |
+| Dashboard | `src/dashboard/` | HTTP API, SSE, single-page UI |
+| Git | `src/git.ts` | Team branches, auto-commits, PR creation/polling |
+| Registry | `src/registry.ts` | Engine-local index of active teams |
+| Roles | `agents/*.agent.md` | Runtime prompts sent to spawned agents |
+
+---
+
+## Global Agent Runtime
+
+The agent runtime is global for one orchestrator process. It is all Claude or all Codex:
+
+```json
+{
+  "agentRuntime": {
+    "provider": "codex",
+    "auth": "subscription",
+    "model": "gpt-5.5"
+  }
+}
+```
+
+Supported providers:
+
+| Provider | Adapter | SDK surface | Auth mode |
+|----------|---------|-------------|-----------|
+| `claude` | `ClaudeAgentSession` | Claude Agent SDK `query()` | Claude subscription OAuth |
+| `codex` | `CodexAgentSession` | Codex SDK/CLI thread API | ChatGPT/Codex subscription OAuth |
+
+`auth: "subscription"` means subscription/OAuth credentials, not API-key billing. The runtime refuses to start if environment variables are set that would switch the provider into API-key or external-provider billing:
+
+- Claude guarded vars: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`
+- Codex guarded vars: `CODEX_API_KEY`, `OPENAI_API_KEY`, `OPENAI_AUTH_TOKEN`
+
+Provider-specific differences stay inside `src/agent-runtime/`:
+
+- `auth.ts` normalizes runtime config and strips guarded env vars.
+- `factory.ts` chooses the active adapter.
+- `effort.ts` maps provider-specific effort names.
+- `claude-session.ts` owns Claude SDK `query()` behavior.
+- `codex-session.ts` owns Codex SDK thread behavior.
+
+---
+
+## Effort And Model Selection
+
+`agentRuntime.model`, when set, is a global model override for every role. If omitted or set to `"default"`, the active provider chooses its default, except Claude can still use role prompt frontmatter/per-role `models` for tuning.
+
+Effort names differ by provider:
+
+| Provider | Native effort names |
+|----------|---------------------|
+| Codex | `minimal`, `low`, `medium`, `high`, `xhigh` |
+| Claude Agent SDK | `low`, `medium`, `high`, `max` |
+
+Codex VS Code may show Low, Medium, High, and Extra High; Extra High maps to config value `xhigh`. Compatibility aliases are handled at the adapter boundary: `max` maps to Codex `xhigh`, `xhigh` maps to Claude `max`, and Codex-only `minimal` maps to Claude `low`.
 
 ---
 
 ## Agent Topology
 
-ClaudeOrchestra uses a **fixed 5-agent star topology** per team.
-The Supervisor is the hub. All inter-role communication routes
-through the Supervisor except two sidecar paths:
-
-```
-                 ┌──────────┐
-                 │ Reviewer  │
-                 └─────┬─────┘
-                       │
-          ┌────────────┴────────────┐
-          │       SUPERVISOR        │  ← hub
-          └──┬──────┬──────────┬────┘
-             │      │          │
-        ┌────┴─┐ ┌──┴───┐ ┌───┴──────┐
-        │ W-1  │ │ W-2  │ │ Security │
-        └──┬───┘ └──┬───┘ └──────────┘
-           │        │          ▲
-           └────────┴──────────┘
-            direct: clearance-request/response
-```
-
-### Agents Per Team
+ClaudeOrchestra uses up to four runtime agent sessions per team:
 
 | Role | Instances | Purpose |
 |------|-----------|---------|
-| Supervisor | 1 | Receives tasks, plans execution, directs workers, coordinates handoffs |
-| Worker | 2 | Execute assigned implementation work within security-cleared boundaries |
-| Security Agent | 1 | Pre-scan, runtime clearance, post-work validation |
-| Reviewer | 1 | Evaluates quality of completed, security-cleared work |
+| Worker | `Worker-1`, `Worker-2` | Worker-1 implements; Worker-2 verifies requirements |
+| Security | `Security-1` | Pre-scan clearance and post-work security sweep |
+| Reviewer | `Reviewer-1` | Quality and correctness review |
 
-### Communication Paths
+Agents do not communicate directly. The orchestrator is the sole coordinator:
 
-| Path | Direction | When |
-|------|-----------|------|
-| Supervisor ↔ Worker | Bidirectional | All phases |
-| Supervisor ↔ Security | Bidirectional | Pre-work, handoff, escalations |
-| Supervisor ↔ Reviewer | Bidirectional | Review phase |
-| Worker → Security | Unidirectional request | Runtime clearance during work |
-| Security → Worker | Unidirectional response | Clearance grant/deny |
-| Worker ↔ Worker | Bidirectional (when paired) | Work phase coordination |
+1. Engine sends a prompt to one agent session.
+2. Agent returns output and/or progress events.
+3. Engine parses the output for a verdict.
+4. Engine decides the next step.
+5. Engine prompts the next agent.
 
-All other paths are **invalid**. Workers never communicate
-directly with the Reviewer. The Reviewer never communicates
-directly with Security. See the
-[flag validation matrix](./message-contract.md#flag-validation-matrix)
-for enforcement rules.
+Runtime agents receive explicit role prompts from `agents/*.agent.md`. They do not automatically inherit `AGENTS.md` or `CLAUDE.md`; those files guide interactive coding assistants in this repo, not the spawned runtime agents unless their content is deliberately included in role prompts.
 
 ---
 
-## Agent Autonomy Model
+## Pipeline Modes
 
-Each agent operates as a **semi-autonomous actor**: it has a
-defined role, receives instructions, and executes independently
-within its boundaries. However, autonomy is constrained by role.
+### Simple Pipeline
 
-### Autonomy Levels Per Role
+Used for short, low-risk tasks classified as simple by the heuristic router or reclassified by Security:
 
-| Role | Autonomy Level | Description |
-|------|---------------|-------------|
-| Supervisor | **High** | Can plan, assign, reassign, adjust, and close tasks. Cannot override Security clearance decisions. |
-| Worker | **Medium** | Can implement freely within cleared scope. Must stop and request clearance when hitting unchecked areas. Cannot refuse valid task assignments. |
-| Security Agent | **High** | Can block work, deny clearance, flag concerns independently. Cannot be overridden by the Supervisor (see Authority Hierarchy). |
-| Reviewer | **Medium** | Can approve, revise, or reject independently based on quality assessment. Cannot evaluate security. |
+```text
+Worker-1 implements -> Done
+```
 
-### What Agents Can NOT Do
+Only Worker-1 participates. There is no security sweep or review.
 
-- **Workers** cannot refuse a `task-assignment` from the
-  Supervisor. If a Worker detects a problem with the assignment,
-  it sends `needs-guidance` to the Supervisor rather than
-  refusing.
-- **Workers** cannot proceed on unchecked scope. They must stop
-  and send `clearance-request` to Security.
-- **Reviewers** cannot evaluate security concerns. If a Reviewer
-  notices something security-related, it includes it in feedback
-  as a note, but the Security Agent's clearance is the authority.
-- **Supervisors** cannot override Security Agent decisions (see
-  Authority Hierarchy below).
+### Standard Pipeline
+
+Used for standard or complex tasks:
+
+```text
+Security-1 pre-scan
+    |
+    v
+Worker-1 implements -> Worker-2 verifies requirements
+    |                      |
+    |                      +-- GAPS_FOUND -> Worker-1 fixes, then Worker-2 re-checks
+    v
+Security-1 post-work sweep
+    |
+    +-- BLOCKED -> Work
+    |
+    v
+Reviewer-1 quality review
+    |
+    +-- REVISION_NEEDED -> Work
+    +-- REJECTED -> PreWork
+    +-- APPROVED -> Done
+```
+
+Worker-2 has an inner verification loop capped at two passes. Phase-level backward transitions are counted by `TeamState` and bounded by loop limits.
 
 ---
 
-## Authority Hierarchy
+## Authority Model
 
-When agents disagree or produce conflicting directives, the
-following hierarchy resolves the conflict:
+| Authority | Verdicts | Effect |
+|-----------|----------|--------|
+| Security | `APPROVED`, `FLAGGED`, `BLOCKED` | Blocks or clears work for review |
+| Worker-2 | `COMPLETE`, `GAPS_FOUND` | Drives the requirements gap loop |
+| Reviewer | `APPROVED`, `REVISION_NEEDED`, `REJECTED` | Completes, revises, or restarts the task |
+| Human | Dashboard feedback actions | Can approve requirements, cancel, ask questions, run security review, create PR |
 
-### Security Decisions
-
-```
-Human Orchestrator  →  final authority
-      ↑
-Security Agent      →  can block, deny, flag (cannot be overridden by Supervisor)
-      ↑
-Supervisor          →  can request re-evaluation, cannot override
-```
-
-**The Security Agent has veto power on security matters.** If
-the Security Agent issues a `clearance-denied` or a
-`handoff-clearance: BLOCKED`, the Supervisor cannot override it.
-The Supervisor's options are:
-
-1. **Request re-evaluation** — send `escalation-query` to
-   Security with additional context, asking Security to
-   re-assess.
-2. **Adjust the plan** — modify the work to avoid the
-   blocked area.
-3. **Escalate to human** — if the Supervisor believes
-   Security is wrong, escalate to the human orchestrator
-   for a manual decision.
-
-The Security Agent cannot be overridden programmatically. Only
-the human orchestrator can override a security block, and only
-through the dashboard's attention system.
-
-### Task Decisions
-
-```
-Human Orchestrator  →  final authority
-      ↑
-Supervisor          →  plans, assigns, adjusts, closes
-      ↑
-Worker              →  executes, reports, flags concerns
-```
-
-The Supervisor has full authority over task planning and
-assignment. Workers execute. If a Worker has concerns, it sends
-`needs-guidance` or `scope-concern` — it does not unilaterally
-change the plan.
-
-### Quality Decisions
-
-```
-Human Orchestrator  →  final authority
-      ↑
-Reviewer            →  approve, revise, reject
-      ↑
-Supervisor          →  packages work for review, routes feedback
-```
-
-The Reviewer's verdict is authoritative on quality. The
-Supervisor routes the verdict but does not overrule it. If the
-Supervisor disagrees with a `review-rejected`, it can re-plan
-and resubmit, but it cannot mark the task as done without
-Reviewer approval.
+The engine never lets an LLM choose routing. LLMs produce findings and verdicts; TypeScript decides the next step.
 
 ---
 
-## Conflict Resolution
+## Requirements Extraction
 
-### Worker-Worker Conflicts (Paired Mode)
+Before the pipeline starts, a disposable provider-backed session extracts explicit requirements from the user task. The dashboard shows the checklist as blocking feedback:
 
-When Workers are paired and produce conflicting implementations
-(e.g., incompatible interface definitions via `sync-response`):
+- Approve: requirements become Worker-2's verification target.
+- Skip: pipeline proceeds without an approved requirements list.
+- Extraction failure: pipeline proceeds and shows a warning.
 
-1. **Detection:** The Supervisor monitors Worker-Worker messages
-   (`sync-request`, `sync-response`, `heads-up`). The
-   Supervisor does not intervene in every sync exchange, but
-   checks for conflicts when both Workers send `sync-response`
-   messages that reference the same interface or boundary.
-2. **Mediation protocol:**
-   a. Supervisor sends `pause` to both Workers.
-   b. Supervisor reviews both proposals.
-   c. Supervisor picks one, synthesizes a compromise, or
-      redefines the boundary.
-   d. Supervisor sends `direction-change` to both Workers
-      with the resolution.
-   e. Supervisor sends `resume` to both Workers.
-3. **Escalation:** If the Supervisor cannot resolve the
-   conflict (e.g., both approaches are valid but architecturally
-   significant), it escalates to the human orchestrator via a
-   `critical` priority message.
-
-### Security-Supervisor Disagreements
-
-When the Supervisor believes Security is being too restrictive:
-
-1. Supervisor sends `escalation-query` to Security with
-   specific reasoning for why the area should be cleared.
-2. Security re-evaluates and responds with
-   `escalation-response` (either maintaining or adjusting
-   its assessment).
-3. If Security maintains its block, the Supervisor must
-   either adjust the plan or escalate to the human
-   orchestrator.
-
-### Reviewer-Supervisor Disagreements
-
-The Supervisor cannot override the Reviewer. If the Supervisor
-believes a `review-rejected` is incorrect:
-
-1. Supervisor re-plans and resubmits (entering Pre-Work again).
-2. If the same work is rejected a second time, the system
-   escalates to the human orchestrator (enforced by the
-   [max revision loop count](./state-machine.md#loop-limits)).
+This step is bypassed when `skipRequirements: true` is set, primarily for tests.
 
 ---
 
-## Broadcast and Multicast
+## State And Persistence
 
-The message contract supports targeted messaging via
-`roleTarget` and `roleTargetInstance`. Two special patterns
-are supported:
+Team runtime state lives in the target project:
 
-### Role-Level Routing (`roleTargetInstance: null`)
+```text
+target-project/
+└── .claude-orchestra/
+    └── teams/
+        └── {teamId}/
+            └── state.json
+```
 
-When `roleTargetInstance` is `null`, the message is delivered
-to **all instances** of the target role. This is a multicast
-to a role group.
+The engine repo keeps only `registry.json`, a lightweight pointer list of active teams and target project paths.
 
-Use cases:
-- Supervisor sends `pause` to all Workers:
-  `roleTarget: "Worker"`, `roleTargetInstance: null`
-- Supervisor sends `direction-change` to all Workers
+Persistence properties:
 
-### Team Broadcast
-
-For messages that must reach all agents in a team (e.g., task
-cancellation), the engine handles this at the orchestrator
-level rather than through the message contract. The orchestrator
-sends individual messages to each agent's inbox.
-
-Events that trigger team broadcast:
-- **Task cancelled** — human orchestrator cancels via dashboard
-- **Team shutdown** — graceful termination initiated
-
-These are engine-level operations, not agent-to-agent messages.
-See [Operations](./operations.md#graceful-shutdown-protocol)
-for the shutdown sequence.
+- Phase transitions force immediate writes.
+- Non-phase state changes are debounced.
+- Writes use temp-file + rename for atomicity.
+- `.claude-orchestra/` is added to the target project's `.gitignore`.
 
 ---
 
-## Agent Identity and State
+## Dashboard And API
 
-### Identity (Persistent)
+The dashboard is served by `src/dashboard/dashboard-server.ts` using Node's built-in `http` module. It serves one cached HTML page generated by `buildDashboardHTML()` and streams events through Server-Sent Events.
 
-An agent's identity is defined by its CLAUDE.md role file and
-environment variables set at spawn time:
+Core API surface:
 
-- `CLAUDE_ORCHESTRA_ROLE` — the role (Supervisor, Worker,
-  Security, Reviewer)
-- `CLAUDE_ORCHESTRA_INSTANCE` — the instance name (Worker-1,
-  Worker-2, etc.)
-- `CLAUDE_ORCHESTRA_TEAM_ID` — the team this agent belongs to
-
-Identity does not change during an agent's lifetime.
-
-### State (Ephemeral)
-
-An agent accumulates context through:
-1. Its initial CLAUDE.md prompt (role instructions)
-2. Messages received via its inbox
-3. Work performed (file reads/writes in the project)
-4. Its own Claude Code CLI context window
-
-**Agent state is ephemeral to the CLI instance.** If an agent
-process is terminated and respawned, it loses its accumulated
-context. Recovery relies on:
-- Re-reading inbox history from the filesystem
-- The team's `state.json` capturing what phase/status the
-  agent was in
-- The engine providing a "recovery prompt" that summarizes
-  what the agent was doing before the crash
-
-See [Context Management](./context-management.md) for context
-window strategy and [Operations](./operations.md#crash-recovery)
-for the respawn protocol.
-
-### Agent Lifecycle
-
-Agents are **ephemeral per task**:
-1. **Spawned** when a task is assigned to a team
-2. **Active** throughout the task's workflow phases
-3. **Terminated** when the task reaches a terminal state
-   (done, cancelled, errored)
-
-Agents are NOT reused across tasks. Each new task spawns fresh
-CLI instances. This avoids context pollution between tasks and
-simplifies the recovery model.
+| Route | Purpose |
+|-------|---------|
+| `GET /` | Dashboard HTML |
+| `GET /events` | SSE stream with team/runtime state |
+| `GET /api/runtime` | Active provider/auth/model |
+| `GET /api/teams` | Team list |
+| `POST /api/teams` | Create team, optionally with initial task |
+| `POST /api/teams/:id/task` | Assign task |
+| `POST /api/teams/:id/feedback` | Resolve blocking feedback |
+| `POST /api/teams/:id/ask` | Ask a warm session a question |
+| `POST /api/teams/:id/security-review` | Run final diff security review |
+| `POST /api/teams/:id/create-pr` | Push branch and create GitHub PR |
+| `GET /preview/:id/...` | Preview generated HTML files from target project |
 
 ---
 
-## Multi-Team Coordination
+## Git Workflow
 
-Teams are fully isolated. There is no inter-team communication.
-Each team:
-- Has its own `data/teams/{team-id}/` directory
-- Has its own 5 agent processes
-- Has its own workflow phase state
-- Operates on its own project path
+Each team gets a dedicated branch:
 
-The orchestrator manages multiple teams concurrently by running
-independent `tick()` loops (or a single loop that iterates
-over all teams). Teams do not share agents, messages, or state.
+```text
+team/{slugified-team-name}
+```
 
-The human orchestrator is the only entity with cross-team
-visibility, provided by the dashboard.
+Automatic engine checkpoints:
+
+| Checkpoint | Commit message |
+|------------|----------------|
+| Work phase complete | `WIP: work phase complete` |
+| Security sweep passed | `WIP: security sweep passed` |
+| Pipeline success | First 72 characters of task description |
+
+User-initiated git actions:
+
+- Create PR via `gh pr create`.
+- Poll PR state every 60 seconds while a team is in `pr_open`.
+- Archive merged teams by closing sessions, deleting local branch, removing registry entry, and transitioning to `merged`.
+
+Legacy `pushAndMerge()` remains for compatibility but `createPr()` is the preferred workflow.
+
+---
+
+## Instruction Files
+
+| File | Reader | Purpose |
+|------|--------|---------|
+| `AGENTS.md` | Codex and imported by Claude Code | Shared instructions for interactive repo work |
+| `CLAUDE.md` | Claude Code | Thin wrapper that imports `AGENTS.md` |
+| `agents/*.agent.md` | ClaudeOrchestra runtime agents | Role prompts sent to spawned agents |
+
+Do not duplicate shared repo instructions across `AGENTS.md` and `CLAUDE.md`. Keep shared guidance in `AGENTS.md`; keep only Claude-specific notes in `CLAUDE.md`.
+
+---
+
+## Historical Architecture
+
+The original design used a Supervisor LLM and a filesystem message bus. That design is preserved only for historical reference:
+
+- `multi-agent-orchestration-spec.md` is deprecated.
+- `docs/architecture-decisions/message-bus-reference/` is reference material, not active runtime code.
+- `src/spawner/agent-process.ts` and `src/spawner/agent-spawner.ts` are retained from older flows/tests; the active pipeline creates sessions through `src/agent-runtime/factory.ts`.

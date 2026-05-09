@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ClaudeOrchestra — Portfolio View (Zero State)</title>
+<style>
+/* Reset */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, sans-serif;
+  background: #0d1117; color: #c9d1d9; font-size: 14px; height: 100vh; overflow: hidden;
+}
+
+/* ============================================================
+   LAYOUT: Nav Rail + Main Content
+   ============================================================ */
+.app-layout { display: flex; height: 100vh; }
+
+/* --- Nav Rail --- */
+.nav-rail {
+  width: 64px; min-width: 64px; background: #161b22; border-right: 1px solid #30363d;
+  display: flex; flex-direction: column; align-items: center; padding: 12px 0;
+  z-index: 200;
+}
+.nav-logo {
+  width: 36px; height: 36px; background: #58a6ff; border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1.1rem; font-weight: 800; color: #0d1117; margin-bottom: 20px; cursor: pointer;
+}
+.nav-divider { width: 32px; height: 1px; background: #30363d; margin: 8px 0; }
+
+.nav-dashboard {
+  width: 40px; height: 40px; border-radius: 10px; background: #21262d; border: 1px solid #30363d;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; margin-bottom: 8px; transition: all 0.15s; font-size: 1rem; color: #8b949e;
+  position: relative;
+}
+.nav-dashboard.active { border-color: #58a6ff; background: #1f2937; color: #58a6ff; }
+.nav-dashboard:hover { border-color: #58a6ff; color: #58a6ff; }
+
+.nav-project-tooltip {
+  display: none; position: absolute; left: 54px; top: 50%; transform: translateY(-50%);
+  background: #1c2128; border: 1px solid #30363d; border-radius: 6px; padding: 6px 10px;
+  font-size: 0.75rem; color: #e6edf3; white-space: nowrap; z-index: 300; pointer-events: none;
+}
+.nav-dashboard:hover .nav-project-tooltip,
+.nav-action:hover .nav-project-tooltip { display: block; }
+
+/* Empty project slot — dashed placeholder, nudges user */
+.nav-project-empty {
+  width: 40px; height: 40px; border-radius: 10px; background: none;
+  border: 1px dashed #30363d; display: flex; align-items: center; justify-content: center;
+  color: #30363d; font-size: 0.7rem; font-weight: 700; margin-bottom: 8px;
+  user-select: none; cursor: default;
+}
+
+.nav-spacer { flex: 1; }
+.nav-action {
+  width: 40px; height: 40px; border-radius: 10px; background: none; border: 1px dashed #30363d;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; margin-bottom: 8px; color: #484f58; font-size: 1.2rem; transition: all 0.15s;
+  position: relative;
+}
+.nav-action:hover { border-color: #58a6ff; color: #58a6ff; }
+
+/* Pulse hint for the "+" when empty */
+.nav-action.nav-action-hint {
+  border-color: #58a6ff; color: #58a6ff; background: #1f6feb14;
+  animation: plus-pulse 2.4s ease-in-out infinite;
+}
+@keyframes plus-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(88, 166, 255, 0.45); }
+  50%      { box-shadow: 0 0 0 6px rgba(88, 166, 255, 0); }
+}
+
+/* --- Main Content --- */
+.main-content { flex: 1; overflow-y: auto; display: flex; flex-direction: column; }
+
+/* --- Header (minimal in zero state) --- */
+.portfolio-header {
+  padding: 24px 32px 16px; display: flex; align-items: center; justify-content: space-between;
+  border-bottom: 1px solid #21262d; position: sticky; top: 0; background: #0d1117; z-index: 50;
+}
+.portfolio-title { font-size: 1.3rem; font-weight: 600; color: #f0f6fc; }
+.portfolio-subtitle { font-size: 0.82rem; color: #484f58; margin-top: 2px; }
+
+.header-actions { display: flex; gap: 8px; }
+.header-btn {
+  padding: 8px 14px; border-radius: 8px; font-size: 0.82rem; font-weight: 600; cursor: pointer;
+  border: 1px solid #30363d; background: #21262d; color: #c9d1d9; transition: all 0.15s;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.header-btn:hover { border-color: #58a6ff; color: #58a6ff; }
+.header-btn.primary { background: #238636; border-color: #238636; color: #fff; }
+.header-btn.primary:hover { filter: brightness(1.1); border-color: #238636; color: #fff; }
+
+/* ============================================================
+   ZERO STATE HERO
+   ============================================================ */
+.zero-wrap {
+  flex: 1;
+  display: flex; align-items: center; justify-content: center;
+  padding: 40px 32px;
+}
+
+.zero-card {
+  width: 100%; max-width: 820px;
+  background: linear-gradient(180deg, #161b22 0%, #0f141b 100%);
+  border: 1px solid #30363d; border-radius: 16px;
+  padding: 44px 48px; position: relative; overflow: hidden;
+}
+.zero-card::before {
+  content: ''; position: absolute; top: -80px; right: -80px; width: 240px; height: 240px;
+  background: radial-gradient(circle, rgba(88,166,255,0.14), transparent 70%);
+  pointer-events: none;
+}
+.zero-card::after {
+  content: ''; position: absolute; bottom: -100px; left: -80px; width: 260px; height: 260px;
+  background: radial-gradient(circle, rgba(163,113,247,0.10), transparent 70%);
+  pointer-events: none;
+}
+
+.zero-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border-radius: 999px; background: #1f6feb22; color: #58a6ff;
+  font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px;
+  margin-bottom: 20px; position: relative; z-index: 1;
+}
+.zero-badge .dot { width: 6px; height: 6px; border-radius: 50%; background: #58a6ff; }
+
+.zero-title {
+  font-size: 1.75rem; font-weight: 700; color: #f0f6fc; line-height: 1.2;
+  margin-bottom: 12px; position: relative; z-index: 1;
+}
+.zero-title .accent { color: #58a6ff; }
+
+.zero-sub {
+  font-size: 0.95rem; color: #8b949e; line-height: 1.55; max-width: 560px;
+  margin-bottom: 28px; position: relative; z-index: 1;
+}
+
+.zero-ctas {
+  display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 36px;
+  position: relative; z-index: 1;
+}
+.btn { padding: 10px 18px; border-radius: 8px; font-size: 0.88rem; font-weight: 600; cursor: pointer; border: none; transition: all 0.15s; display: inline-flex; align-items: center; gap: 6px; }
+.btn:hover { filter: brightness(1.1); }
+.btn-primary { background: #238636; color: #fff; }
+.btn-secondary { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; }
+.btn-secondary:hover { border-color: #58a6ff; color: #58a6ff; }
+.btn-danger { background: #21262d; color: #f85149; border: 1px solid #30363d; }
+
+/* Pipeline diagram (illustrative) */
+.pipeline-viz {
+  display: flex; align-items: center; gap: 0; padding: 16px 20px;
+  background: #0d1117; border: 1px solid #30363d; border-radius: 12px;
+  margin-bottom: 28px; position: relative; z-index: 1;
+  overflow-x: auto;
+}
+.pipeline-step { display: flex; flex-direction: column; align-items: center; gap: 8px; min-width: 84px; }
+.pipeline-dot {
+  width: 34px; height: 34px; border-radius: 50%; border: 2px solid #30363d; background: #0d1117;
+  display: flex; align-items: center; justify-content: center; font-size: 0.85rem; font-weight: 700; color: #8b949e;
+}
+.pipeline-dot.scan { border-color: #f85149; color: #f85149; }
+.pipeline-dot.build { border-color: #3fb950; color: #3fb950; }
+.pipeline-dot.sweep { border-color: #f85149; color: #f85149; }
+.pipeline-dot.review { border-color: #d29922; color: #d29922; }
+.pipeline-dot.done { border-color: #3fb950; color: #3fb950; background: #23863622; }
+.pipeline-label { font-size: 0.7rem; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+.pipeline-connector { flex: 1; height: 2px; background: #30363d; min-width: 18px; }
+
+/* Feature grid */
+.feature-grid {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;
+  position: relative; z-index: 1;
+}
+.feature {
+  background: #0d1117; border: 1px solid #30363d; border-radius: 10px;
+  padding: 16px; transition: all 0.15s;
+}
+.feature:hover { border-color: #30363d; }
+.feature-icon {
+  width: 30px; height: 30px; border-radius: 8px; display: flex; align-items: center; justify-content: center;
+  font-size: 0.95rem; margin-bottom: 10px;
+}
+.feature-icon.blue   { background: #1f6feb22; color: #58a6ff; }
+.feature-icon.green  { background: #23863622; color: #3fb950; }
+.feature-icon.purple { background: #a371f722; color: #a371f7; }
+.feature-title { font-size: 0.88rem; font-weight: 600; color: #e6edf3; margin-bottom: 4px; }
+.feature-desc  { font-size: 0.78rem; color: #8b949e; line-height: 1.5; }
+
+/* Secondary helpers row */
+.zero-footer {
+  margin-top: 24px; padding-top: 20px; border-top: 1px solid #21262d;
+  display: flex; flex-wrap: wrap; gap: 24px; align-items: center; justify-content: space-between;
+  position: relative; z-index: 1;
+}
+.zero-hint { font-size: 0.78rem; color: #6e7681; }
+.zero-hint kbd {
+  font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.72rem;
+  background: #21262d; border: 1px solid #30363d; border-bottom-width: 2px;
+  border-radius: 5px; padding: 2px 6px; color: #c9d1d9; margin: 0 2px;
+}
+.zero-docs { display: flex; gap: 16px; }
+.zero-docs a {
+  font-size: 0.8rem; color: #58a6ff; text-decoration: none;
+  display: inline-flex; align-items: center; gap: 4px;
+}
+.zero-docs a:hover { text-decoration: underline; }
+
+/* ============================================================
+   MODAL (same as portfolio-view)
+   ============================================================ */
+.modal-backdrop {
+  display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  background: rgba(0,0,0,0.5); z-index: 400; align-items: center; justify-content: center;
+}
+.modal-backdrop.open { display: flex; }
+.modal {
+  background: #161b22; border: 1px solid #30363d; border-radius: 14px; width: 480px;
+  max-height: 80vh; overflow-y: auto; box-shadow: 0 16px 48px rgba(0,0,0,0.4);
+}
+.modal-header { padding: 20px 24px 12px; display: flex; align-items: center; justify-content: space-between; }
+.modal-title { font-size: 1.1rem; font-weight: 600; color: #f0f6fc; }
+.modal-body { padding: 0 24px 20px; }
+.modal-footer { padding: 12px 24px 20px; display: flex; gap: 8px; justify-content: flex-end; }
+.panel-close {
+  background: none; border: none; color: #8b949e; font-size: 1.2rem; cursor: pointer;
+  padding: 4px 8px; border-radius: 6px;
+}
+.panel-close:hover { background: #21262d; color: #e6edf3; }
+
+.form-group { margin-bottom: 16px; }
+.form-label { display: block; font-size: 0.78rem; font-weight: 600; color: #8b949e; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+.form-input, .form-select, .form-textarea {
+  width: 100%; padding: 10px 12px; background: #0d1117; border: 1px solid #30363d;
+  border-radius: 8px; color: #e6edf3; font-size: 0.85rem; font-family: inherit;
+}
+.form-input:focus, .form-select:focus, .form-textarea:focus { outline: none; border-color: #58a6ff; }
+.form-textarea { min-height: 80px; resize: vertical; }
+.form-select { appearance: none; cursor: pointer; }
+
+/* ============================================================
+   TOAST (same as portfolio-view)
+   ============================================================ */
+.toast-container { position: fixed; bottom: 24px; right: 24px; z-index: 500; display: flex; flex-direction: column-reverse; gap: 8px; }
+.toast {
+  background: #1c2128; border: 1px solid #30363d; border-radius: 10px; padding: 12px 20px;
+  font-size: 0.85rem; color: #e6edf3; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  display: flex; align-items: center; gap: 10px; animation: toast-in 0.3s ease;
+  min-width: 280px; max-width: 420px;
+}
+.toast.success { border-left: 3px solid #3fb950; }
+.toast.info    { border-left: 3px solid #58a6ff; }
+.toast.warning { border-left: 3px solid #d29922; }
+.toast.error   { border-left: 3px solid #f85149; }
+.toast-icon { font-size: 1.1rem; flex-shrink: 0; }
+.toast-dismiss { margin-left: auto; background: none; border: none; color: #484f58; cursor: pointer; font-size: 0.9rem; padding: 2px 6px; }
+.toast-dismiss:hover { color: #c9d1d9; }
+@keyframes toast-in { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+@keyframes toast-out { from { transform: translateY(0); opacity: 1; } to { transform: translateY(20px); opacity: 0; } }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+
+/* Responsive */
+@media (max-width: 720px) {
+  .feature-grid { grid-template-columns: 1fr; }
+  .zero-card { padding: 32px 24px; }
+  .zero-title { font-size: 1.45rem; }
+}
+</style>
+</head>
+<body>
+
+<div class="app-layout">
+  <!-- ============================================================
+       NAV RAIL (no projects yet)
+       ============================================================ -->
+  <div class="nav-rail">
+    <div class="nav-logo" title="ClaudeOrchestra">CO</div>
+
+    <div class="nav-dashboard active" title="Dashboard">
+      <span>&#9638;</span>
+      <span class="nav-project-tooltip">Dashboard</span>
+    </div>
+
+    <div class="nav-divider"></div>
+
+    <!-- Empty project placeholders to hint at future state -->
+    <div class="nav-project-empty" title="No projects yet">&#183;&#183;&#183;</div>
+
+    <div class="nav-spacer"></div>
+    <div class="nav-action nav-action-hint" title="Create your first team" onclick="showCreateTeamModal()">
+      +
+      <span class="nav-project-tooltip">Create first team</span>
+    </div>
+    <div class="nav-action" title="Settings" style="font-size:0.9rem" onclick="showSettings()">
+      &#9881;
+      <span class="nav-project-tooltip">Settings</span>
+    </div>
+  </div>
+
+  <!-- ============================================================
+       MAIN CONTENT: Zero State
+       ============================================================ -->
+  <div class="main-content">
+    <div class="portfolio-header">
+      <div>
+        <div class="portfolio-title">Portfolio</div>
+        <div class="portfolio-subtitle">0 projects &middot; 0 teams</div>
+      </div>
+      <div class="header-actions">
+        <button class="header-btn" onclick="showSettings()">&#9881; Settings</button>
+        <button class="header-btn primary" onclick="showCreateTeamModal()">+ New Team</button>
+      </div>
+    </div>
+
+    <div class="zero-wrap">
+      <div class="zero-card">
+        <div class="zero-badge"><span class="dot"></span> Ready to orchestrate</div>
+
+        <div class="zero-title">
+          Spin up your first <span class="accent">multi-agent team</span>.
+        </div>
+        <div class="zero-sub">
+          ClaudeOrchestra runs a deterministic pipeline of specialized agents — Security, Worker, Verifier, and Reviewer — across your repo.
+          Point it at a project, describe the task, and let the pipeline drive it to a reviewable PR.
+        </div>
+
+        <div class="zero-ctas">
+          <button class="btn btn-primary" onclick="showCreateTeamModal()">
+            <span>+</span> Create your first team
+          </button>
+          <button class="btn btn-secondary" onclick="showSampleTask()">
+            Try a sample task
+          </button>
+          <button class="btn btn-secondary" onclick="showSettings()">
+            Configure defaults
+          </button>
+        </div>
+
+        <!-- Pipeline illustration -->
+        <div class="pipeline-viz" aria-hidden="true">
+          <div class="pipeline-step">
+            <div class="pipeline-dot scan">S</div>
+            <div class="pipeline-label">Scan</div>
+          </div>
+          <div class="pipeline-connector"></div>
+          <div class="pipeline-step">
+            <div class="pipeline-dot build">W1</div>
+            <div class="pipeline-label">Build</div>
+          </div>
+          <div class="pipeline-connector"></div>
+          <div class="pipeline-step">
+            <div class="pipeline-dot build">W2</div>
+            <div class="pipeline-label">Verify</div>
+          </div>
+          <div class="pipeline-connector"></div>
+          <div class="pipeline-step">
+            <div class="pipeline-dot sweep">S</div>
+            <div class="pipeline-label">Sweep</div>
+          </div>
+          <div class="pipeline-connector"></div>
+          <div class="pipeline-step">
+            <div class="pipeline-dot review">R</div>
+            <div class="pipeline-label">Review</div>
+          </div>
+          <div class="pipeline-connector"></div>
+          <div class="pipeline-step">
+            <div class="pipeline-dot done">&#10003;</div>
+            <div class="pipeline-label">Done</div>
+          </div>
+        </div>
+
+        <!-- Feature highlights -->
+        <div class="feature-grid">
+          <div class="feature">
+            <div class="feature-icon blue">&#9638;</div>
+            <div class="feature-title">Deterministic pipeline</div>
+            <div class="feature-desc">Pure TypeScript controls every handoff — no LLM picks the next step.</div>
+          </div>
+          <div class="feature">
+            <div class="feature-icon green">&#10003;</div>
+            <div class="feature-title">Reviewable output</div>
+            <div class="feature-desc">Auto-commits at each phase boundary, then pushes a branch you can merge.</div>
+          </div>
+          <div class="feature">
+            <div class="feature-icon purple">&#128269;</div>
+            <div class="feature-title">Always observable</div>
+            <div class="feature-desc">Live dashboard streams each agent's progress and verdict in real time.</div>
+          </div>
+        </div>
+
+        <div class="zero-footer">
+          <div class="zero-hint">
+            Tip: press <kbd>&#8984;</kbd><kbd>N</kbd> any time to start a new team.
+          </div>
+          <div class="zero-docs">
+            <a href="#" onclick="event.preventDefault(); showToast('Docs opening in a new tab…', 'info', 2000)">Read the PRD &rarr;</a>
+            <a href="#" onclick="event.preventDefault(); showToast('Walkthrough coming soon', 'info', 2000)">Quickstart &rarr;</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Toast container -->
+<div class="toast-container" id="toastContainer"></div>
+
+<!-- Modal -->
+<div class="modal-backdrop" id="modalBackdrop" onclick="closeModal()">
+  <div class="modal" onclick="event.stopPropagation()" id="modalContent"></div>
+</div>
+
+<script>
+// ================================================================
+// TOAST
+// ================================================================
+function showToast(message, type = 'info', duration = 4000) {
+  const container = document.getElementById('toastContainer');
+  const icons = { success: '&#10003;', info: '&#8505;', warning: '&#9888;', error: '&#10007;' };
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  toast.innerHTML = `<span class="toast-icon">${icons[type]}</span><span>${message}</span><button class="toast-dismiss" onclick="dismissToast(this)">&times;</button>`;
+  container.appendChild(toast);
+  setTimeout(() => {
+    toast.style.animation = 'toast-out 0.3s ease forwards';
+    setTimeout(() => toast.remove(), 300);
+  }, duration);
+}
+function dismissToast(btn) {
+  const toast = btn.parentElement;
+  toast.style.animation = 'toast-out 0.3s ease forwards';
+  setTimeout(() => toast.remove(), 300);
+}
+
+// ================================================================
+// MODAL
+// ================================================================
+function openModal(html) {
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalBackdrop').classList.add('open');
+}
+function closeModal() {
+  document.getElementById('modalBackdrop').classList.remove('open');
+}
+
+// ================================================================
+// CREATE TEAM (first-run variant — no existing projects listed)
+// ================================================================
+function showCreateTeamModal() {
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">Create Your First Team</div>
+      <button class="panel-close" onclick="closeModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:0.82rem;color:#8b949e;margin-bottom:16px;line-height:1.5">
+        A <strong>team</strong> is a 4-agent pipeline attached to a project on disk.
+        Pick an existing local repo or point us at a new path.
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Team Name</label>
+        <input class="form-input" id="createTeamName" placeholder="e.g., auth-api, fix-login-bug" />
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Project Path</label>
+        <div style="display:flex;gap:8px">
+          <input class="form-input" id="createProjectPath" placeholder="/Users/me/my-project" style="flex:1" />
+          <button class="btn btn-secondary" onclick="showToast('Finder dialog would open here', 'info', 2000)">Browse</button>
+        </div>
+        <div style="font-size:0.72rem;color:#6e7681;margin-top:6px">
+          Must be an existing git repo. ClaudeOrchestra attaches to it — it never creates projects.
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Task Description</label>
+        <textarea class="form-textarea" id="createTeamTask" placeholder="Describe the feature, bug fix, or task…" rows="4"></textarea>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Attach Images (optional)</label>
+        <div style="border:1px dashed #30363d;border-radius:8px;padding:20px;text-align:center;color:#484f58;font-size:0.82rem;cursor:pointer" onclick="showToast('File picker would open here', 'info', 2000)">
+          Drop mockups or screenshots here
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="createTeam()">Create Team & Start Pipeline</button>
+    </div>
+  `);
+}
+
+function createTeam() {
+  const name = document.getElementById('createTeamName')?.value;
+  const path = document.getElementById('createProjectPath')?.value;
+  const task = document.getElementById('createTeamTask')?.value;
+  if (!name?.trim()) { showToast('Please enter a team name', 'warning', 2000); return; }
+  if (!path?.trim()) { showToast('Please select a project path', 'warning', 2000); return; }
+  if (!task?.trim()) { showToast('Please enter a task description', 'warning', 2000); return; }
+  closeModal();
+  showToast(`Team "${name}" created — spawning 4 agents…`, 'success', 3000);
+  setTimeout(() => showToast(`${name}: Security-1 starting pre-scan…`, 'info', 3000), 1500);
+}
+
+// ================================================================
+// SAMPLE TASK (pre-fills the create modal)
+// ================================================================
+function showSampleTask() {
+  showCreateTeamModal();
+  setTimeout(() => {
+    const n = document.getElementById('createTeamName');
+    const p = document.getElementById('createProjectPath');
+    const t = document.getElementById('createTeamTask');
+    if (n) n.value = 'sample-readme-polish';
+    if (p) p.value = '/Users/me/my-project';
+    if (t) t.value = 'Polish the README: add a concise intro, a quickstart section, and a link to the PRD. Keep tone neutral.';
+  }, 60);
+}
+
+// ================================================================
+// SETTINGS
+// ================================================================
+function showSettings() {
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">Settings</div>
+      <button class="panel-close" onclick="closeModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">Max Concurrent Teams (per project)</label>
+        <input class="form-input" type="number" value="5" min="1" max="10" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">Max Revisions</label>
+        <input class="form-input" type="number" value="3" min="1" max="10" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">Max Rejections</label>
+        <input class="form-input" type="number" value="2" min="1" max="5" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">Worker Model</label>
+        <select class="form-select">
+          <option selected>claude-opus-4-6</option>
+          <option>claude-sonnet-4-6</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Security / Reviewer Model</label>
+        <select class="form-select">
+          <option selected>claude-opus-4-6</option>
+          <option>claude-sonnet-4-6</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Skip Requirements Extraction</label>
+        <select class="form-select">
+          <option value="false" selected>No — extract and confirm requirements</option>
+          <option value="true">Yes — skip to pipeline immediately</option>
+        </select>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="closeModal(); showToast('Settings saved', 'success', 2000)">Save</button>
+    </div>
+  `);
+}
+
+// Keyboard: Escape closes modal · ⌘N opens create modal
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeModal();
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'n') {
+    e.preventDefault();
+    showCreateTeamModal();
+  }
+});
+</script>
+
+</body>
+</html>

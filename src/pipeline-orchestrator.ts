@@ -9,25 +9,36 @@
 // Worker-1 fixes gaps, Worker-2 re-checks (max 2 loops). Worker-2 never
 // modifies code — requirements verification only.
 //
-// Each agent gets its own SDK query() call with streaming input
-// (PromptChannel) for warm sessions. First message pays ~12s cold start;
-// subsequent messages are ~2-3s. All agents cold-start in parallel.
+// Each agent gets its own provider-backed session. The pipeline talks to a
+// small AgentSession interface; provider adapters own SDK-specific behavior.
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { execSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { query } from '@anthropic-ai/claude-agent-sdk';
-import type { Query, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { Role, type RoleInstance } from './roles/role-types.js';
+import { INSTANCE_AGENT_FILES, INSTANCE_TO_ROLE, ALL_INSTANCES } from './spawner/agent-files.js';
 import { AgentState } from './types/index.js';
-import type { AgentMessage } from './router/message-types.js';
 import { TeamState, TeamPhase, type TeamStateData, type LoopLimits, DEFAULT_LOOP_LIMITS } from './state/team-state.js';
 import { StatePersistence } from './state/persistence.js';
 import { Registry } from './registry.js';
 import { GitOps } from './git.js';
 import { classifyComplexity } from './router/complexity-router.js';
+import { parseFrontmatter } from './spawner/frontmatter-parser.js';
+import { createAgentSession, normalizeAgentRuntime, normalizeProviderModel, validateAgentRuntime } from './agent-runtime/index.js';
+import type { AgentRuntimeConfig, AgentSession, EffortLevel } from './agent-runtime/index.js';
 import { randomUUID } from 'node:crypto';
+import {
+  auditProjectChanges,
+  formatGuardrailReport,
+  GuardrailViolationError,
+  hasBlockingFindings,
+  normalizeGuardrails,
+  type GuardrailReport,
+  type GuardrailRuntimeConfig,
+} from './guardrails.js';
+import { normalizeRuntimeError } from './runtime-errors.js';
+
+export type { AgentAuthMode, AgentProvider, AgentRuntimeConfig, EffortLevel } from './agent-runtime/index.js';
 
 // --- Orchestrator events (shared interface for all event consumers) ---
 
@@ -37,10 +48,8 @@ export interface OrchestratorEvents {
   'task-classified': [teamId: string, complexity: string, agentCount: number];
   'phase-transition': [teamId: string, from: TeamPhase, to: TeamPhase, trigger: string];
   'task-complete': [teamId: string, phase: TeamPhase, durationMs: number];
-  'message-routed': [teamId: string, message: AgentMessage];
   'agent-output': [teamId: string, instance: RoleInstance, data: string];
   'agent-progress': [teamId: string, instance: RoleInstance, text: string];
-  'agent-message': [teamId: string, instance: RoleInstance, message: AgentMessage];
   'agent-crashed': [teamId: string, instance: RoleInstance, code: number | null];
   'agent-stderr': [teamId: string, instance: RoleInstance, data: string];
   'agent-respawned': [teamId: string, instance: RoleInstance];
@@ -52,6 +61,9 @@ export interface OrchestratorEvents {
   'agent-task': [teamId: string, instance: RoleInstance, subtask: string];
   'tick': [teamId: string];
   'security-review': [teamId: string, data: { status: string; result?: string }];
+  'pr-created': [teamId: string, prNumber: number, prUrl: string];
+  'team-archived': [teamId: string, prUrl: string];
+  'team-deleted': [teamId: string];
   'shutdown': [];
 }
 
@@ -66,74 +78,13 @@ export interface FeedbackPayload {
   sourceAgent?: string;
   highlightTerms?: string[];
   detail?: string;
+  metadata?: Record<string, unknown>;
 }
-import {
-  DEFAULT_MODELS,
-  DEFAULT_DISALLOWED_TOOLS,
-  DEFAULT_MAX_TURNS,
-} from './spawner/agent-spawner.js';
-
-// --- PromptChannel: bridges sync push() to async iterable for SDK ---
-// Duplicated from agent-process.ts to keep that file untouched.
-
-class PromptChannel {
-  private queue: SDKUserMessage[] = [];
-  private waiter: ((value: IteratorResult<SDKUserMessage>) => void) | null = null;
-  private closed = false;
-
-  push(prompt: string, images?: Array<{ media_type: string; data: string }>): void {
-    let content: string | Array<{ type: string; [key: string]: any }>;
-    if (images && images.length > 0) {
-      content = [
-        { type: 'text', text: prompt },
-        ...images.map(img => ({
-          type: 'image' as const,
-          source: { type: 'base64' as const, media_type: img.media_type, data: img.data },
-        })),
-      ];
-    } else {
-      content = prompt;
-    }
-    const msg: SDKUserMessage = {
-      type: 'user',
-      message: { role: 'user', content },
-      parent_tool_use_id: null,
-      session_id: '',
-    };
-    if (this.waiter) {
-      const resolve = this.waiter;
-      this.waiter = null;
-      resolve({ value: msg, done: false });
-    } else {
-      this.queue.push(msg);
-    }
-  }
-
-  close(): void {
-    this.closed = true;
-    if (this.waiter) {
-      const resolve = this.waiter;
-      this.waiter = null;
-      resolve({ value: undefined as any, done: true });
-    }
-  }
-
-  [Symbol.asyncIterator](): AsyncIterator<SDKUserMessage> {
-    return {
-      next: (): Promise<IteratorResult<SDKUserMessage>> => {
-        if (this.queue.length > 0) {
-          return Promise.resolve({ value: this.queue.shift()!, done: false });
-        }
-        if (this.closed) {
-          return Promise.resolve({ value: undefined as any, done: true });
-        }
-        return new Promise((resolve) => {
-          this.waiter = resolve;
-        });
-      },
-    };
-  }
-}
+// Agent config defaults are read from YAML frontmatter in agent .md files.
+// These fallbacks are used when frontmatter is missing a field.
+const FALLBACK_MODEL = 'claude-opus-4-6';
+const FALLBACK_EFFORT: EffortLevel = 'medium';
+const FALLBACK_MAX_TURNS = 20;
 
 // --- Verdict types ---
 
@@ -147,260 +98,155 @@ export interface ParsedVerdict<V extends string> {
   details: string;
 }
 
+export interface AmbiguousVerdict {
+  verdict: 'AMBIGUOUS';
+  raw: string;
+}
+
+export type VerdictResult<V extends string> = ParsedVerdict<V> | AmbiguousVerdict;
+
+function isAmbiguous<V extends string>(result: VerdictResult<V>): result is AmbiguousVerdict {
+  return result.verdict === 'AMBIGUOUS';
+}
+
+export class MalformedVerdictError extends Error {
+  constructor(
+    readonly instance: RoleInstance,
+    readonly expected: readonly string[],
+    readonly raw: string,
+  ) {
+    super(
+      `Agent ${instance} emitted an unparseable verdict twice. ` +
+      `Expected response to begin with one of: ${expected.join(', ')}. ` +
+      `Raw output (last attempt, truncated to 200 chars): ${raw.slice(0, 200)}`,
+    );
+    this.name = 'MalformedVerdictError';
+  }
+}
+
 export function parseClassification(scanText: string): TaskClassification {
   const match = scanText.match(/^CLASSIFICATION:\s*(SIMPLE|STANDARD|COMPLEX)/im);
   if (match) return match[1].toUpperCase() as TaskClassification;
   return 'STANDARD';
 }
 
-export function parseSecurityVerdict(text: string): ParsedVerdict<SecurityVerdict> {
+// Strict prefix only. If the agent's response doesn't begin with one of
+// APPROVED|FLAGGED|BLOCKED, return AMBIGUOUS — don't guess. Guessing on a
+// security gate produces silent failure-open when the prompt drifts.
+export function parseSecurityVerdict(text: string): VerdictResult<SecurityVerdict> {
   const trimmed = text.trimStart();
   if (trimmed.startsWith('APPROVED')) return { verdict: 'APPROVED', details: trimmed };
   if (trimmed.startsWith('FLAGGED')) return { verdict: 'FLAGGED', details: trimmed };
   if (trimmed.startsWith('BLOCKED')) return { verdict: 'BLOCKED', details: trimmed };
-  // Default to APPROVED if no clear verdict (scan results may not start with verdict)
-  return { verdict: 'APPROVED', details: trimmed };
+  return { verdict: 'AMBIGUOUS', raw: trimmed };
 }
 
-export function parseReviewVerdict(text: string): ParsedVerdict<ReviewVerdict> {
-  const trimmed = text.trimStart();
+// The <thinking> strip is structural cleanup, not fuzzy matching: providers
+// not trained on the convention may emit literal blocks that would otherwise
+// anchor the prefix check on the wrong content. Strip first, then strict prefix.
+export function parseReviewVerdict(text: string): VerdictResult<ReviewVerdict> {
+  const stripped = text.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
+  const trimmed = stripped.trimStart();
   const upper = trimmed.toUpperCase();
-
-  // Check explicit prefix first
   if (upper.startsWith('APPROVED')) return { verdict: 'APPROVED', details: trimmed };
   if (upper.startsWith('REVISION_NEEDED')) return { verdict: 'REVISION_NEEDED', details: trimmed };
   if (upper.startsWith('REJECTED')) return { verdict: 'REJECTED', details: trimmed };
-
-  // Scan full response for verdict indicators when prefix is missing
-  const rejectPatterns = [/\brejected?\b/i, /\bfundamentally\s+flawed\b/i, /\bstart\s+over\b/i];
-  const revisionPatterns = [
-    /\brevision\s*(needed|required)\b/i,
-    /\bneeds?\s+(revision|fix|change|work|improvement)/i,
-    /\bfix\s+(required|needed|before)\b/i,
-    /\bnot\s+(ready|acceptable|approved)\b/i,
-    /\bcannot\s+approve\b/i,
-    /\bsend\s+back\b/i,
-  ];
-  const approvePatterns = [
-    /\bapproved?\b/i,
-    /\blooks?\s+good\b/i,
-    /\bwell[\s-]implemented\b/i,
-    /\bready\s+(to\s+)?(merge|ship|deploy)\b/i,
-  ];
-
-  const hasReject = rejectPatterns.some(p => p.test(trimmed));
-  const hasRevision = revisionPatterns.some(p => p.test(trimmed));
-  const hasApprove = approvePatterns.some(p => p.test(trimmed));
-
-  if (hasReject && !hasApprove) return { verdict: 'REJECTED', details: trimmed };
-  if (hasRevision && !hasApprove) return { verdict: 'REVISION_NEEDED', details: trimmed };
-  if (hasApprove && !hasRevision && !hasReject) return { verdict: 'APPROVED', details: trimmed };
-
-  // Ambiguous or no signals — err on side of caution, request revision
-  return { verdict: 'REVISION_NEEDED', details: trimmed };
+  return { verdict: 'AMBIGUOUS', raw: trimmed };
 }
 
-export function parseVerifyVerdict(text: string): ParsedVerdict<VerifyVerdict> {
+export function parseVerifyVerdict(text: string): VerdictResult<VerifyVerdict> {
   const trimmed = text.trimStart();
   const upper = trimmed.toUpperCase();
-
-  // Check explicit prefix first (strongest signal)
   if (upper.startsWith('GAPS_FOUND')) return { verdict: 'GAPS_FOUND', details: trimmed };
   if (upper.startsWith('COMPLETE')) return { verdict: 'COMPLETE', details: trimmed };
-
-  // Check for unchecked items in requirements checklist (deterministic)
-  const hasUnchecked = /- \[ \]/m.test(trimmed);
-  const hasChecked = /- \[x\]/mi.test(trimmed);
-  if (hasUnchecked) return { verdict: 'GAPS_FOUND', details: trimmed };
-  if (hasChecked && !hasUnchecked) return { verdict: 'COMPLETE', details: trimmed };
-
-  // Scan full response for gap indicators when no checklist found
-  const gapPatterns = [
-    /\bgaps?\s*found\b/i,
-    /\baction\s*required\b/i,
-    /\bfix\s+(required|needed)\b/i,
-  ];
-  const completePatterns = [
-    /\ball\s+(requirements|tasks?)\s+(are\s+)?(fully\s+)?met\b/i,
-    /\bfully\s+(complete|implemented|met)\b/i,
-    /\bno\s+gaps?\s*(found)?\b/i,
-    /\bverified\s+complete\b/i,
-    /\bcomplete\b/i,
-  ];
-
-  const hasGaps = gapPatterns.some(p => p.test(trimmed));
-  const hasComplete = completePatterns.some(p => p.test(trimmed));
-
-  if (hasGaps && !hasComplete) return { verdict: 'GAPS_FOUND', details: trimmed };
-
-  // Default to COMPLETE — if the verifier didn't explicitly flag gaps, trust it
-  return { verdict: 'COMPLETE', details: trimmed };
+  return { verdict: 'AMBIGUOUS', raw: trimmed };
 }
 
 const MAX_VERIFY_PASSES = 2;
+const VERDICT_RETRY_LIMIT = 1;
 
-// --- AgentSession: wraps a warm SDK query() session ---
-
-interface SessionOpts {
-  model: string;
-  cwd: string;
-  effort: 'low' | 'medium' | 'high' | 'max';
-  disallowedTools?: string[];
-  maxTurns?: number;
-  onProgress?: (accumulated: string) => void;
+// Generic corrective re-prompt used by sendWithVerdict when the parser
+// returns AMBIGUOUS. Same shape for all three pipeline-phase verdicts.
+function formatVerdictRetryPrompt(expected: readonly string[], raw: string): string {
+  const preview = raw.length > 200 ? `${raw.slice(0, 200)}…` : raw;
+  return (
+    `Your previous response did not begin with one of: ${expected.join(', ')}.\n\n` +
+    `Re-emit your verdict on the FIRST line of your next response. ` +
+    `Use the exact verdict token followed by an em-dash and a brief reason. ` +
+    `Do not preface it with prose, headings, or thinking blocks.\n\n` +
+    `For reference, your previous response started with: "${preview}"`
+  );
 }
 
-class AgentSession {
-  readonly name: string;
-  private channel: PromptChannel;
-  private queryGen: Query;
-  private pendingResolve: ((text: string) => void) | null = null;
-  private pendingReject: ((err: Error) => void) | null = null;
-  private accumulated = '';
-  private activityLog = '';
-  private onProgress?: (accumulated: string) => void;
-  private consuming: Promise<void>;
-  private _closed = false;
+interface SendWithVerdictHooks {
+  // Called for every raw response the agent emits (including the malformed
+  // first attempt and the retry). Pipeline callers wire this to agent-output
+  // emission so the dashboard transcript shows everything the agent produced.
+  onResponse: (raw: string) => void;
+  // Called only on AMBIGUOUS responses — separate diagnostic signal that
+  // dashboard/logger/metrics can subscribe to for prompt-drift detection.
+  onMalformed: (raw: string) => void;
+}
 
-  constructor(name: string, systemPrompt: string, opts: SessionOpts) {
-    this.name = name;
-    this.onProgress = opts.onProgress;
-    this.channel = new PromptChannel();
+// Wraps session.send + parse with strict verdict-prefix checking. On the
+// first AMBIGUOUS response, emits a malformed-output signal and re-prompts
+// the agent ONCE with a corrective format hint. A second AMBIGUOUS response
+// throws MalformedVerdictError, which the orchestrator's outer try/catch
+// routes to failPipeline → TeamPhase.Errored. No fuzzy fallback — the prefix
+// is the contract.
+export async function sendWithVerdict<V extends string>(
+  session: AgentSession,
+  prompt: string,
+  parser: (text: string) => VerdictResult<V>,
+  expected: readonly V[],
+  hooks: SendWithVerdictHooks,
+  instance: RoleInstance,
+  images?: Array<{ media_type: string; data: string }>,
+): Promise<ParsedVerdict<V>> {
+  const first = await session.send(prompt, images);
+  hooks.onResponse(first);
+  const firstParse = parser(first);
+  if (!isAmbiguous(firstParse)) return firstParse;
 
-    this.queryGen = query({
-      prompt: this.channel as AsyncIterable<SDKUserMessage>,
-      options: {
-        model: opts.model,
-        systemPrompt,
-        cwd: opts.cwd,
-        effort: opts.effort,
-        maxTurns: opts.maxTurns,
-        disallowedTools: opts.disallowedTools,
-        allowedTools: ['Read', 'Edit', 'Write', 'Bash', 'Grep', 'Glob'],
-        permissionMode: 'bypassPermissions',
-        allowDangerouslySkipPermissions: true,
-        persistSession: false,
-        env: { ...process.env, CLAUDECODE: undefined },
-      } as any,
-    });
+  hooks.onMalformed(first);
 
-    // Start consuming the stream in the background
-    this.consuming = this.consume();
+  for (let attempt = 0; attempt < VERDICT_RETRY_LIMIT; attempt++) {
+    const retryPrompt = formatVerdictRetryPrompt(expected, first);
+    const retry = await session.send(retryPrompt);
+    hooks.onResponse(retry);
+    const retryParse = parser(retry);
+    if (!isAmbiguous(retryParse)) return retryParse;
+    hooks.onMalformed(retry);
+    throw new MalformedVerdictError(instance, expected, retry);
   }
 
-  get closed(): boolean {
-    return this._closed;
-  }
+  // Unreachable: VERDICT_RETRY_LIMIT >= 1 guarantees the loop body runs at
+  // least once and either returns or throws. The throw below exists only to
+  // satisfy the type system.
+  throw new MalformedVerdictError(instance, expected, first);
+}
 
-  /** Last activity log from the most recent send() call. */
-  get lastActivityLog(): string {
-    return this.activityLog;
-  }
+// --- Requirements post-processor ---
 
-  /**
-   * Send a message to this agent and wait for the complete response.
-   * Returns the full accumulated text from the agent's turn.
-   */
-  async send(message: string, images?: Array<{ media_type: string; data: string }>): Promise<string> {
-    if (this._closed) {
-      throw new Error(`AgentSession "${this.name}" is closed`);
-    }
-    return new Promise<string>((resolve, reject) => {
-      this.pendingResolve = resolve;
-      this.pendingReject = reject;
-      this.accumulated = '';
-      this.activityLog = '';
-      this.channel.push(message, images);
-    });
-  }
-
-  /**
-   * Close this agent session. Terminates the SDK query.
-   */
-  close(): void {
-    if (this._closed) return;
-    this._closed = true;
-    this.channel.close();
-    try {
-      this.queryGen.close();
-    } catch {
-      // Best effort
-    }
-  }
-
-  /**
-   * Wait for the background consume loop to finish.
-   */
-  async waitForCompletion(): Promise<void> {
-    await this.consuming;
-  }
-
-  private async consume(): Promise<void> {
-    try {
-      for await (const msg of this.queryGen) {
-        // Extract tool use activity for dashboard streaming (separate from accumulated result)
-        if ((msg as any).type === 'assistant' && this.onProgress) {
-          const content = (msg as any).message?.content;
-          if (Array.isArray(content)) {
-            for (const block of content) {
-              if (block.type === 'tool_use') {
-                const tool = block.name || 'unknown';
-                const input = block.input || {};
-                let detail = '';
-                if (input.file_path) detail = input.file_path;
-                else if (input.command) detail = input.command.substring(0, 120);
-                else if (input.pattern) detail = input.pattern;
-                const line = detail ? `${tool}: ${detail}` : tool;
-                this.activityLog += (this.activityLog ? '\n' : '') + line;
-                this.onProgress(this.activityLog);
-
-              }
-              if (block.type === 'thinking' && block.thinking) {
-                const preview = block.thinking.substring(0, 200);
-                this.activityLog += (this.activityLog ? '\n' : '') + '💭 ' + preview;
-                this.onProgress(this.activityLog);
-              }
-            }
-          }
-        }
-        // Extract text from assistant messages
-        const text = extractSdkText(msg);
-        if (text) {
-          this.accumulated += text;
-          // Notify progress listener (for dashboard streaming)
-          if (this.onProgress) {
-            this.onProgress(this.accumulated);
-          }
-        }
-
-        // Result message = turn complete
-        if ((msg as any).type === 'result') {
-          if (this.pendingResolve) {
-            const result = this.accumulated;
-            this.accumulated = '';
-            const resolve = this.pendingResolve;
-            this.pendingResolve = null;
-            this.pendingReject = null;
-            resolve(result);
-          }
-        }
-      }
-    } catch (err: any) {
-      if (this.pendingReject) {
-        const reject = this.pendingReject;
-        this.pendingResolve = null;
-        this.pendingReject = null;
-        reject(err instanceof Error ? err : new Error(String(err)));
-      }
-    } finally {
-      this._closed = true;
-    }
-  }
+/**
+ * Two-step strip applied to the raw output of the requirements-extraction agent.
+ * Step 1 removes any <thinking>...</thinking> blocks the model may have emitted
+ * literally (covers providers not trained on the convention). Step 2 strips
+ * anything before the first numbered-list line, so preamble prose like
+ * "Here are the requirements:" never reaches the user-approval modal.
+ *
+ * Order matters: step 1 must run before step 2 because a leaked <thinking>
+ * block containing its own numbered list would otherwise anchor step 2's
+ * lookahead and survive into the output.
+ */
+export function postProcessRequirements(raw: string): string {
+  const trimmed = raw.trim();
+  const noThinking = trimmed.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
+  const stripped = noThinking.replace(/^[\s\S]*?(?=^\d+\.)/m, '');
+  return stripped.trim();
 }
 
 // --- Pipeline Orchestrator Config ---
-
-type EffortLevel = 'low' | 'medium' | 'high' | 'max';
 
 export interface PipelineOrchestraConfig {
   registryPath: string;
@@ -408,9 +254,11 @@ export interface PipelineOrchestraConfig {
   /** Directory containing role prompt files (reuses subagent prompts) */
   rolesDir: string;
   maxConcurrentTeams: number;
+  /** Global all-or-nothing agent runtime. Applies to every team. */
+  agentRuntime?: Partial<AgentRuntimeConfig>;
   /** Model overrides per role (full model IDs like 'claude-opus-4-6') */
   models?: Partial<Record<Role, string>>;
-  /** Per-role effort levels. Pipeline advantage: each agent gets its own query(). */
+  /** Per-role effort levels. Pipeline advantage: each agent gets its own provider session. */
   efforts?: Partial<Record<Role, EffortLevel>>;
   /** Disallowed tools overrides per role */
   disallowedTools?: Partial<Record<Role, string[]>>;
@@ -420,26 +268,25 @@ export interface PipelineOrchestraConfig {
   limits?: Partial<LoopLimits>;
   /** Skip requirements extraction (useful for testing) */
   skipRequirements?: boolean;
+  /** Provider-neutral guardrail policy and Codex stream detection controls */
+  guardrails?: Partial<GuardrailRuntimeConfig>;
+  /** Future structured-output rollout controls */
+  contracts?: {
+    mode?: 'phased-fallback' | 'strict' | 'observe';
+    validationRetries?: number;
+  };
+  /** Future complex-review routing controls */
+  review?: {
+    complexFileThreshold?: number;
+    complexDiffLineThreshold?: number;
+    maxFilesPerBatch?: number;
+  };
+  /** Future provider retry and recovery controls */
+  recovery?: {
+    maxProviderRetries?: number;
+    initialBackoffMs?: number;
+  };
 }
-
-// --- Pipeline-tuned defaults ---
-// Key insight: each agent gets its own query(), so we can tune per-role.
-// Workers need high effort (creative coding).
-// Security/Reviewer need low effort (scanning/judging, not coding).
-
-const DEFAULT_PIPELINE_EFFORTS: Record<Role, EffortLevel> = {
-  [Role.Supervisor]: 'low',    // Not used in pipeline mode
-  [Role.Worker]: 'high',       // Creative coding needs deep reasoning
-  [Role.Security]: 'low',      // Pattern scanning, not creative work
-  [Role.Reviewer]: 'low',      // Quick verdict, not deep analysis
-};
-
-const DEFAULT_PIPELINE_MAX_TURNS: Record<Role, number> = {
-  [Role.Supervisor]: 1,        // Not used in pipeline mode
-  [Role.Worker]: 50,           // Workers may need many turns for complex tasks
-  [Role.Security]: 5,          // Scan or sweep is one pass
-  [Role.Reviewer]: 5,          // Read code, issue verdict — 5 turns max
-};
 
 const DEFAULT_PIPELINE_CONFIG = {
   registryPath: './registry.json',
@@ -468,14 +315,17 @@ interface PipelineTeamContext {
 
 export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   private readonly config: PipelineOrchestraConfig & typeof DEFAULT_PIPELINE_CONFIG;
+  private readonly agentRuntime: AgentRuntimeConfig;
   private readonly persistence: StatePersistence;
   private readonly registry: Registry;
-  private readonly models: Record<Role, string>;
-  private readonly efforts: Record<Role, EffortLevel>;
-  private readonly disallowedTools: Record<Role, string[]>;
-  private readonly maxTurnsPerRole: Record<Role, number>;
+  private readonly models: Record<RoleInstance, string>;
+  private readonly efforts: Record<RoleInstance, EffortLevel>;
+  private readonly disallowedTools: Record<RoleInstance, string[]>;
+  private readonly maxTurnsPerInstance: Record<RoleInstance, number>;
+  private readonly guardrails: GuardrailRuntimeConfig;
   private readonly teams: Map<string, PipelineTeamContext> = new Map();
   private shuttingDown = false;
+  private prPollInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor(config: Partial<PipelineOrchestraConfig> = {}) {
     super();
@@ -485,14 +335,33 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       Object.entries(config).filter(([, v]) => v !== undefined)
     );
     this.config = { ...DEFAULT_PIPELINE_CONFIG, ...cleanConfig } as PipelineOrchestraConfig & typeof DEFAULT_PIPELINE_CONFIG;
+    this.agentRuntime = normalizeAgentRuntime(config.agentRuntime);
+    validateAgentRuntime(this.agentRuntime);
+    this.guardrails = normalizeGuardrails(config.guardrails);
 
     this.persistence = new StatePersistence();
     this.registry = new Registry(this.config.registryPath);
 
-    this.models = { ...DEFAULT_MODELS, ...config.models };
-    this.efforts = { ...DEFAULT_PIPELINE_EFFORTS, ...config.efforts };
-    this.disallowedTools = { ...DEFAULT_DISALLOWED_TOOLS, ...config.disallowedTools };
-    this.maxTurnsPerRole = { ...DEFAULT_PIPELINE_MAX_TURNS, ...config.maxTurns };
+    // Build per-instance defaults from each instance's frontmatter, then
+    // apply role-level config overrides on top. Config stays role-keyed for
+    // backward compat; per-instance differentiation lives in frontmatter
+    // (e.g. worker-2.agent.md sets disallowedTools at the SDK boundary).
+    const fmDefaults = this.loadFrontmatterDefaults(this.config.rolesDir);
+    this.models = {} as Record<RoleInstance, string>;
+    this.efforts = {} as Record<RoleInstance, EffortLevel>;
+    this.disallowedTools = {} as Record<RoleInstance, string[]>;
+    this.maxTurnsPerInstance = {} as Record<RoleInstance, number>;
+    for (const instance of ALL_INSTANCES) {
+      const role = INSTANCE_TO_ROLE[instance];
+      this.models[instance] = config.models?.[role] ?? fmDefaults.models[instance];
+      this.efforts[instance] = config.efforts?.[role] ?? fmDefaults.efforts[instance];
+      this.disallowedTools[instance] = config.disallowedTools?.[role] ?? fmDefaults.disallowedTools[instance];
+      this.maxTurnsPerInstance[instance] = config.maxTurns?.[role] ?? fmDefaults.maxTurns[instance];
+    }
+  }
+
+  getAgentRuntime(): AgentRuntimeConfig {
+    return { ...this.agentRuntime };
   }
 
   // --- Team Lifecycle ---
@@ -501,11 +370,6 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     if (this.shuttingDown) {
       throw new Error('Orchestrator is shutting down');
     }
-    if (this.teams.size >= this.config.maxConcurrentTeams) {
-      throw new Error(
-        `Maximum concurrent teams (${this.config.maxConcurrentTeams}) reached. Terminate an existing team first.`
-      );
-    }
 
     const teamId = name;
     if (this.teams.has(teamId)) {
@@ -513,6 +377,20 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     }
 
     const resolvedProjectPath = path.resolve(projectPath);
+
+    // Limit is now per-project, not global. A user with multiple projects
+    // can run up to maxConcurrentTeams teams in EACH project independently.
+    let teamsInThisProject = 0;
+    for (const ctx of this.teams.values()) {
+      if (ctx.state.snapshot.projectPath === resolvedProjectPath) {
+        teamsInThisProject++;
+      }
+    }
+    if (teamsInThisProject >= this.config.maxConcurrentTeams) {
+      throw new Error(
+        `Maximum concurrent teams (${this.config.maxConcurrentTeams}) reached for this project. Terminate an existing team in this project first, or use a different project.`
+      );
+    }
 
     // Project directory must already exist — engine attaches to existing repos
     if (!fs.existsSync(resolvedProjectPath)) {
@@ -527,8 +405,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     // Add .claude-orchestra/ to the project's .gitignore if not present
     this.ensureGitignore(resolvedProjectPath);
 
-    // Ensure we're on a dev branch — create one if on main
-    this.ensureDevBranch(resolvedProjectPath);
+    // Create a dedicated branch for this team off main
+    const branchName = this.ensureTeamBranch(resolvedProjectPath, name);
 
     const limits: LoopLimits = {
       ...DEFAULT_LOOP_LIMITS,
@@ -536,6 +414,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     };
 
     const state = TeamState.create(teamId, name, resolvedProjectPath, limits);
+    state.setBranchName(branchName);
 
     // Register team directory with persistence and persist initial state
     this.persistence.registerTeamDir(teamId, teamDir);
@@ -584,13 +463,11 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       const data = this.persistence.loadFromDir(teamDir);
       if (!data) continue;
 
-      if (
-        data.currentPhase === TeamPhase.Done ||
-        data.currentPhase === TeamPhase.Cancelled ||
-        data.currentPhase === TeamPhase.Errored
-      ) {
-        continue;
-      }
+      // Previously skipped Done/Cancelled/Errored teams on recovery, which
+      // made them invisible in the dashboard after a restart. Now we keep
+      // them visible so the user can review them, create PRs, or remove
+      // them via the Delete button. Terminal-state teams hold no live
+      // sessions, so recovering them is essentially free.
 
       // Register team directory with persistence
       this.persistence.registerTeamDir(entry.teamId, teamDir);
@@ -676,22 +553,45 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     complexity: 'simple' | 'standard' | 'complex',
     images?: Array<{ media_type: string; data: string }>
   ): Promise<void> {
+    if (complexity === 'simple') {
+      this.runSimplePipeline(teamId, ctx, task, images);
+      return;
+    }
+
     if (this.config.skipRequirements) {
       // Skip extraction — go straight to pipeline
-      if (complexity === 'simple') {
-        this.runSimplePipeline(teamId, ctx, task, images);
-      } else {
-        this.runStandardPipeline(teamId, ctx, task, images);
-      }
+      this.runStandardPipeline(teamId, ctx, task, images);
       return;
     }
 
     try {
       // Extract requirements from the task prompt
       this.emit('agent-output', teamId, 'Worker-1' as any, '[Pipeline] Extracting requirements...');
-      const requirements = await this.extractRequirements(task, images);
+      const requirements = await this.extractRequirements(ctx.state.snapshot.projectPath, task, images);
 
       if (requirements) {
+        // Short-circuit: extraction emitted only a clarification-flagging line —
+        // task is too vague to proceed. Bail before user-approval and Worker-2 to
+        // avoid the "user clicks Approve, Worker-2 finds no implementation, pipeline
+        // loops to revision limit" footgun.
+        // Pattern is intentionally narrow: anchored to start, single numbered item,
+        // "Clarify" first word — won't false-fire on a real multi-item list that
+        // happens to use "Clarify" in a later item.
+        const clarificationOnly =
+          /^1\.\s+Clarify\b[^\n]*$/m.test(requirements) && !/^2\./m.test(requirements);
+        if (clarificationOnly) {
+          this.notifyUser(
+            teamId,
+            'warning',
+            'Task too vague',
+            'Requirements extraction could not derive a verifiable requirement from the task description. ' +
+              'Please reassign the task with more specific outcome criteria.'
+          );
+          ctx.pipelineRunning = false;
+          // Stay in PreWork awaiting a new task.
+          return;
+        }
+
         // Show requirements for user approval
         const response = await this.askUser(
           teamId,
@@ -713,11 +613,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     }
 
     // Start the pipeline
-    if (complexity === 'simple') {
-      this.runSimplePipeline(teamId, ctx, task, images);
-    } else {
-      this.runStandardPipeline(teamId, ctx, task, images);
-    }
+    this.runStandardPipeline(teamId, ctx, task, images);
   }
 
   // --- Query ---
@@ -769,10 +665,16 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     this.registry.remove(teamId);
 
     this.teams.delete(teamId);
+
+    // Notify clients (dashboard) so they can drop the team from their local
+    // state — without this, the team lingers in the UI as "cancelled" forever
+    // even though the server has already removed it.
+    this.emit('team-deleted', teamId);
   }
 
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
+    this.stopPrPolling();
 
     for (const [, ctx] of this.teams) {
       this.closeSessions(ctx);
@@ -813,8 +715,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   // --- Git Operations (user-initiated) ---
 
   /**
-   * Push current branch and merge to main. User-initiated only.
-   * Returns git result with combined output.
+   * @deprecated Use createPr() instead.
    */
   pushAndMerge(teamId: string): import('./git.js').GitResult {
     const ctx = this.teams.get(teamId);
@@ -822,6 +723,141 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       return { success: false, output: `Team "${teamId}" not found` };
     }
     return GitOps.pushAndMerge(ctx.state.snapshot.projectPath);
+  }
+
+  /**
+   * Push the team's branch and create a GitHub PR. User-initiated.
+   * Transitions team from Done → PrOpen on success.
+   */
+  createPr(teamId: string): import('./git.js').GitResult & { prNumber?: number; prUrl?: string } {
+    const ctx = this.teams.get(teamId);
+    if (!ctx) {
+      return { success: false, output: `Team "${teamId}" not found` };
+    }
+
+    const { snapshot } = ctx.state;
+    if (snapshot.currentPhase !== TeamPhase.Done) {
+      return { success: false, output: `Team is in "${snapshot.currentPhase}" phase, must be "done" to create PR` };
+    }
+
+    const branchName = snapshot.branchName;
+    if (!branchName) {
+      return { success: false, output: 'No branch name set for this team' };
+    }
+
+    const taskDesc = snapshot.currentTask?.description ?? 'No description';
+    const title = taskDesc.length > 72 ? taskDesc.substring(0, 69) + '...' : taskDesc;
+    const body = `## Team: ${snapshot.teamName}\n\n**Task:** ${taskDesc}\n\n---\n_Created by ClaudeOrchestra_`;
+
+    const result = GitOps.createPullRequest(snapshot.projectPath, branchName, title, body);
+
+    if (result.success && result.prNumber && result.prUrl) {
+      ctx.state.setPrInfo(result.prNumber, result.prUrl);
+      const fromPhase = ctx.state.currentPhase;
+      ctx.state.transitionPhase(TeamPhase.PrOpen);
+      this.persistence.persistNow(ctx.state);
+      this.emit('phase-transition', teamId, fromPhase, TeamPhase.PrOpen, 'pr-created');
+      this.emit('pr-created', teamId, result.prNumber, result.prUrl);
+      this.startPrPolling();
+    }
+
+    return result;
+  }
+
+  /**
+   * Archive a team after its PR has been merged.
+   * Cleans up branch, registry, and in-memory state.
+   */
+  async archiveTeam(teamId: string): Promise<void> {
+    const ctx = this.teams.get(teamId);
+    if (!ctx) return;
+
+    const { snapshot } = ctx.state;
+    const prUrl = snapshot.prUrl ?? '';
+
+    // Close any lingering sessions
+    this.closeSessions(ctx);
+
+    // Transition to Merged
+    if (snapshot.currentPhase === TeamPhase.PrOpen) {
+      const fromPhase = ctx.state.currentPhase;
+      ctx.state.transitionPhase(TeamPhase.Merged);
+      this.emit('phase-transition', teamId, fromPhase, TeamPhase.Merged, 'pr-merged');
+    }
+
+    this.persistence.persistNow(ctx.state);
+
+    // Clean up local branch
+    if (snapshot.branchName) {
+      GitOps.checkout(snapshot.projectPath, 'main');
+      GitOps.deleteLocalBranch(snapshot.projectPath, snapshot.branchName);
+    }
+
+    // Remove from registry and memory
+    this.registry.remove(teamId);
+    this.teams.delete(teamId);
+
+    this.emit('team-archived', teamId, prUrl);
+  }
+
+  // --- PR Polling ---
+
+  /**
+   * Start polling GitHub for merged PRs. Called when a team enters PrOpen.
+   * Polls every 60s. Safe to call multiple times (idempotent).
+   */
+  private startPrPolling(): void {
+    if (this.prPollInterval) return;
+
+    this.prPollInterval = setInterval(() => {
+      this.pollPrStates();
+    }, 60_000);
+  }
+
+  private stopPrPolling(): void {
+    if (this.prPollInterval) {
+      clearInterval(this.prPollInterval);
+      this.prPollInterval = null;
+    }
+  }
+
+  private pollPrStates(): void {
+    for (const [teamId, ctx] of this.teams) {
+      const { snapshot } = ctx.state;
+      if (snapshot.currentPhase !== TeamPhase.PrOpen) continue;
+      if (!snapshot.prNumber) continue;
+
+      const prState = GitOps.checkPrState(snapshot.projectPath, snapshot.prNumber);
+      if (!prState) continue; // gh not available or error — skip
+
+      if (prState.merged) {
+        // PR was merged — archive the team
+        this.archiveTeam(teamId).catch(() => {});
+      } else if (prState.state === 'CLOSED') {
+        // PR closed without merge — return to Done so user can re-create
+        const fromPhase = ctx.state.currentPhase;
+        ctx.state.clearPrInfo();
+        ctx.state.transitionPhase(TeamPhase.Done);
+        this.persistence.persistNow(ctx.state);
+        this.emit('phase-transition', teamId, fromPhase, TeamPhase.Done, 'pr-closed-without-merge');
+        this.emit('feedback', teamId, {
+          id: `pr-closed-${Date.now()}`,
+          type: 'warning',
+          title: 'PR Closed',
+          message: `PR #${snapshot.prNumber} was closed without merging. You can create a new PR.`,
+          blocking: false,
+          timestamp: new Date().toISOString(),
+        });
+      }
+    }
+
+    // Stop polling if no teams are in PrOpen
+    const anyPrOpen = [...this.teams.values()].some(
+      ctx => ctx.state.snapshot.currentPhase === TeamPhase.PrOpen
+    );
+    if (!anyPrOpen) {
+      this.stopPrPolling();
+    }
   }
 
   // --- Final Security Review (user-initiated) ---
@@ -858,11 +894,12 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     this.emit('agent-output', teamId, 'Security-1' as any, '[Security Review] Starting comprehensive review...');
 
     try {
-      const systemPrompt = this.loadRolePrompt('security-review.claude.md');
-      const session = new AgentSession('SecurityReview', systemPrompt, {
-        model: this.models[Role.Security],
+      const systemPrompt = this.loadRolePrompt('security-review.agent.md');
+      const session = createAgentSession('SecurityReview', systemPrompt, {
+        runtime: this.agentRuntime,
+        model: this.getModelForRole(Role.Security),
         cwd,
-        effort: 'high' as any,
+        effort: 'high',
         maxTurns: 15,
         onProgress: (text: string) => {
           this.emit('agent-progress', teamId, 'Security-1' as any, text);
@@ -926,26 +963,21 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     fs.writeFileSync(gitignorePath, content + separator + entry + '\n', 'utf-8');
   }
 
-  // --- Private: Dev Branch Setup ---
+  // --- Private: Team Branch Setup ---
 
-  private ensureDevBranch(projectPath: string): void {
-    const current = GitOps.currentBranch(projectPath);
-    if (current !== 'main') return; // already on a non-main branch
-
-    try {
-      // Check if local dev branch already exists
-      execSync('git rev-parse --verify dev', { cwd: projectPath, stdio: 'pipe' });
-      // dev exists locally, just check it out
-      execSync('git checkout dev', { cwd: projectPath, stdio: 'pipe' });
-    } catch {
-      // No local dev branch — create it and push to origin
-      execSync('git checkout -b dev', { cwd: projectPath, stdio: 'pipe' });
-      try {
-        execSync('git push -u origin dev', { cwd: projectPath, stdio: 'pipe' });
-      } catch {
-        // Push may fail if no remote — that's fine, local dev is created
-      }
+  /**
+   * Create a dedicated branch for this team off main.
+   * Returns the branch name (may include suffix if name was taken).
+   */
+  private ensureTeamBranch(projectPath: string, teamName: string): string {
+    const branchName = GitOps.slugifyBranchName(teamName);
+    const result = GitOps.createTeamBranch(projectPath, branchName);
+    if (!result.success) {
+      // Fall back: try to just stay on whatever branch we're on
+      console.warn(`[orchestra] Failed to create team branch ${branchName}: ${result.output}`);
+      return branchName;
     }
+    return result.branchName;
   }
 
   // --- Private: Session Management ---
@@ -961,25 +993,22 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   }
 
   private createSession(
-    name: string,
-    role: Role,
+    name: RoleInstance,
     cwd: string,
     onProgress?: (accumulated: string) => void
   ): AgentSession {
-    const systemPrompt = this.loadRolePrompt(
-      role === Role.Worker ? 'worker.claude.md' :
-        role === Role.Security ? 'security.claude.md' :
-          'reviewer.claude.md'
-    );
+    const systemPrompt = this.loadRolePrompt(INSTANCE_AGENT_FILES[name]);
 
-    return new AgentSession(name, systemPrompt, {
-      model: this.models[role],
+    return createAgentSession(name, systemPrompt, {
+      runtime: this.agentRuntime,
+      model: this.getModelForInstance(name),
       cwd,
-      effort: this.efforts[role],
-      disallowedTools: this.disallowedTools[role].length > 0
-        ? this.disallowedTools[role]
+      effort: this.efforts[name],
+      disallowedTools: this.disallowedTools[name].length > 0
+        ? this.disallowedTools[name]
         : undefined,
-      maxTurns: this.maxTurnsPerRole[role],
+      maxTurns: this.maxTurnsPerInstance[name],
+      guardrails: this.guardrails,
       onProgress,
     });
   }
@@ -1000,10 +1029,12 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       this.tryTransitionPhase(ctx.state, teamId, fromPhase, TeamPhase.Work, 'simple pipeline start');
 
       // Create Worker-1 session
-      const worker = this.createSession('Worker-1', Role.Worker, ctx.state.snapshot.projectPath,
+      const worker = this.createSession('Worker-1', ctx.state.snapshot.projectPath,
         (text) => this.emit('agent-progress', teamId, 'Worker-1' as any, text));
       ctx.sessions.push(worker);
 
+      ctx.state.setAgentJob('Worker-1' as any, 'Implementing task (simple)');
+      this.emit('agent-task', teamId, 'Worker-1' as any, 'Implementing task (simple)');
       this.emit('agent-output', teamId, 'Worker-1' as any, `[Pipeline] Starting simple task...`);
 
       // Send task to worker (with approved requirements if present)
@@ -1014,8 +1045,10 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       const result = await worker.send(fullPrompt, images);
       const simpleDisplay = result.trim() || worker.lastActivityLog || '(no text output)';
       this.emit('agent-output', teamId, 'Worker-1' as any, simpleDisplay);
+      this.runGuardrailAudit(teamId, ctx, 'simple-work');
 
       // Done — keep session alive for Q&A
+      this.markAgentDone(ctx, 'Worker-1' as any);
       this.completePipeline(teamId, ctx, startTime);
     } catch (err: any) {
       this.failPipeline(teamId, ctx, err, startTime);
@@ -1039,13 +1072,13 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
     try {
       // Create all 4 agent sessions in parallel (cold starts happen simultaneously)
-      const security = this.createSession('Security', Role.Security, cwd,
+      const security = this.createSession('Security-1', cwd,
         (text) => this.emit('agent-progress', teamId, 'Security-1' as any, text));
-      const worker1 = this.createSession('Worker-1', Role.Worker, cwd,
+      const worker1 = this.createSession('Worker-1', cwd,
         (text) => this.emit('agent-progress', teamId, 'Worker-1' as any, text));
-      const worker2 = this.createSession('Worker-2', Role.Worker, cwd,
+      const worker2 = this.createSession('Worker-2', cwd,
         (text) => this.emit('agent-progress', teamId, 'Worker-2' as any, text));
-      const reviewer = this.createSession('Reviewer', Role.Reviewer, cwd,
+      const reviewer = this.createSession('Reviewer-1', cwd,
         (text) => this.emit('agent-progress', teamId, 'Reviewer-1' as any, text));
       ctx.sessions = [security, worker1, worker2, reviewer];
 
@@ -1106,7 +1139,9 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
             );
             const simpleDisplay = simpleResult.trim() || worker1.lastActivityLog || '(no text output)';
             this.emit('agent-output', teamId, 'Worker-1' as any, simpleDisplay);
+            this.runGuardrailAudit(teamId, ctx, 'simple-work-reclassified');
 
+            this.markAgentDone(ctx, 'Worker-1' as any);
             this.completePipeline(teamId, ctx, startTime);
             return;
           }
@@ -1161,7 +1196,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
               this.emit('agent-output', teamId, 'Worker-2' as any,
                 `[Pipeline] Worker-2 ${verifyLabel.toLowerCase()}...`);
 
-              w2Result = await worker2.send(
+              const verifyVerdict = await sendWithVerdict(
+                worker2,
                 `REQUIREMENTS VERIFICATION\n\n` +
                 `You are Worker-2, acting as an engineering manager. Your ONLY job is to verify ` +
                 `that Worker-1 built what the user asked for. Do NOT modify any code.\n\n` +
@@ -1174,19 +1210,23 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
                   : '') +
                 `WORKER-1 OUTPUT:\n${currentW1Result.substring(0, 3000)}\n\n` +
                 `INSTRUCTIONS:\n` +
-                `1. For each approved requirement, check whether it is implemented.\n` +
-                `2. Output a checklist in this format:\n\n` +
+                `1. Begin your response on the FIRST line with one of:\n` +
+                `   COMPLETE — if every approved requirement is implemented\n` +
+                `   GAPS_FOUND — if any requirement is missing\n` +
+                `2. Below the verdict, output a checklist in this format:\n\n` +
                 `REQUIREMENTS CHECKLIST:\n` +
                 `- [x] Requirement description — implemented\n` +
                 `- [ ] Requirement description — NOT implemented (explain what is missing)\n\n` +
-                `3. After the checklist, begin your verdict on a new line:\n` +
-                `   COMPLETE — if all requirements are checked [x]\n` +
-                `   GAPS_FOUND — if any requirement is unchecked [ ]\n\n` +
-                `Only flag gaps for requirements in the approved list. Nothing else.`
+                `Only flag gaps for requirements in the approved list. Nothing else.`,
+                parseVerifyVerdict,
+                ['COMPLETE', 'GAPS_FOUND'] as const,
+                {
+                  onResponse: (raw) => this.emit('agent-output', teamId, 'Worker-2' as any, raw),
+                  onMalformed: (raw) => this.emit('malformed-output', teamId, 'Worker-2' as any, raw),
+                },
+                'Worker-2',
               );
-              this.emit('agent-output', teamId, 'Worker-2' as any, w2Result);
-
-              const verifyVerdict = parseVerifyVerdict(w2Result);
+              w2Result = verifyVerdict.details;
 
               if (verifyVerdict.verdict === 'COMPLETE') {
                 this.emit('agent-task', teamId, 'Worker-2' as any, 'Verified complete');
@@ -1221,6 +1261,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
             workerResults = { w1: currentW1Result, w2: w2Result };
           }
 
+          this.runGuardrailAudit(teamId, ctx, 'work-phase');
+
           // Auto-commit after work phase (safety checkpoint)
           GitOps.commit(cwd, 'WIP: work phase complete');
 
@@ -1233,19 +1275,23 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
             this.emit('agent-output', teamId, 'Security-1' as any,
               `[Pipeline] Security sweep starting...`);
 
-            const sweepResult = await security.send(
+            const sweepVerdict = await sendWithVerdict(
+              security,
               `POST-WORK SWEEP REQUEST\n\n` +
               `Task: ${task}\n` +
               requirementsBlock + `\n` +
               `Worker-1 summary:\n${workerResults.w1.substring(0, 2000)}\n\n` +
               `Worker-2 summary:\n${workerResults.w2.substring(0, 2000)}\n\n` +
               `Sweep all changes made by Workers. Check for introduced vulnerabilities, ` +
-              `leaked secrets, and scope violations. Begin your response with APPROVED, FLAGGED, or BLOCKED.`
+              `leaked secrets, and scope violations. Begin your response with APPROVED, FLAGGED, or BLOCKED.`,
+              parseSecurityVerdict,
+              ['APPROVED', 'FLAGGED', 'BLOCKED'] as const,
+              {
+                onResponse: (raw) => this.emit('agent-output', teamId, 'Security-1' as any, raw),
+                onMalformed: (raw) => this.emit('malformed-output', teamId, 'Security-1' as any, raw),
+              },
+              'Security-1',
             );
-
-            this.emit('agent-output', teamId, 'Security-1' as any, sweepResult);
-
-            const sweepVerdict = parseSecurityVerdict(sweepResult);
 
             if (sweepVerdict.verdict === 'BLOCKED') {
               this.emit('agent-output', teamId, 'Security-1' as any,
@@ -1263,6 +1309,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
             // APPROVED or FLAGGED — proceed to review
             // Auto-commit after security sweep passes (safety checkpoint)
+            this.runGuardrailAudit(teamId, ctx, 'security-sweep');
             GitOps.commit(cwd, 'WIP: security sweep passed');
           }
 
@@ -1275,7 +1322,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
             this.emit('agent-output', teamId, 'Reviewer-1' as any,
               `[Pipeline] Review starting...`);
 
-            const reviewResult = await reviewer.send(
+            const reviewVerdict = await sendWithVerdict(
+              reviewer,
               `REVIEW REQUEST\n\n` +
               `Task: ${task}\n` +
               requirementsBlock + `\n` +
@@ -1283,12 +1331,15 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
               `Worker-2 summary:\n${workerResults.w2.substring(0, 2000)}\n\n` +
               `Evaluate the quality and correctness of this work. ` +
               (ctx.isComplex ? `This is a COMPLEX task — apply strict review criteria for backward compatibility, data integrity, and security. ` : '') +
-              `Begin your response with APPROVED, REVISION_NEEDED, or REJECTED.`
+              `Begin your response with APPROVED, REVISION_NEEDED, or REJECTED.`,
+              parseReviewVerdict,
+              ['APPROVED', 'REVISION_NEEDED', 'REJECTED'] as const,
+              {
+                onResponse: (raw) => this.emit('agent-output', teamId, 'Reviewer-1' as any, raw),
+                onMalformed: (raw) => this.emit('malformed-output', teamId, 'Reviewer-1' as any, raw),
+              },
+              'Reviewer-1',
             );
-
-            this.emit('agent-output', teamId, 'Reviewer-1' as any, reviewResult);
-
-            const reviewVerdict = parseReviewVerdict(reviewResult);
 
             if (reviewVerdict.verdict === 'APPROVED') {
               // Success — break out of both loops
@@ -1332,11 +1383,57 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       GitOps.commit(cwd, task.substring(0, 72));
 
       // Keep sessions alive for Q&A after completion
+      this.markAllNonErroredAgentsDone(ctx);
       this.completePipeline(teamId, ctx, startTime);
     } catch (err: any) {
       this.closeSessions(ctx);
       this.failPipeline(teamId, ctx, err, startTime);
     }
+  }
+
+  // --- Private: Guardrails ---
+
+  private runGuardrailAudit(teamId: string, ctx: PipelineTeamContext, phase: string): GuardrailReport {
+    if (!this.guardrails.enabled) {
+      return {
+        ok: true,
+        phase,
+        checkedAt: new Date().toISOString(),
+        findings: [],
+      };
+    }
+
+    const report = auditProjectChanges(ctx.state.snapshot.projectPath, phase);
+    ctx.state.recordGuardrailReport({
+      phase: report.phase,
+      ok: report.ok,
+      checkedAt: report.checkedAt,
+      findingCount: report.findings.length,
+      blockingCount: report.findings.filter(finding => finding.severity === 'block').length,
+      warningCount: report.findings.filter(finding => finding.severity === 'warn').length,
+    });
+    this.persistence.persist(ctx.state);
+
+    if (report.findings.length > 0) {
+      this.notifyUser(
+        teamId,
+        'warning',
+        report.ok ? 'Guardrail Audit Warning' : 'Guardrail Audit Blocked',
+        report.ok
+          ? 'Guardrail audit found risky changes; the pipeline is continuing with a warning.'
+          : 'Guardrail audit found blocked changes; the pipeline is stopping before commit.',
+        'Pipeline',
+        ['guardrail', 'secret', 'protected', 'dependency', 'config'],
+        formatGuardrailReport(report),
+        { guardrailReport: report },
+      );
+    }
+
+    if (hasBlockingFindings(report)) {
+      throw new GuardrailViolationError('Guardrail audit blocked the pipeline before committing changes.', report);
+    }
+
+    return report;
   }
 
   // --- Feedback ---
@@ -1349,7 +1446,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     message: string,
     sourceAgent?: string,
     highlightTerms?: string[],
-    detail?: string
+    detail?: string,
+    metadata?: Record<string, unknown>
   ): void {
     this.emit('feedback', teamId, {
       id: randomUUID(),
@@ -1361,6 +1459,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       sourceAgent,
       highlightTerms,
       detail,
+      metadata,
     });
   }
 
@@ -1457,6 +1556,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     // Auto-commit any remaining changes before marking done
     const cwd = ctx.state.snapshot.projectPath;
     const task = ctx.state.snapshot.currentTask?.description ?? teamId;
+    this.runGuardrailAudit(teamId, ctx, 'pipeline-complete');
     GitOps.commit(cwd, task.substring(0, 72));
 
     const fromPhase = ctx.state.currentPhase;
@@ -1470,13 +1570,40 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     this.persistence.persistNow(ctx.state);
   }
 
+  private markAgentDone(ctx: PipelineTeamContext, instance: RoleInstance): void {
+    const current = ctx.state.getAgent(instance)?.state;
+    if (!current || current === AgentState.Done || current === AgentState.Errored) return;
+
+    if (current === AgentState.Spawning) {
+      ctx.state.transitionAgent(instance, AgentState.Active);
+    }
+
+    ctx.state.transitionAgent(instance, AgentState.Done);
+  }
+
+  private markAllNonErroredAgentsDone(ctx: PipelineTeamContext): void {
+    for (const [instance, agent] of ctx.state.getAllAgents()) {
+      if (agent.state !== AgentState.Errored) {
+        this.markAgentDone(ctx, instance);
+      }
+    }
+  }
+
   private failPipeline(teamId: string, ctx: PipelineTeamContext, err: any, startTime: number): void {
     if (this.shuttingDown) return;
 
-    const error = err instanceof Error ? err : new Error(String(err));
+    const error = normalizeRuntimeError(err, {
+      provider: this.agentRuntime.provider,
+      phase: ctx.state.currentPhase,
+    });
+    ctx.state.recordRuntimeError(error.data);
     this.emit('error', teamId, error);
     this.notifyUser(teamId, 'warning', 'Pipeline Failed',
-      `Error: ${error.message}`);
+      `Error: ${error.message}`,
+      undefined,
+      undefined,
+      JSON.stringify(error.data, null, 2),
+      { runtimeError: error.data });
 
     const fromPhase = ctx.state.currentPhase;
     this.tryTransitionPhase(ctx.state, teamId, fromPhase, TeamPhase.Errored, `pipeline error: ${error.message}`);
@@ -1507,66 +1634,93 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   // --- Private: Requirements Extraction ---
 
   private async extractRequirements(
+    cwd: string,
     taskDescription: string,
     images?: Array<{ media_type: string; data: string }>
   ): Promise<string> {
-    const channel = new PromptChannel();
-    const gen = query({
-      prompt: channel as AsyncIterable<SDKUserMessage>,
-      options: {
-        model: this.models[Role.Worker],
-        systemPrompt:
-          'You are a requirements analyst. Extract explicit requirements from the user\'s task description ' +
-          'as a numbered checklist. Each requirement should be a specific, verifiable outcome the user asked for. ' +
-          'Do NOT add requirements the user didn\'t ask for. Do NOT add code quality, testing, or best practice ' +
-          'requirements unless the user explicitly mentioned them.\n\n' +
-          'Format:\n1. [Requirement description]\n2. [Requirement description]\n...\n\n' +
-          'Be concise. Extract only what the user explicitly wants built.',
-        effort: 'low' as any,
-        maxTurns: 1,
-        permissionMode: 'bypassPermissions',
-        allowDangerouslySkipPermissions: true,
-        persistSession: false,
-        env: { ...process.env, CLAUDECODE: undefined },
-      } as any,
+    const systemPrompt = this.loadRolePrompt('requirements.agent.md');
+
+    const session = createAgentSession('Requirements', systemPrompt, {
+      runtime: this.agentRuntime,
+      model: this.getModelForRole(Role.Worker),
+      cwd,
+      effort: 'medium',
+      maxTurns: 1,
+      guardrails: this.guardrails,
     });
 
-    channel.push(taskDescription, images);
-    channel.close();
-
-    let result = '';
-    for await (const msg of gen) {
-      const text = extractSdkText(msg);
-      if (text) result += text;
+    try {
+      const result = await session.send(taskDescription, images);
+      return postProcessRequirements(result);
+    } finally {
+      session.close();
     }
-    return result.trim();
   }
 
   // --- Private: Role Prompt Loading ---
 
+  private loadFrontmatterDefaults(rolesDir: string): {
+    models: Record<RoleInstance, string>;
+    efforts: Record<RoleInstance, EffortLevel>;
+    disallowedTools: Record<RoleInstance, string[]>;
+    maxTurns: Record<RoleInstance, number>;
+  } {
+    const models = {} as Record<RoleInstance, string>;
+    const efforts = {} as Record<RoleInstance, EffortLevel>;
+    const disallowedTools = {} as Record<RoleInstance, string[]>;
+    const maxTurns = {} as Record<RoleInstance, number>;
+
+    for (const instance of ALL_INSTANCES) {
+      const filename = INSTANCE_AGENT_FILES[instance];
+      const filePath = path.join(rolesDir, filename);
+      try {
+        const content = fs.readFileSync(filePath, 'utf-8');
+        const { frontmatter } = parseFrontmatter(content);
+
+        models[instance] = frontmatter.model ?? FALLBACK_MODEL;
+        efforts[instance] = (frontmatter.effort as EffortLevel) ?? FALLBACK_EFFORT;
+        maxTurns[instance] = frontmatter.maxTurns ? parseInt(frontmatter.maxTurns, 10) : FALLBACK_MAX_TURNS;
+        disallowedTools[instance] = frontmatter.disallowedTools
+          ? frontmatter.disallowedTools.split(',').map((t: string) => t.trim())
+          : [];
+      } catch {
+        models[instance] = FALLBACK_MODEL;
+        efforts[instance] = FALLBACK_EFFORT;
+        maxTurns[instance] = FALLBACK_MAX_TURNS;
+        disallowedTools[instance] = [];
+      }
+    }
+
+    return { models, efforts, disallowedTools, maxTurns };
+  }
+
   private loadRolePrompt(filename: string): string {
     const promptPath = path.join(this.config.rolesDir, filename);
     try {
-      return fs.readFileSync(promptPath, 'utf-8');
+      const rawContent = fs.readFileSync(promptPath, 'utf-8');
+      return parseFrontmatter(rawContent).body;
     } catch (err: any) {
       throw new Error(`Failed to read role prompt at ${promptPath}: ${err?.message}`);
     }
   }
-}
 
-// --- Utility: Extract text from SDK messages ---
+  private getModelForInstance(instance: RoleInstance): string | undefined {
+    const runtimeModel = normalizeProviderModel(this.agentRuntime.model);
+    if (runtimeModel) return runtimeModel;
+    if (this.agentRuntime.provider === 'codex') return undefined;
+    return this.models[instance];
+  }
 
-function extractSdkText(msg: any): string | null {
-  // SDKAssistantMessage with content array
-  if (msg?.type === 'assistant' && Array.isArray(msg.content)) {
-    const textParts = msg.content
-      .filter((block: any) => block.type === 'text')
-      .map((block: any) => block.text);
-    return textParts.length > 0 ? textParts.join('\n') : null;
+  // Used by agents that aren't part of the standard pipeline rotation
+  // (final security review, requirements extraction). Picks the first
+  // instance for the given role as a stable proxy for "the role's model."
+  private getModelForRole(role: Role): string | undefined {
+    const runtimeModel = normalizeProviderModel(this.agentRuntime.model);
+    if (runtimeModel) return runtimeModel;
+    if (this.agentRuntime.provider === 'codex') return undefined;
+    const proxyInstance = ALL_INSTANCES.find(
+      (i) => INSTANCE_TO_ROLE[i] === role
+    );
+    return proxyInstance ? this.models[proxyInstance] : undefined;
   }
-  // Result message with text
-  if (msg?.type === 'result' && msg.result) {
-    return typeof msg.result === 'string' ? msg.result : null;
-  }
-  return null;
 }

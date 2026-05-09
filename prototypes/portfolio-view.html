@@ -1,0 +1,2264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ClaudeOrchestra — Portfolio View Prototype</title>
+<style>
+/* Reset */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, sans-serif;
+  background: #0d1117; color: #c9d1d9; font-size: 14px; height: 100vh; overflow: hidden;
+}
+
+/* ============================================================
+   LAYOUT: Nav Rail + Main Content + Slide-in Panel
+   ============================================================ */
+.app-layout { display: flex; height: 100vh; }
+
+/* --- Nav Rail (slim sidebar) --- */
+.nav-rail {
+  width: 64px; min-width: 64px; background: #161b22; border-right: 1px solid #30363d;
+  display: flex; flex-direction: column; align-items: center; padding: 12px 0;
+  z-index: 200;
+}
+.nav-logo {
+  width: 36px; height: 36px; background: #58a6ff; border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1.1rem; font-weight: 800; color: #0d1117; margin-bottom: 20px; cursor: pointer;
+}
+.nav-divider { width: 32px; height: 1px; background: #30363d; margin: 8px 0; }
+
+.nav-project {
+  width: 40px; height: 40px; border-radius: 10px; background: #21262d; border: 1px solid #30363d;
+  display: flex; align-items: center; justify-content: center; position: relative;
+  cursor: pointer; margin-bottom: 8px; transition: all 0.15s; font-size: 0.75rem; font-weight: 700; color: #8b949e;
+}
+.nav-project:hover { border-color: #58a6ff; color: #58a6ff; }
+.nav-project.active { border-color: #58a6ff; background: #1f2937; color: #58a6ff; }
+.nav-project-badge {
+  position: absolute; top: -4px; right: -4px; min-width: 16px; height: 16px; border-radius: 8px;
+  background: #da3633; color: #fff; font-size: 0.6rem; font-weight: 700;
+  display: flex; align-items: center; justify-content: center; padding: 0 4px;
+}
+.nav-project-tooltip {
+  display: none; position: absolute; left: 54px; top: 50%; transform: translateY(-50%);
+  background: #1c2128; border: 1px solid #30363d; border-radius: 6px; padding: 6px 10px;
+  font-size: 0.75rem; color: #e6edf3; white-space: nowrap; z-index: 300; pointer-events: none;
+}
+.nav-project:hover .nav-project-tooltip { display: block; }
+
+.nav-spacer { flex: 1; }
+.nav-action {
+  width: 40px; height: 40px; border-radius: 10px; background: none; border: 1px dashed #30363d;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; margin-bottom: 8px; color: #484f58; font-size: 1.2rem; transition: all 0.15s;
+}
+.nav-action:hover { border-color: #58a6ff; color: #58a6ff; }
+
+/* --- Alert count at top of rail --- */
+.nav-alert-total {
+  font-size: 0.6rem; font-weight: 700; color: #f85149; margin-bottom: 12px;
+  display: flex; align-items: center; gap: 3px;
+}
+.nav-alert-total .dot { width: 6px; height: 6px; border-radius: 50%; background: #f85149; animation: pulse-alert 2s infinite; }
+@keyframes pulse-alert { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+/* --- Main Content --- */
+.main-content { flex: 1; overflow-y: auto; transition: margin-right 0.3s ease; }
+.main-content.panel-open { margin-right: 0; }
+
+/* --- Header --- */
+.portfolio-header {
+  padding: 24px 32px 16px; display: flex; align-items: center; justify-content: space-between;
+  border-bottom: 1px solid #21262d; position: sticky; top: 0; background: #0d1117; z-index: 50;
+}
+.portfolio-title { font-size: 1.3rem; font-weight: 600; color: #f0f6fc; }
+.portfolio-subtitle { font-size: 0.82rem; color: #484f58; margin-top: 2px; }
+.portfolio-stats { display: flex; gap: 8px; }
+.stat-pill { padding: 3px 10px; border-radius: 10px; font-size: 0.72rem; font-weight: 600; cursor: pointer; transition: all 0.15s; user-select: none; }
+.stat-pill:hover { filter: brightness(1.3); }
+.stat-pill.filter-active { outline: 2px solid currentColor; outline-offset: 1px; }
+
+/* Filtered cards */
+.team-card.filtered-out { opacity: 0.12; pointer-events: none; transform: scale(0.97); }
+.project-section.filtered-out { opacity: 0.12; pointer-events: none; }
+
+/* --- Nav Rail: Dashboard icon --- */
+.nav-dashboard {
+  width: 40px; height: 40px; border-radius: 10px; background: #21262d; border: 1px solid #30363d;
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer; margin-bottom: 8px; transition: all 0.15s; font-size: 1rem; color: #8b949e;
+}
+.nav-dashboard:hover { border-color: #58a6ff; color: #58a6ff; }
+.nav-dashboard.active { border-color: #58a6ff; background: #1f2937; color: #58a6ff; }
+
+/* --- Views --- */
+.view-container { display: none; height: 100%; overflow-y: auto; }
+.view-container.active { display: block; }
+
+/* --- Project Detail View --- */
+.project-detail-header {
+  padding: 24px 32px 16px; border-bottom: 1px solid #21262d;
+  position: sticky; top: 0; background: #0d1117; z-index: 50;
+}
+.project-detail-title-row { display: flex; align-items: center; justify-content: space-between; }
+.project-detail-name { font-size: 1.3rem; font-weight: 600; color: #f0f6fc; }
+.project-detail-path { font-size: 0.75rem; color: #484f58; font-family: 'SF Mono', 'Fira Code', monospace; margin-top: 4px; }
+.project-detail-stats { display: flex; gap: 8px; }
+
+.project-detail-cards { padding: 20px 32px 0; }
+.project-detail-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
+
+/* Compact team card for project view (smaller since detail is below) */
+.team-card-compact {
+  background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 12px 14px;
+  cursor: pointer; transition: all 0.15s; position: relative;
+}
+.team-card-compact:hover { border-color: #58a6ff; }
+.team-card-compact.selected { border-color: #58a6ff; background: #1f2937; }
+.team-card-compact.status-blocked { border-left: 3px solid #da3633; }
+.team-card-compact.status-done { border-left: 3px solid #3fb950; }
+.team-card-compact.status-working { border-left: 3px solid #58a6ff; }
+.team-card-compact.status-review { border-left: 3px solid #d29922; }
+.team-card-compact.status-pr-open { border-left: 3px solid #a371f7; }
+.team-card-compact.status-errored { border-left: 3px solid #f85149; }
+
+.compact-name { font-weight: 600; font-size: 0.85rem; color: #e6edf3; margin-bottom: 6px; }
+.compact-phase-segments { display: flex; gap: 2px; margin-bottom: 6px; }
+.compact-phase-seg { flex: 1; height: 4px; border-radius: 2px; background: #21262d; }
+.compact-phase-seg.completed { background: #3fb950; }
+.compact-phase-seg.active { background: #58a6ff; animation: seg-pulse 1.5s infinite; }
+.compact-phase-seg.blocked { background: #da3633; }
+.compact-phase-seg.errored { background: #f85149; }
+.compact-footer { display: flex; align-items: center; justify-content: space-between; }
+.compact-status { font-size: 0.65rem; font-weight: 600; padding: 2px 6px; border-radius: 8px; text-transform: uppercase; letter-spacing: 0.3px; }
+.compact-time { font-size: 0.68rem; color: #484f58; font-variant-numeric: tabular-nums; }
+
+/* Detail area below cards */
+.project-detail-content {
+  padding: 20px 32px; border-top: 1px solid #21262d; margin-top: 20px; min-height: 400px;
+}
+.project-detail-empty {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  height: 300px; color: #484f58; gap: 8px;
+}
+.project-detail-empty-icon { font-size: 2.5rem; color: #30363d; }
+.project-detail-empty-text { font-size: 0.9rem; color: #8b949e; }
+
+/* --- Project Sections --- */
+.project-section { padding: 20px 32px; }
+.project-section-header {
+  display: flex; align-items: center; gap: 12px; margin-bottom: 16px; cursor: pointer;
+}
+.project-section-name { font-size: 1.05rem; font-weight: 600; color: #f0f6fc; }
+.project-section-path {
+  font-size: 0.72rem; color: #484f58; font-family: 'SF Mono', 'Fira Code', monospace;
+}
+.project-section-stats { margin-left: auto; display: flex; gap: 6px; }
+.project-section + .project-section { border-top: 1px solid #21262d; }
+
+/* --- Team Card Grid --- */
+.team-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+
+.team-card {
+  background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 16px;
+  cursor: pointer; transition: all 0.2s; position: relative; overflow: hidden;
+}
+.team-card:hover { border-color: #58a6ff; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+.team-card.status-blocked { border-left: 3px solid #da3633; }
+.team-card.status-done { border-left: 3px solid #3fb950; }
+.team-card.status-working { border-left: 3px solid #58a6ff; }
+.team-card.status-review { border-left: 3px solid #d29922; }
+.team-card.status-pr-open { border-left: 3px solid #a371f7; }
+.team-card.status-errored { border-left: 3px solid #f85149; }
+.team-card.selected { border-color: #58a6ff; background: #1f2937; }
+
+.team-card-name { font-weight: 600; font-size: 0.9rem; color: #e6edf3; margin-bottom: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.team-card-task { font-size: 0.75rem; color: #8b949e; line-height: 1.4; margin-bottom: 12px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; height: 2.8em; }
+
+/* Phase progress bar (5 segments) */
+.phase-segments { display: flex; gap: 3px; margin-bottom: 10px; }
+.phase-seg {
+  flex: 1; height: 6px; border-radius: 3px; background: #21262d; position: relative;
+}
+.phase-seg.completed { background: #3fb950; }
+.phase-seg.active { background: #58a6ff; animation: seg-pulse 1.5s infinite; }
+.phase-seg.blocked { background: #da3633; }
+.phase-seg.errored { background: #f85149; }
+@keyframes seg-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+.phase-seg-labels { display: flex; gap: 3px; margin-bottom: 10px; }
+.phase-seg-label { flex: 1; font-size: 0.55rem; text-align: center; color: #484f58; text-transform: uppercase; letter-spacing: 0.3px; }
+.phase-seg-label.completed { color: #3fb950; }
+.phase-seg-label.active { color: #58a6ff; }
+
+.team-card-footer { display: flex; align-items: center; justify-content: space-between; }
+.team-card-status {
+  font-size: 0.68rem; font-weight: 600; padding: 2px 8px; border-radius: 10px;
+  text-transform: uppercase; letter-spacing: 0.5px;
+}
+.team-card-time { font-size: 0.72rem; color: #484f58; font-variant-numeric: tabular-nums; }
+
+/* ============================================================
+   SLIDE-IN PANEL
+   ============================================================ */
+.slide-panel {
+  position: fixed; top: 0; right: -560px; width: 560px; height: 100vh;
+  background: #161b22; border-left: 1px solid #30363d; z-index: 300;
+  transition: right 0.3s ease; overflow-y: auto;
+  box-shadow: -4px 0 24px rgba(0,0,0,0.4);
+}
+.slide-panel.open { right: 0; }
+
+.panel-header {
+  padding: 20px 24px; border-bottom: 1px solid #30363d; display: flex; align-items: center;
+  justify-content: space-between; position: sticky; top: 0; background: #161b22; z-index: 10;
+}
+.panel-close {
+  background: none; border: none; color: #8b949e; font-size: 1.2rem; cursor: pointer;
+  padding: 4px 8px; border-radius: 6px;
+}
+.panel-close:hover { background: #21262d; color: #e6edf3; }
+.panel-title { font-size: 1.1rem; font-weight: 600; color: #f0f6fc; }
+.panel-project-path { font-size: 0.72rem; color: #484f58; font-family: 'SF Mono', monospace; margin-top: 2px; }
+
+/* Mode toggle */
+.mode-toggle { display: flex; background: #21262d; border-radius: 8px; padding: 2px; }
+.mode-btn {
+  padding: 5px 12px; border-radius: 6px; font-size: 0.75rem; font-weight: 600;
+  cursor: pointer; color: #8b949e; background: none; border: none; transition: all 0.15s;
+}
+.mode-btn.active { background: #30363d; color: #e6edf3; }
+.mode-btn:hover:not(.active) { color: #c9d1d9; }
+
+.panel-body { padding: 20px 24px; }
+
+/* --- Summary Mode --- */
+.summary-top {
+  display: flex; align-items: center; gap: 16px; padding: 20px; margin-bottom: 20px;
+  background: #0d1117; border: 1px solid #30363d; border-radius: 10px;
+}
+.summary-status-icon {
+  width: 48px; height: 48px; border-radius: 50%; display: flex; align-items: center;
+  justify-content: center; font-size: 1.4rem; flex-shrink: 0;
+}
+.summary-status-icon.pass { background: #23863622; }
+.summary-status-icon.fail { background: #da363322; }
+.summary-what { flex: 1; }
+.summary-what-label { font-size: 0.68rem; color: #484f58; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+.summary-what-text { font-size: 0.9rem; color: #e6edf3; line-height: 1.4; }
+.summary-actions { display: flex; gap: 8px; margin-bottom: 24px; }
+.btn { padding: 8px 16px; border-radius: 8px; font-size: 0.85rem; font-weight: 600; cursor: pointer; border: none; transition: all 0.15s; }
+.btn:hover { filter: brightness(1.1); }
+.btn-primary { background: #238636; color: #fff; }
+.btn-secondary { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; }
+.btn-danger { background: #21262d; color: #f85149; border: 1px solid #30363d; }
+
+/* Expandable agent sections */
+.agent-section {
+  border: 1px solid #30363d; border-radius: 10px; margin-bottom: 10px; overflow: hidden;
+  background: #0d1117;
+}
+.agent-section-header {
+  display: flex; align-items: center; gap: 10px; padding: 12px 16px; cursor: pointer;
+  transition: background 0.15s;
+}
+.agent-section-header:hover { background: #161b22; }
+.agent-section-chevron { font-size: 0.6rem; color: #484f58; transition: transform 0.2s; }
+.agent-section-chevron.open { transform: rotate(90deg); }
+.agent-section-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+.agent-section-name { font-weight: 600; font-size: 0.85rem; color: #e6edf3; }
+.agent-section-verdict { margin-left: auto; font-size: 0.7rem; font-weight: 600; padding: 2px 8px; border-radius: 10px; }
+.agent-section-body {
+  display: none; padding: 12px 16px; border-top: 1px solid #21262d;
+  font-size: 0.82rem; color: #c9d1d9; line-height: 1.6;
+}
+.agent-section-body.open { display: block; }
+
+/* Agent detail items */
+.agent-detail-item { margin-bottom: 8px; }
+.agent-detail-label { font-size: 0.7rem; color: #484f58; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px; }
+.agent-detail-value { font-size: 0.82rem; color: #c9d1d9; }
+.agent-detail-value.mono { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.78rem; }
+
+/* Requirements checklist */
+.req-list { list-style: none; padding: 0; }
+.req-list li { padding: 4px 0; font-size: 0.82rem; display: flex; align-items: flex-start; gap: 6px; }
+.req-check { color: #3fb950; flex-shrink: 0; }
+.req-uncheck { color: #f85149; flex-shrink: 0; }
+
+/* Pipeline stats bar */
+.pipeline-stats {
+  display: flex; gap: 16px; padding: 12px 16px; background: #0d1117;
+  border: 1px solid #30363d; border-radius: 10px; margin-bottom: 20px;
+}
+.pipeline-stat { text-align: center; flex: 1; }
+.pipeline-stat-value { font-size: 1.1rem; font-weight: 700; color: #f0f6fc; }
+.pipeline-stat-label { font-size: 0.65rem; color: #484f58; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 2px; }
+
+/* --- Live Mode --- */
+.live-phase-bar { display: flex; align-items: center; gap: 0; margin-bottom: 20px; padding: 12px 0; }
+.live-phase-step { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.live-phase-dot {
+  width: 28px; height: 28px; border-radius: 50%; border: 2px solid #30363d; background: #0d1117;
+  display: flex; align-items: center; justify-content: center; font-size: 0.75rem; z-index: 1;
+}
+.live-phase-dot.past { border-color: #3fb950; background: #3fb950; color: #fff; font-weight: 700; }
+.live-phase-dot.active { border-color: #58a6ff; background: #58a6ff; color: #fff; font-weight: 700; box-shadow: 0 0 12px rgba(88,166,255,0.4); }
+.live-phase-label { font-size: 0.65rem; color: #484f58; text-transform: uppercase; letter-spacing: 0.5px; }
+.live-phase-label.past { color: #3fb950; }
+.live-phase-label.active { color: #58a6ff; }
+.live-phase-connector { flex: 1; height: 2px; background: #30363d; margin: 0 -2px; margin-bottom: 20px; }
+.live-phase-connector.past { background: #3fb950; }
+
+.live-agent-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
+.live-agent-card {
+  background: #0d1117; border: 1px solid #30363d; border-radius: 10px; padding: 12px;
+}
+.live-agent-card.active-agent { border-color: var(--agent-color, #58a6ff); }
+.live-agent-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.live-agent-dot { width: 8px; height: 8px; border-radius: 50%; background: #30363d; }
+.live-agent-dot.working { background: var(--agent-color, #58a6ff); animation: pulse-dot 1.5s infinite; }
+.live-agent-dot.done { background: #3fb950; }
+@keyframes pulse-dot { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
+.live-agent-name { font-weight: 600; font-size: 0.8rem; color: #e6edf3; }
+.live-agent-status { margin-left: auto; font-size: 0.65rem; text-transform: uppercase; font-weight: 600; color: #8b949e; }
+.live-agent-progress { height: 3px; background: #21262d; border-radius: 2px; overflow: hidden; margin-bottom: 8px; }
+.live-agent-progress-fill { height: 100%; border-radius: 2px; transition: width 0.5s; }
+.live-agent-output {
+  font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.72rem; color: #7d8590;
+  line-height: 1.5; max-height: 80px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;
+}
+
+/* Backdrop */
+.panel-backdrop {
+  display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  background: rgba(0,0,0,0.3); z-index: 250;
+}
+.panel-backdrop.open { display: block; }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+
+/* Toast notifications */
+.toast-container { position: fixed; bottom: 24px; right: 24px; z-index: 500; display: flex; flex-direction: column-reverse; gap: 8px; }
+.toast {
+  background: #1c2128; border: 1px solid #30363d; border-radius: 10px; padding: 12px 20px;
+  font-size: 0.85rem; color: #e6edf3; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  display: flex; align-items: center; gap: 10px; animation: toast-in 0.3s ease;
+  min-width: 280px; max-width: 420px;
+}
+.toast.success { border-left: 3px solid #3fb950; }
+.toast.info { border-left: 3px solid #58a6ff; }
+.toast.warning { border-left: 3px solid #d29922; }
+.toast.error { border-left: 3px solid #f85149; }
+.toast-icon { font-size: 1.1rem; flex-shrink: 0; }
+.toast-dismiss { margin-left: auto; background: none; border: none; color: #484f58; cursor: pointer; font-size: 0.9rem; padding: 2px 6px; }
+.toast-dismiss:hover { color: #c9d1d9; }
+@keyframes toast-in { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+@keyframes toast-out { from { transform: translateY(0); opacity: 1; } to { transform: translateY(20px); opacity: 0; } }
+
+/* Modal */
+.modal-backdrop {
+  display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+  background: rgba(0,0,0,0.5); z-index: 400; align-items: center; justify-content: center;
+}
+.modal-backdrop.open { display: flex; }
+.modal {
+  background: #161b22; border: 1px solid #30363d; border-radius: 14px; width: 480px;
+  max-height: 80vh; overflow-y: auto; box-shadow: 0 16px 48px rgba(0,0,0,0.4);
+}
+.modal-header { padding: 20px 24px 12px; display: flex; align-items: center; justify-content: space-between; }
+.modal-title { font-size: 1.1rem; font-weight: 600; color: #f0f6fc; }
+.modal-body { padding: 0 24px 20px; }
+.modal-footer { padding: 12px 24px 20px; display: flex; gap: 8px; justify-content: flex-end; }
+
+.form-group { margin-bottom: 16px; }
+.form-label { display: block; font-size: 0.78rem; font-weight: 600; color: #8b949e; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+.form-input, .form-select, .form-textarea {
+  width: 100%; padding: 10px 12px; background: #0d1117; border: 1px solid #30363d;
+  border-radius: 8px; color: #e6edf3; font-size: 0.85rem; font-family: inherit;
+}
+.form-input:focus, .form-select:focus, .form-textarea:focus { outline: none; border-color: #58a6ff; }
+.form-textarea { min-height: 80px; resize: vertical; }
+.form-select { appearance: none; cursor: pointer; }
+
+/* Confirm dialog */
+.confirm-actions { display: flex; gap: 8px; margin-top: 16px; }
+.confirm-message { font-size: 0.9rem; color: #c9d1d9; line-height: 1.5; margin: 12px 0; }
+.confirm-detail { font-size: 0.78rem; color: #8b949e; font-family: 'SF Mono', monospace; background: #0d1117; padding: 8px 12px; border-radius: 6px; margin-top: 8px; }
+
+/* Info tooltip */
+.info-tip { position: relative; display: inline-flex; align-items: center; cursor: pointer; }
+.info-tip-icon {
+  width: 16px; height: 16px; border-radius: 50%; background: #30363d; color: #8b949e;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 0.65rem; font-weight: 700; font-style: italic; margin-right: 6px; flex-shrink: 0;
+}
+.info-tip-text {
+  display: none; position: absolute; bottom: calc(100% + 8px); left: 50%; transform: translateX(-50%);
+  background: #1c2128; border: 1px solid #30363d; border-radius: 8px; padding: 8px 12px;
+  font-size: 0.75rem; color: #c9d1d9; white-space: nowrap; z-index: 400;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3); font-weight: 400; font-style: normal; pointer-events: none;
+}
+.info-tip-text::after {
+  content: ''; position: absolute; top: 100%; left: 50%; transform: translateX(-50%);
+  border: 5px solid transparent; border-top-color: #30363d;
+}
+.info-tip:hover .info-tip-text { display: block; }
+</style>
+</head>
+<body>
+
+<div class="app-layout">
+  <!-- ============================================================
+       NAV RAIL
+       ============================================================ -->
+  <div class="nav-rail">
+    <div class="nav-logo" onclick="showPortfolio()" title="Portfolio View">CO</div>
+
+    <div class="nav-alert-total"><span class="dot"></span> 2</div>
+
+    <div class="nav-dashboard active" onclick="showDashboard()" title="Dashboard">
+      <span>&#9638;</span>
+      <span class="nav-project-tooltip">Dashboard</span>
+    </div>
+
+    <div class="nav-divider"></div>
+
+    <div class="nav-project" onclick="showProjectView('ecommerce')" data-project="ecommerce">
+      EC
+      <span class="nav-project-badge">1</span>
+      <span class="nav-project-tooltip">e-commerce-app</span>
+    </div>
+    <div class="nav-project" onclick="showProjectView('pcoi')" data-project="pcoi">
+      PC
+      <span class="nav-project-badge">1</span>
+      <span class="nav-project-tooltip">pcoi-app</span>
+    </div>
+    <div class="nav-project" onclick="showProjectView('saas')" data-project="saas">
+      SD
+      <span class="nav-project-tooltip">saas-dashboard</span>
+    </div>
+    <div class="nav-project" onclick="showProjectView('mobile')" data-project="mobile">
+      MA
+      <span class="nav-project-tooltip">mobile-api</span>
+    </div>
+    <div class="nav-project" onclick="showProjectView('marketing')" data-project="marketing">
+      MS
+      <span class="nav-project-tooltip">marketing-site</span>
+    </div>
+
+    <div class="nav-divider"></div>
+
+    <div class="nav-spacer"></div>
+    <div class="nav-action" title="New Team" onclick="showCreateTeamModal()">+</div>
+    <div class="nav-action" title="Settings" style="font-size:0.9rem" onclick="showSettings()">&#9881;</div>
+  </div>
+
+  <!-- ============================================================
+       MAIN CONTENT: Portfolio View
+       ============================================================ -->
+  <div class="main-content" id="mainContent">
+    <!-- ============================================================
+         VIEW: Dashboard (Portfolio overview)
+         ============================================================ -->
+    <div class="view-container active" id="dashboardView">
+    <div class="portfolio-header">
+      <div>
+        <div class="portfolio-title">Portfolio</div>
+        <div class="portfolio-subtitle">5 projects &middot; 14 teams</div>
+      </div>
+      <div class="portfolio-stats">
+        <span class="stat-pill" style="background:#1f6feb22;color:#58a6ff" data-filter="active" onclick="toggleGlobalFilter(this)">5 active</span>
+        <span class="stat-pill" style="background:#d2992222;color:#d29922" data-filter="review" onclick="toggleGlobalFilter(this)">2 review</span>
+        <span class="stat-pill" style="background:#23863622;color:#3fb950" data-filter="done" onclick="toggleGlobalFilter(this)">5 done</span>
+        <span class="stat-pill" style="background:#a371f722;color:#a371f7" data-filter="pr_open" onclick="toggleGlobalFilter(this)">1 PR open</span>
+        <span class="stat-pill" style="background:#da363322;color:#f85149" data-filter="error" onclick="toggleGlobalFilter(this)">1 error</span>
+      </div>
+    </div>
+
+    <!-- PROJECT: e-commerce-app -->
+    <div class="project-section" id="project-ecommerce">
+      <div class="project-section-header">
+        <div class="project-section-name">e-commerce-app</div>
+        <div class="project-section-path">/Users/me/e-commerce-app</div>
+        <div class="project-section-stats">
+          <span class="stat-pill" style="background:#da363322;color:#f85149;font-size:0.65rem" data-filter="blocked" data-project="ecommerce" onclick="toggleProjectFilter(this)">1 blocked</span>
+          <span class="stat-pill" style="background:#1f6feb22;color:#58a6ff;font-size:0.65rem" data-filter="active" data-project="ecommerce" onclick="toggleProjectFilter(this)">1 active</span>
+          <span class="stat-pill" style="background:#a371f722;color:#a371f7;font-size:0.65rem" data-filter="pr_open" data-project="ecommerce" onclick="toggleProjectFilter(this)">1 PR open</span>
+        </div>
+      </div>
+      <div class="team-grid">
+        <!-- BLOCKED card -->
+        <div class="team-card status-blocked" data-status="blocked" onclick="openPanel('auth-api')">
+          <div class="team-card-name">auth-api</div>
+          <div class="team-card-task">Add JWT refresh token rotation with Redis session store</div>
+          <div class="phase-segments">
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg blocked"></div>
+            <div class="phase-seg"></div>
+          </div>
+          <div class="phase-seg-labels">
+            <div class="phase-seg-label completed">scan</div>
+            <div class="phase-seg-label completed">build</div>
+            <div class="phase-seg-label completed">sweep</div>
+            <div class="phase-seg-label" style="color:#da3633">review</div>
+            <div class="phase-seg-label">done</div>
+          </div>
+          <div class="team-card-footer">
+            <span class="team-card-status" style="background:#da363322;color:#f85149">Revision Needed</span>
+            <span class="team-card-time">14m</span>
+          </div>
+        </div>
+
+        <!-- ACTIVE card -->
+        <div class="team-card status-working" data-status="active" onclick="openPanel('fix-cart')">
+          <div class="team-card-name">fix-cart-bug</div>
+          <div class="team-card-task">Fix race condition in cart quantity update when multiple tabs open</div>
+          <div class="phase-segments">
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg active"></div>
+            <div class="phase-seg"></div>
+            <div class="phase-seg"></div>
+            <div class="phase-seg"></div>
+          </div>
+          <div class="phase-seg-labels">
+            <div class="phase-seg-label completed">scan</div>
+            <div class="phase-seg-label active">build</div>
+            <div class="phase-seg-label">sweep</div>
+            <div class="phase-seg-label">review</div>
+            <div class="phase-seg-label">done</div>
+          </div>
+          <div class="team-card-footer">
+            <span class="team-card-status" style="background:#1f6feb22;color:#58a6ff">Building</span>
+            <span class="team-card-time">6m...</span>
+          </div>
+        </div>
+
+        <!-- PR OPEN card -->
+        <div class="team-card status-pr-open" data-status="pr_open" onclick="openPanel('payment-api')">
+          <div class="team-card-name">payment-api</div>
+          <div class="team-card-task">Integrate Stripe webhook handler for subscription lifecycle events</div>
+          <div class="phase-segments">
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+          </div>
+          <div class="phase-seg-labels">
+            <div class="phase-seg-label completed">scan</div>
+            <div class="phase-seg-label completed">build</div>
+            <div class="phase-seg-label completed">sweep</div>
+            <div class="phase-seg-label completed">review</div>
+            <div class="phase-seg-label completed">done</div>
+          </div>
+          <div class="team-card-footer">
+            <span class="team-card-status" style="background:#a371f722;color:#a371f7">PR #47 Open</span>
+            <span class="team-card-time">8m 42s</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- PROJECT: pcoi-app -->
+    <div class="project-section" id="project-pcoi">
+      <div class="project-section-header">
+        <div class="project-section-name">pcoi-app</div>
+        <div class="project-section-path">/Users/me/pcoi-app</div>
+        <div class="project-section-stats">
+          <span class="stat-pill" style="background:#da363322;color:#f85149;font-size:0.65rem" data-filter="error" data-project="pcoi" onclick="toggleProjectFilter(this)">1 errored</span>
+          <span class="stat-pill" style="background:#1f6feb22;color:#58a6ff;font-size:0.65rem" data-filter="active" data-project="pcoi" onclick="toggleProjectFilter(this)">2 active</span>
+          <span class="stat-pill" style="background:#23863622;color:#3fb950;font-size:0.65rem" data-filter="done" data-project="pcoi" onclick="toggleProjectFilter(this)">1 done</span>
+        </div>
+      </div>
+      <div class="team-grid">
+        <div class="team-card status-errored" data-status="error" onclick="openPanel('fix-login')">
+          <div class="team-card-name">fix-login</div>
+          <div class="team-card-task">Fix OAuth callback failing on Safari due to SameSite cookie policy</div>
+          <div class="phase-segments">
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg errored"></div>
+            <div class="phase-seg"></div>
+            <div class="phase-seg"></div>
+            <div class="phase-seg"></div>
+          </div>
+          <div class="phase-seg-labels">
+            <div class="phase-seg-label completed">scan</div>
+            <div class="phase-seg-label" style="color:#f85149">build</div>
+            <div class="phase-seg-label">sweep</div>
+            <div class="phase-seg-label">review</div>
+            <div class="phase-seg-label">done</div>
+          </div>
+          <div class="team-card-footer">
+            <span class="team-card-status" style="background:#da363322;color:#f85149">Errored</span>
+            <span class="team-card-time">3m 11s</span>
+          </div>
+        </div>
+
+        <div class="team-card status-working" data-status="active" onclick="openPanel('tenant-system')">
+          <div class="team-card-name">tenant-system</div>
+          <div class="team-card-task">Implement multi-tenant data isolation with row-level security</div>
+          <div class="phase-segments">
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg active"></div>
+            <div class="phase-seg"></div>
+            <div class="phase-seg"></div>
+          </div>
+          <div class="phase-seg-labels">
+            <div class="phase-seg-label completed">scan</div>
+            <div class="phase-seg-label completed">build</div>
+            <div class="phase-seg-label active">sweep</div>
+            <div class="phase-seg-label">review</div>
+            <div class="phase-seg-label">done</div>
+          </div>
+          <div class="team-card-footer">
+            <span class="team-card-status" style="background:#1f6feb22;color:#58a6ff">Sweeping</span>
+            <span class="team-card-time">11m...</span>
+          </div>
+        </div>
+
+        <div class="team-card status-working" data-status="review" onclick="openPanel('dashboard-ui')">
+          <div class="team-card-name">dashboard-ui</div>
+          <div class="team-card-task">Add real-time notification bell with unread count badge</div>
+          <div class="phase-segments">
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg active"></div>
+            <div class="phase-seg"></div>
+          </div>
+          <div class="phase-seg-labels">
+            <div class="phase-seg-label completed">scan</div>
+            <div class="phase-seg-label completed">build</div>
+            <div class="phase-seg-label completed">sweep</div>
+            <div class="phase-seg-label active">review</div>
+            <div class="phase-seg-label">done</div>
+          </div>
+          <div class="team-card-footer">
+            <span class="team-card-status" style="background:#d2992222;color:#d29922">In Review</span>
+            <span class="team-card-time">9m...</span>
+          </div>
+        </div>
+
+        <div class="team-card status-done" data-status="done" onclick="openPanel('api-refactor')">
+          <div class="team-card-name">api-refactor</div>
+          <div class="team-card-task">Refactor REST endpoints to use consistent error response format</div>
+          <div class="phase-segments">
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+          </div>
+          <div class="phase-seg-labels">
+            <div class="phase-seg-label completed">scan</div>
+            <div class="phase-seg-label completed">build</div>
+            <div class="phase-seg-label completed">sweep</div>
+            <div class="phase-seg-label completed">review</div>
+            <div class="phase-seg-label completed">done</div>
+          </div>
+          <div class="team-card-footer">
+            <span class="team-card-status" style="background:#23863622;color:#3fb950">Done</span>
+            <span class="team-card-time">15m 03s</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- PROJECT: saas-dashboard -->
+    <div class="project-section" id="project-saas">
+      <div class="project-section-header">
+        <div class="project-section-name">saas-dashboard</div>
+        <div class="project-section-path">/Users/me/saas-dashboard</div>
+        <div class="project-section-stats">
+          <span class="stat-pill" style="background:#1f6feb22;color:#58a6ff;font-size:0.65rem" data-filter="active" data-project="saas" onclick="toggleProjectFilter(this)">2 active</span>
+        </div>
+      </div>
+      <div class="team-grid">
+        <div class="team-card status-review" data-status="review" onclick="openPanel('analytics')">
+          <div class="team-card-name">analytics-page</div>
+          <div class="team-card-task">Build analytics dashboard with chart.js line and bar visualizations</div>
+          <div class="phase-segments">
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg active"></div>
+            <div class="phase-seg"></div>
+          </div>
+          <div class="phase-seg-labels">
+            <div class="phase-seg-label completed">scan</div>
+            <div class="phase-seg-label completed">build</div>
+            <div class="phase-seg-label completed">sweep</div>
+            <div class="phase-seg-label active">review</div>
+            <div class="phase-seg-label">done</div>
+          </div>
+          <div class="team-card-footer">
+            <span class="team-card-status" style="background:#d2992222;color:#d29922">In Review</span>
+            <span class="team-card-time">7m...</span>
+          </div>
+        </div>
+
+        <div class="team-card status-working" data-status="active" onclick="openPanel('billing')">
+          <div class="team-card-name">billing-module</div>
+          <div class="team-card-task">Add usage-based billing tier calculation with overage alerts</div>
+          <div class="phase-segments">
+            <div class="phase-seg active"></div>
+            <div class="phase-seg"></div>
+            <div class="phase-seg"></div>
+            <div class="phase-seg"></div>
+            <div class="phase-seg"></div>
+          </div>
+          <div class="phase-seg-labels">
+            <div class="phase-seg-label active">scan</div>
+            <div class="phase-seg-label">build</div>
+            <div class="phase-seg-label">sweep</div>
+            <div class="phase-seg-label">review</div>
+            <div class="phase-seg-label">done</div>
+          </div>
+          <div class="team-card-footer">
+            <span class="team-card-status" style="background:#1f6feb22;color:#58a6ff">Scanning</span>
+            <span class="team-card-time">1m...</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- PROJECT: mobile-api -->
+    <div class="project-section" id="project-mobile">
+      <div class="project-section-header">
+        <div class="project-section-name">mobile-api</div>
+        <div class="project-section-path">/Users/me/mobile-api</div>
+        <div class="project-section-stats">
+          <span class="stat-pill" style="background:#1f6feb22;color:#58a6ff;font-size:0.65rem" data-filter="active" data-project="mobile" onclick="toggleProjectFilter(this)">1 active</span>
+          <span class="stat-pill" style="background:#23863622;color:#3fb950;font-size:0.65rem" data-filter="done" data-project="mobile" onclick="toggleProjectFilter(this)">2 done</span>
+        </div>
+      </div>
+      <div class="team-grid">
+        <div class="team-card status-working" data-status="active" onclick="openPanel('push-notif')">
+          <div class="team-card-name">push-notifications</div>
+          <div class="team-card-task">Implement APNS and FCM push notification service with topic routing</div>
+          <div class="phase-segments">
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg active"></div>
+            <div class="phase-seg"></div>
+            <div class="phase-seg"></div>
+            <div class="phase-seg"></div>
+          </div>
+          <div class="phase-seg-labels">
+            <div class="phase-seg-label completed">scan</div>
+            <div class="phase-seg-label active">build</div>
+            <div class="phase-seg-label">sweep</div>
+            <div class="phase-seg-label">review</div>
+            <div class="phase-seg-label">done</div>
+          </div>
+          <div class="team-card-footer">
+            <span class="team-card-status" style="background:#1f6feb22;color:#58a6ff">Building</span>
+            <span class="team-card-time">4m...</span>
+          </div>
+        </div>
+
+        <div class="team-card status-done" data-status="done" onclick="openPanel('offline-sync')">
+          <div class="team-card-name">offline-sync</div>
+          <div class="team-card-task">Add offline-first data sync with conflict resolution queue</div>
+          <div class="phase-segments">
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+          </div>
+          <div class="phase-seg-labels">
+            <div class="phase-seg-label completed">scan</div>
+            <div class="phase-seg-label completed">build</div>
+            <div class="phase-seg-label completed">sweep</div>
+            <div class="phase-seg-label completed">review</div>
+            <div class="phase-seg-label completed">done</div>
+          </div>
+          <div class="team-card-footer">
+            <span class="team-card-status" style="background:#23863622;color:#3fb950">Done</span>
+            <span class="team-card-time">11m 28s</span>
+          </div>
+        </div>
+
+        <div class="team-card status-done" data-status="done" onclick="openPanel('fix-timeout')">
+          <div class="team-card-name">fix-timeout</div>
+          <div class="team-card-task">Fix API gateway timeout on large payload file uploads</div>
+          <div class="phase-segments">
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+          </div>
+          <div class="phase-seg-labels">
+            <div class="phase-seg-label completed">scan</div>
+            <div class="phase-seg-label completed">build</div>
+            <div class="phase-seg-label completed">sweep</div>
+            <div class="phase-seg-label completed">review</div>
+            <div class="phase-seg-label completed">done</div>
+          </div>
+          <div class="team-card-footer">
+            <span class="team-card-status" style="background:#23863622;color:#3fb950">Done</span>
+            <span class="team-card-time">5m 55s</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- PROJECT: marketing-site (all done, faded) -->
+    <div class="project-section" id="project-marketing">
+      <div class="project-section-header">
+        <div class="project-section-name" style="opacity:0.6">marketing-site</div>
+        <div class="project-section-path" style="opacity:0.6">/Users/me/marketing-site</div>
+        <div class="project-section-stats">
+          <span class="stat-pill" style="background:#23863622;color:#3fb950;font-size:0.65rem" data-filter="done" data-project="marketing" onclick="toggleProjectFilter(this)">2 done</span>
+        </div>
+      </div>
+      <div class="team-grid">
+        <div class="team-card status-done" data-status="done" style="opacity:0.6" onclick="openPanel('landing')">
+          <div class="team-card-name">landing-page</div>
+          <div class="team-card-task">Redesign hero section with animated gradient and CTA</div>
+          <div class="phase-segments">
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+          </div>
+          <div class="phase-seg-labels">
+            <div class="phase-seg-label completed">scan</div>
+            <div class="phase-seg-label completed">build</div>
+            <div class="phase-seg-label completed">sweep</div>
+            <div class="phase-seg-label completed">review</div>
+            <div class="phase-seg-label completed">done</div>
+          </div>
+          <div class="team-card-footer">
+            <span class="team-card-status" style="background:#23863622;color:#3fb950">Done</span>
+            <span class="team-card-time">7m 12s</span>
+          </div>
+        </div>
+        <div class="team-card status-done" data-status="done" style="opacity:0.6" onclick="openPanel('seo')">
+          <div class="team-card-name">seo-optimization</div>
+          <div class="team-card-task">Add structured data, meta tags, and sitemap generation</div>
+          <div class="phase-segments">
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+            <div class="phase-seg completed"></div>
+          </div>
+          <div class="phase-seg-labels">
+            <div class="phase-seg-label completed">scan</div>
+            <div class="phase-seg-label completed">build</div>
+            <div class="phase-seg-label completed">sweep</div>
+            <div class="phase-seg-label completed">review</div>
+            <div class="phase-seg-label completed">done</div>
+          </div>
+          <div class="team-card-footer">
+            <span class="team-card-status" style="background:#23863622;color:#3fb950">Done</span>
+            <span class="team-card-time">4m 33s</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    </div><!-- /dashboardView -->
+
+    <!-- ============================================================
+         VIEW: Project Detail
+         ============================================================ -->
+    <div class="view-container" id="projectDetailView">
+      <div id="projectDetailContent"></div>
+    </div>
+
+  </div><!-- /main-content -->
+
+  <!-- ============================================================
+       BACKDROP
+       ============================================================ -->
+  <div class="panel-backdrop" id="panelBackdrop" onclick="closePanel()"></div>
+
+  <!-- ============================================================
+       SLIDE-IN PANEL
+       ============================================================ -->
+  <div class="slide-panel" id="slidePanel">
+    <div id="panelContent"></div>
+  </div>
+
+</div><!-- /app-layout -->
+
+<!-- Toast container -->
+<div class="toast-container" id="toastContainer"></div>
+
+<!-- Modal -->
+<div class="modal-backdrop" id="modalBackdrop" onclick="closeModal()">
+  <div class="modal" onclick="event.stopPropagation()" id="modalContent"></div>
+</div>
+
+<script>
+// ================================================================
+// SEED DATA
+// ================================================================
+const projects = {
+  ecommerce: { name: 'e-commerce-app', path: '/Users/me/e-commerce-app', teams: ['auth-api', 'fix-cart', 'payment-api'] },
+  pcoi: { name: 'pcoi-app', path: '/Users/me/pcoi-app', teams: ['fix-login', 'tenant-system', 'dashboard-ui', 'api-refactor'] },
+  saas: { name: 'saas-dashboard', path: '/Users/me/saas-dashboard', teams: ['analytics', 'billing'] },
+  mobile: { name: 'mobile-api', path: '/Users/me/mobile-api', teams: ['push-notif', 'offline-sync', 'fix-timeout'] },
+  marketing: { name: 'marketing-site', path: '/Users/me/marketing-site', teams: ['landing', 'seo'] },
+};
+
+const teams = {
+  'payment-api': {
+    name: 'payment-api',
+    project: 'e-commerce-app',
+    projectPath: '/Users/me/e-commerce-app',
+    task: 'Integrate Stripe webhook handler for subscription lifecycle events',
+    status: 'pr_open',
+    phase: 'done',
+    duration: '8m 42s',
+    mode: 'summary',
+    branchName: 'team/payment-api',
+    prNumber: 47,
+    prUrl: 'https://github.com/example/e-commerce-app/pull/47',
+    stats: { duration: '8m 42s', revisions: 0, verifications: 1 },
+    agents: {
+      security: { verdict: 'APPROVED', detail: 'Pre-scan: No hardcoded secrets, no injection vectors. Clearance: all files SAFE.\nPost-sweep: No new vulnerabilities introduced. Stripe webhook secret properly loaded from environment variable.' },
+      worker1: { verdict: 'Complete', detail: 'Created src/webhooks/stripe-handler.ts with handlers for:\n- customer.subscription.created\n- customer.subscription.updated\n- customer.subscription.deleted\n- invoice.payment_failed\n\nAdded signature verification using stripe.webhooks.constructEvent().\nModified: 3 files created, 1 modified (routes/index.ts).' },
+      worker2: { verdict: '5/5 met', requirements: [
+        { met: true, text: 'Handle subscription lifecycle events (created, updated, deleted)' },
+        { met: true, text: 'Verify webhook signatures using Stripe signing secret' },
+        { met: true, text: 'Update local subscription status in database' },
+        { met: true, text: 'Handle invoice.payment_failed with retry logic' },
+        { met: true, text: 'Return proper HTTP status codes (200 for success, 400 for invalid)' },
+      ]},
+      reviewer: { verdict: 'APPROVED', detail: 'Clean implementation. Webhook signature verification is correct. Error handling covers edge cases. Event handlers properly idempotent. Ready to merge.' }
+    }
+  },
+  'auth-api': {
+    name: 'auth-api',
+    project: 'e-commerce-app',
+    projectPath: '/Users/me/e-commerce-app',
+    task: 'Add JWT refresh token rotation with Redis session store',
+    status: 'revision_needed',
+    phase: 'review',
+    duration: '14m',
+    mode: 'summary',
+    stats: { duration: '14m', revisions: 1, verifications: 2 },
+    agents: {
+      security: { verdict: 'APPROVED', detail: 'Pre-scan: Auth-related task flagged as CAUTION for token handling files.\nPost-sweep: APPROVED. Tokens use proper expiry, secrets from env vars, no hardcoded keys.' },
+      worker1: { verdict: 'Complete', detail: 'Implemented JWT refresh token rotation in src/auth/refresh.ts.\nAdded Redis session store in src/auth/session-store.ts.\nModified: 4 files created, 2 modified.' },
+      worker2: { verdict: '4/5 met', requirements: [
+        { met: true, text: 'Implement refresh token rotation (new token issued on each refresh)' },
+        { met: true, text: 'Store sessions in Redis with configurable TTL' },
+        { met: true, text: 'Invalidate old refresh token after rotation' },
+        { met: false, text: 'Add rate limiting to refresh endpoint (max 5 per minute)' },
+        { met: true, text: 'Handle concurrent refresh requests gracefully' },
+      ]},
+      reviewer: { verdict: 'REVISION_NEEDED', detail: 'Missing rate limiting on the refresh endpoint — this is a security-relevant gap for an auth feature. The refresh token rotation logic itself is solid. Add rate limiting and this is ready.' }
+    }
+  },
+  'fix-cart': {
+    name: 'fix-cart-bug',
+    project: 'e-commerce-app',
+    projectPath: '/Users/me/e-commerce-app',
+    task: 'Fix race condition in cart quantity update when multiple tabs open',
+    status: 'working',
+    phase: 'work',
+    duration: '6m',
+    mode: 'live',
+    liveAgents: {
+      security: { status: 'done', color: '#f85149', progress: 100, output: 'CLASSIFICATION: STANDARD\nClearance: src/cart/ — SAFE, src/api/cart.ts — CAUTION (state mutation)' },
+      worker1: { status: 'working', color: '#3fb950', progress: 45, output: 'Reading src/cart/useCart.ts...\nIdentified race condition: concurrent setState calls without lock.\nApproach: implement optimistic locking with version counter...\n> Edit src/cart/useCart.ts' },
+      worker2: { status: 'idle', color: '#3fb950', progress: 0, output: '' },
+      reviewer: { status: 'idle', color: '#d29922', progress: 0, output: '' }
+    }
+  },
+  'fix-login': {
+    name: 'fix-login',
+    project: 'pcoi-app',
+    projectPath: '/Users/me/pcoi-app',
+    task: 'Fix OAuth callback failing on Safari due to SameSite cookie policy',
+    status: 'errored',
+    phase: 'work',
+    duration: '3m 11s',
+    mode: 'summary',
+    stats: { duration: '3m 11s', revisions: 0, verifications: 0 },
+    agents: {
+      security: { verdict: 'APPROVED', detail: 'Pre-scan: OAuth flow files cleared. CAUTION on cookie configuration files.' },
+      worker1: { verdict: 'ERRORED', detail: 'Agent exceeded max turns (50) without completing task. Last action: reading Safari WebKit source code documentation. Agent appeared to enter a research loop without making code changes.' },
+      worker2: { verdict: 'SKIPPED', requirements: [] },
+      reviewer: { verdict: 'SKIPPED', detail: 'Pipeline did not reach review phase.' }
+    }
+  },
+  'tenant-system': {
+    name: 'tenant-system',
+    project: 'pcoi-app',
+    projectPath: '/Users/me/pcoi-app',
+    task: 'Implement multi-tenant data isolation with row-level security',
+    status: 'working',
+    phase: 'handoff',
+    duration: '11m',
+    mode: 'live',
+    liveAgents: {
+      security: { status: 'working', color: '#f85149', progress: 30, output: 'Running post-sweep security checklist on modified files...\nChecking src/db/rls-policies.ts for injection vectors...\nChecking src/middleware/tenant-context.ts...' },
+      worker1: { status: 'done', color: '#3fb950', progress: 100, output: 'Implemented RLS policies in src/db/rls-policies.ts\nAdded tenant context middleware\nCreated migration: 20260402_add_rls.sql\nAll 4 requirements addressed.' },
+      worker2: { status: 'done', color: '#3fb950', progress: 100, output: 'COMPLETE\n- [x] Row-level security policies on all tenant tables\n- [x] Tenant context extracted from JWT in middleware\n- [x] Migration script for RLS setup\n- [x] Tenant isolation verified with cross-tenant query test' },
+      reviewer: { status: 'idle', color: '#d29922', progress: 0, output: '' }
+    }
+  },
+  'api-refactor': {
+    name: 'api-refactor',
+    project: 'pcoi-app',
+    projectPath: '/Users/me/pcoi-app',
+    task: 'Refactor REST endpoints to use consistent error response format',
+    status: 'done',
+    phase: 'done',
+    duration: '15m 03s',
+    mode: 'summary',
+    stats: { duration: '15m 03s', revisions: 1, verifications: 1 },
+    agents: {
+      security: { verdict: 'APPROVED', detail: 'Pre-scan: Refactor task, low risk. All files SAFE.\nPost-sweep: No new vulnerabilities. Error messages do not leak internal details.' },
+      worker1: { verdict: 'Complete', detail: 'Created src/utils/api-error.ts with standardized ErrorResponse class.\nRefactored 12 route handlers to use consistent format:\n{ error: { code, message, details? } }\nAdded global error middleware in src/middleware/error-handler.ts.\nModified: 1 file created, 12 modified.' },
+      worker2: { verdict: '4/4 met', requirements: [
+        { met: true, text: 'Standardized error response shape across all endpoints' },
+        { met: true, text: 'Include error codes, human-readable messages, and optional details' },
+        { met: true, text: 'Global error handling middleware catches unhandled exceptions' },
+        { met: true, text: 'Existing tests updated to match new response format' },
+      ]},
+      reviewer: { verdict: 'APPROVED', detail: 'Consistent error format applied across all 12 handlers. Global middleware properly catches and formats unhandled errors. Tests updated. Good refactor.' }
+    }
+  },
+  'dashboard-ui': {
+    name: 'dashboard-ui',
+    project: 'pcoi-app',
+    projectPath: '/Users/me/pcoi-app',
+    task: 'Add real-time notification bell with unread count badge',
+    status: 'working',
+    phase: 'review',
+    duration: '9m',
+    mode: 'live',
+    liveAgents: {
+      security: { status: 'done', color: '#f85149', progress: 100, output: 'Pre-scan: STANDARD. UI task, low security risk.\nPost-sweep: APPROVED. No XSS vectors in notification rendering. Sanitization applied.' },
+      worker1: { status: 'done', color: '#3fb950', progress: 100, output: 'Created NotificationBell component with SSE subscription.\nAdded unread count badge with animation.\nStored read state in localStorage.\nModified: 2 files created, 1 modified.' },
+      worker2: { status: 'done', color: '#3fb950', progress: 100, output: 'COMPLETE\n- [x] Bell icon with unread count badge\n- [x] Real-time updates via SSE\n- [x] Mark as read on click\n- [x] Persist read state across page loads' },
+      reviewer: { status: 'working', color: '#d29922', progress: 40, output: 'Reading src/components/NotificationBell.tsx...\nChecking SSE connection handling...' }
+    }
+  },
+  'analytics': {
+    name: 'analytics-page',
+    project: 'saas-dashboard',
+    projectPath: '/Users/me/saas-dashboard',
+    task: 'Build analytics dashboard with chart.js line and bar visualizations',
+    status: 'working',
+    phase: 'review',
+    duration: '7m',
+    mode: 'live',
+    liveAgents: {
+      security: { status: 'done', color: '#f85149', progress: 100, output: 'Pre-scan: STANDARD. Charting library is client-side only, no server-side risk.\nPost-sweep: APPROVED. No data exfiltration vectors. CSP headers in place.' },
+      worker1: { status: 'done', color: '#3fb950', progress: 100, output: 'Created src/pages/AnalyticsDashboard.tsx with:\n- Line chart for revenue over time\n- Bar chart for user signups by month\n- Summary cards (MRR, churn, active users)\nUsing chart.js via react-chartjs-2 wrapper.\nModified: 3 files created, 1 modified (routes).' },
+      worker2: { status: 'done', color: '#3fb950', progress: 100, output: 'COMPLETE\n- [x] Line chart for revenue trends\n- [x] Bar chart for signup metrics\n- [x] Summary stat cards with percentage change\n- [x] Date range picker for filtering' },
+      reviewer: { status: 'working', color: '#d29922', progress: 25, output: 'Spot-checking AnalyticsDashboard.tsx...\nVerifying chart data fetching pattern...' }
+    }
+  },
+  'billing': {
+    name: 'billing-module',
+    project: 'saas-dashboard',
+    projectPath: '/Users/me/saas-dashboard',
+    task: 'Add usage-based billing tier calculation with overage alerts',
+    status: 'working',
+    phase: 'pre_work',
+    duration: '1m',
+    mode: 'live',
+    liveAgents: {
+      security: { status: 'working', color: '#f85149', progress: 35, output: 'CLASSIFICATION: STANDARD\nBilling logic involves financial calculations — flagging as CAUTION.\nScanning src/billing/ for existing patterns...\nChecking for hardcoded pricing data...' },
+      worker1: { status: 'idle', color: '#3fb950', progress: 0, output: '' },
+      worker2: { status: 'idle', color: '#3fb950', progress: 0, output: '' },
+      reviewer: { status: 'idle', color: '#d29922', progress: 0, output: '' }
+    }
+  },
+  'push-notif': {
+    name: 'push-notifications',
+    project: 'mobile-api',
+    projectPath: '/Users/me/mobile-api',
+    task: 'Implement APNS and FCM push notification service with topic routing',
+    status: 'working',
+    phase: 'work',
+    duration: '4m',
+    mode: 'live',
+    liveAgents: {
+      security: { status: 'done', color: '#f85149', progress: 100, output: 'CLASSIFICATION: STANDARD\nClearance: CAUTION on credential files (APNS cert, FCM key).\nEnsure secrets loaded from environment, not hardcoded.' },
+      worker1: { status: 'working', color: '#3fb950', progress: 60, output: 'Created src/services/push-service.ts\nImplementing APNS provider with certificate auth...\nAdding FCM provider using firebase-admin SDK...\n> Edit src/services/push-service.ts\nAdding topic-based routing with subscriber registry...' },
+      worker2: { status: 'idle', color: '#3fb950', progress: 0, output: '' },
+      reviewer: { status: 'idle', color: '#d29922', progress: 0, output: '' }
+    }
+  },
+  'offline-sync': {
+    name: 'offline-sync',
+    project: 'mobile-api',
+    projectPath: '/Users/me/mobile-api',
+    task: 'Add offline-first data sync with conflict resolution queue',
+    status: 'done',
+    phase: 'done',
+    duration: '11m 28s',
+    mode: 'summary',
+    stats: { duration: '11m 28s', revisions: 1, verifications: 2 },
+    agents: {
+      security: { verdict: 'APPROVED', detail: 'Pre-scan: Data sync task. CAUTION on conflict resolution — potential data loss vectors.\nPost-sweep: APPROVED. Conflict resolution uses last-write-wins with full audit trail. No data loss risk.' },
+      worker1: { verdict: 'Complete', detail: 'Created src/sync/offline-queue.ts — IndexedDB-backed operation queue.\nCreated src/sync/conflict-resolver.ts — last-write-wins with field-level merge.\nCreated src/sync/sync-manager.ts — orchestrates queue flush on reconnect.\nModified: 3 files created, 2 modified (api-client.ts, app.ts).' },
+      worker2: { verdict: '5/5 met', requirements: [
+        { met: true, text: 'Queue mutations locally when offline using IndexedDB' },
+        { met: true, text: 'Automatically flush queue when connection restored' },
+        { met: true, text: 'Resolve conflicts using last-write-wins at field level' },
+        { met: true, text: 'Maintain audit trail of all conflict resolutions' },
+        { met: true, text: 'Expose sync status (synced/pending/conflict) per record' },
+      ]},
+      reviewer: { verdict: 'APPROVED', detail: 'Solid offline-first implementation. Conflict resolution is deterministic and auditable. IndexedDB usage is correct with proper transaction handling. The field-level merge strategy is pragmatic. Approved.' }
+    }
+  },
+  'fix-timeout': {
+    name: 'fix-timeout',
+    project: 'mobile-api',
+    projectPath: '/Users/me/mobile-api',
+    task: 'Fix API gateway timeout on large payload file uploads',
+    status: 'done',
+    phase: 'done',
+    duration: '5m 55s',
+    mode: 'summary',
+    stats: { duration: '5m 55s', revisions: 0, verifications: 1 },
+    agents: {
+      security: { verdict: 'APPROVED', detail: 'Pre-scan: SIMPLE task. File upload path — CAUTION for path traversal and size limits.\nPost-sweep: APPROVED. Upload size capped at 50MB. Filenames sanitized. No path traversal possible.' },
+      worker1: { verdict: 'Complete', detail: 'Root cause: Express body-parser had 1MB default limit, gateway timeout at 30s.\nFix: Switched to streaming multipart upload with busboy.\nSet gateway timeout to 120s for upload routes only.\nAdded progress callback for client-side progress bars.\nModified: 2 files modified (routes/upload.ts, middleware/body-parser.ts).' },
+      worker2: { verdict: '3/3 met', requirements: [
+        { met: true, text: 'Large file uploads (up to 50MB) complete without timeout' },
+        { met: true, text: 'Upload progress is reportable to the client' },
+        { met: true, text: 'Existing small-payload endpoints unaffected' },
+      ]},
+      reviewer: { verdict: 'APPROVED', detail: 'Clean fix. Streaming upload avoids buffering the entire file in memory. Gateway timeout increase is scoped to upload routes only — good. Progress reporting via chunked transfer is correct.' }
+    }
+  },
+  'landing': {
+    name: 'landing-page',
+    project: 'marketing-site',
+    projectPath: '/Users/me/marketing-site',
+    task: 'Redesign hero section with animated gradient and CTA',
+    status: 'done',
+    phase: 'done',
+    duration: '7m 12s',
+    mode: 'summary',
+    stats: { duration: '7m 12s', revisions: 0, verifications: 1 },
+    agents: {
+      security: { verdict: 'APPROVED', detail: 'Pre-scan: SIMPLE. Static marketing page, minimal risk.\nPost-sweep: APPROVED. No dynamic content injection. All assets served from same origin.' },
+      worker1: { verdict: 'Complete', detail: 'Redesigned hero in src/components/Hero.tsx:\n- CSS gradient animation (purple → blue → teal, 8s loop)\n- Updated headline and subheadline copy\n- Primary CTA button with hover glow effect\n- Secondary CTA for demo video\nModified: 1 file modified, 1 CSS module updated.' },
+      worker2: { verdict: '3/3 met', requirements: [
+        { met: true, text: 'Animated gradient background on hero section' },
+        { met: true, text: 'Primary and secondary CTA buttons' },
+        { met: true, text: 'Responsive layout for mobile and desktop' },
+      ]},
+      reviewer: { verdict: 'APPROVED', detail: 'Hero looks good. Gradient animation is CSS-only, no JS overhead. CTAs have proper contrast ratios. Responsive breakpoints are sensible. Ship it.' }
+    }
+  },
+  'seo': {
+    name: 'seo-optimization',
+    project: 'marketing-site',
+    projectPath: '/Users/me/marketing-site',
+    task: 'Add structured data, meta tags, and sitemap generation',
+    status: 'done',
+    phase: 'done',
+    duration: '4m 33s',
+    mode: 'summary',
+    stats: { duration: '4m 33s', revisions: 0, verifications: 1 },
+    agents: {
+      security: { verdict: 'APPROVED', detail: 'Pre-scan: SIMPLE. SEO metadata task, no security implications.\nPost-sweep: APPROVED. No user-generated content in meta tags. Sitemap is static.' },
+      worker1: { verdict: 'Complete', detail: 'Added JSON-LD structured data (Organization, WebPage schemas).\nCreated SEO component with configurable meta tags per page.\nAdded sitemap.xml generation script in scripts/generate-sitemap.ts.\nModified: 1 file created, 3 modified (layout, pages).' },
+      worker2: { verdict: '3/3 met', requirements: [
+        { met: true, text: 'JSON-LD structured data on all pages' },
+        { met: true, text: 'Dynamic meta tags (title, description, og:image) per page' },
+        { met: true, text: 'Auto-generated sitemap.xml from route definitions' },
+      ]},
+      reviewer: { verdict: 'APPROVED', detail: 'Structured data validates against Google\'s schema testing tool. Meta tags are properly escaped. Sitemap generation covers all public routes. Good work.' }
+    }
+  }
+};
+
+// ================================================================
+// PANEL RENDERING
+// ================================================================
+function renderSummaryPanel(team) {
+  const t = teams[team];
+  const allPassed = t.status === 'done';
+  const statusIcon = t.status === 'done' ? '&#10003;' : t.status === 'errored' ? '&#10007;' : '&#9888;';
+  const statusClass = t.status === 'done' ? 'pass' : 'fail';
+  const statusText = t.status === 'done' ? 'All gates passed' :
+                     t.status === 'errored' ? 'Pipeline errored in ' + t.phase + ' phase' :
+                     t.agents.reviewer.verdict === 'REVISION_NEEDED' ? 'Reviewer requested revision' :
+                     'Needs attention';
+
+  let reqHtml = '';
+  if (t.agents.worker2.requirements && t.agents.worker2.requirements.length > 0) {
+    reqHtml = '<ul class="req-list">' + t.agents.worker2.requirements.map(r =>
+      `<li><span class="${r.met ? 'req-check' : 'req-uncheck'}">${r.met ? '&#10003;' : '&#10007;'}</span> ${r.text}</li>`
+    ).join('') + '</ul>';
+  } else {
+    reqHtml = '<div style="color:#484f58;font-style:italic">Verification was skipped</div>';
+  }
+
+  const verdictColor = (v) => {
+    if (v === 'APPROVED' || v === 'Complete' || v.includes('met')) return 'background:#23863622;color:#3fb950';
+    if (v === 'SKIPPED') return 'background:#21262d;color:#484f58';
+    if (v === 'ERRORED') return 'background:#da363322;color:#f85149';
+    return 'background:#d2992222;color:#d29922';
+  };
+
+  return `
+    <div class="panel-header">
+      <div>
+        <div class="panel-title">${t.name}</div>
+        <div class="panel-project-path">${t.projectPath}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px">
+        <div class="mode-toggle">
+          <button class="mode-btn active" onclick="switchMode('${team}', 'summary')">Summary</button>
+          <button class="mode-btn" onclick="switchMode('${team}', 'live')">Live</button>
+        </div>
+        <button class="panel-close" onclick="closePanel()">&#10005;</button>
+      </div>
+    </div>
+    <div class="panel-body">
+      <!-- Top 3: What, Status, Action -->
+      <div class="summary-top">
+        <div class="summary-status-icon ${statusClass}">${statusIcon}</div>
+        <div class="summary-what">
+          <div class="summary-what-label">Task</div>
+          <div class="summary-what-text">${t.task}</div>
+          <div style="margin-top:6px;font-size:0.75rem;color:${statusClass === 'pass' ? '#3fb950' : '#f85149'}">${statusText}</div>
+        </div>
+      </div>
+
+      <div class="summary-actions">
+        ${t.status === 'done' ? `<button class="btn btn-primary" onclick="confirmMerge('${team}')">Merge to Main</button>` : ''}
+        ${t.status === 'done' ? `<button class="btn btn-secondary" onclick="showSecurityReview('${team}')">Security Review</button>` : ''}
+        ${t.status === 'errored' ? `<button class="btn btn-secondary" onclick="retryTask('${team}')">Retry Task</button>` : ''}
+        ${t.status === 'revision_needed' ? `<button class="btn btn-secondary" onclick="showRevisionDetails('${team}')">View Revision Details</button>` : ''}
+        <button class="btn btn-secondary" onclick="showNewTaskModal('${team}')">Assign New Task</button>
+        <button class="btn btn-danger" onclick="confirmCancel('${team}')">Cancel</button>
+      </div>
+
+      <!-- Pipeline Stats -->
+      <div class="pipeline-stats">
+        <div class="pipeline-stat">
+          <div class="pipeline-stat-value">${t.stats.duration}</div>
+          <div class="pipeline-stat-label">Duration</div>
+        </div>
+        <div class="pipeline-stat">
+          <div class="pipeline-stat-value">${t.stats.revisions}</div>
+          <div class="pipeline-stat-label">Revisions</div>
+        </div>
+        <div class="pipeline-stat">
+          <div class="pipeline-stat-value">${t.stats.verifications}</div>
+          <div class="pipeline-stat-label">Verify Passes</div>
+        </div>
+      </div>
+
+      <!-- Agent Sections (collapsed by default) -->
+      <div class="agent-section">
+        <div class="agent-section-header" onclick="toggleAgent(this)">
+          <span class="agent-section-chevron">&#9654;</span>
+          <span class="agent-section-dot" style="background:#f85149"></span>
+          <span class="agent-section-name">Security-1</span>
+          <span class="agent-section-verdict" style="${verdictColor(t.agents.security.verdict)}">${t.agents.security.verdict}</span>
+        </div>
+        <div class="agent-section-body">
+          <div class="agent-detail-value mono">${t.agents.security.detail}</div>
+        </div>
+      </div>
+
+      <div class="agent-section">
+        <div class="agent-section-header" onclick="toggleAgent(this)">
+          <span class="agent-section-chevron">&#9654;</span>
+          <span class="agent-section-dot" style="background:#3fb950"></span>
+          <span class="agent-section-name">Worker-1</span>
+          <span class="agent-section-verdict" style="${verdictColor(t.agents.worker1.verdict)}">${t.agents.worker1.verdict}</span>
+        </div>
+        <div class="agent-section-body">
+          <div class="agent-detail-value mono">${t.agents.worker1.detail}</div>
+        </div>
+      </div>
+
+      <div class="agent-section">
+        <div class="agent-section-header" onclick="toggleAgent(this)">
+          <span class="agent-section-chevron">&#9654;</span>
+          <span class="agent-section-dot" style="background:#3fb950"></span>
+          <span class="agent-section-name">Worker-2</span>
+          <span class="agent-section-verdict" style="${verdictColor(t.agents.worker2.verdict)}">${t.agents.worker2.verdict}</span>
+        </div>
+        <div class="agent-section-body">${reqHtml}</div>
+      </div>
+
+      <div class="agent-section">
+        <div class="agent-section-header" onclick="toggleAgent(this)">
+          <span class="agent-section-chevron">&#9654;</span>
+          <span class="agent-section-dot" style="background:#d29922"></span>
+          <span class="agent-section-name">Reviewer-1</span>
+          <span class="agent-section-verdict" style="${verdictColor(t.agents.reviewer.verdict)}">${t.agents.reviewer.verdict}</span>
+        </div>
+        <div class="agent-section-body">
+          <div class="agent-detail-value mono">${t.agents.reviewer.detail}</div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderLivePanel(team) {
+  const t = teams[team];
+  const la = t.liveAgents || {
+    security: { status: 'done', color: '#f85149', progress: 100, output: 'Completed.' },
+    worker1: { status: 'done', color: '#3fb950', progress: 100, output: 'Completed.' },
+    worker2: { status: 'done', color: '#3fb950', progress: 100, output: 'Completed.' },
+    reviewer: { status: 'done', color: '#d29922', progress: 100, output: 'Completed.' }
+  };
+
+  const phases = ['scan', 'build', 'sweep', 'review', 'done'];
+  const phaseIndex = { pre_work: 0, work: 1, handoff: 2, review: 3, done: 4 };
+  const currentIdx = phaseIndex[t.phase] || 0;
+
+  const phaseBarHtml = phases.map((p, i) => {
+    const dotClass = i < currentIdx ? 'past' : i === currentIdx ? 'active' : '';
+    const labelClass = i < currentIdx ? 'past' : i === currentIdx ? 'active' : '';
+    const dotContent = i < currentIdx ? '&#10003;' : (i + 1);
+    const connector = i < phases.length - 1 ?
+      `<div class="live-phase-connector ${i < currentIdx ? 'past' : ''}"></div>` : '';
+    return `<div class="live-phase-step"><div class="live-phase-dot ${dotClass}">${dotContent}</div><div class="live-phase-label ${labelClass}">${p}</div></div>${connector}`;
+  }).join('');
+
+  const agentCardHtml = (name, key, agent) => {
+    const isWorking = agent.status === 'working';
+    const dotClass = agent.status === 'working' ? 'working' : agent.status === 'done' ? 'done' : '';
+    const statusLabel = agent.status.toUpperCase();
+    return `
+      <div class="live-agent-card ${isWorking ? 'active-agent' : ''}" style="--agent-color:${agent.color}">
+        <div class="live-agent-header">
+          <div class="live-agent-dot ${dotClass}" style="--agent-color:${agent.color}"></div>
+          <div class="live-agent-name">${name}</div>
+          <div class="live-agent-status" style="color:${agent.status === 'working' ? agent.color : '#484f58'}">${statusLabel}</div>
+        </div>
+        <div class="live-agent-progress"><div class="live-agent-progress-fill" style="width:${agent.progress}%;background:${agent.color}"></div></div>
+        <div class="live-agent-output">${agent.output || '<span style="color:#30363d">Waiting...</span>'}</div>
+      </div>
+    `;
+  };
+
+  return `
+    <div class="panel-header">
+      <div>
+        <div class="panel-title">${t.name}</div>
+        <div class="panel-project-path">${t.projectPath}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px">
+        <div class="mode-toggle">
+          <button class="mode-btn" onclick="switchMode('${team}', 'summary')">Summary</button>
+          <button class="mode-btn active" onclick="switchMode('${team}', 'live')">Live</button>
+        </div>
+        <button class="panel-close" onclick="closePanel()">&#10005;</button>
+      </div>
+    </div>
+    <div class="panel-body">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <div style="font-size:0.82rem;color:#8b949e">${t.task}</div>
+        <div style="font-size:0.85rem;color:#8b949e;font-variant-numeric:tabular-nums">${t.duration}${t.status !== 'done' && t.status !== 'errored' ? '...' : ''}</div>
+      </div>
+      <div class="live-phase-bar">${phaseBarHtml}</div>
+      <div class="live-agent-cards">
+        ${agentCardHtml('Security-1', 'security', la.security)}
+        ${agentCardHtml('Worker-1', 'worker1', la.worker1)}
+        ${agentCardHtml('Worker-2', 'worker2', la.worker2)}
+        ${agentCardHtml('Reviewer-1', 'reviewer', la.reviewer)}
+      </div>
+      <div style="display:flex;gap:8px;padding:12px 0">
+        <button class="btn btn-danger" style="flex:1" onclick="confirmStop('${team}')">Stop Pipeline</button>
+        <button class="btn btn-secondary" style="flex:1" onclick="showFeedback('${team}')"><span class="info-tip"><span class="info-tip-icon">i</span><span class="info-tip-text">Send a message to the currently active agent</span></span>Steer Agent</button>
+      </div>
+    </div>
+  `;
+}
+
+// ================================================================
+// INTERACTIONS
+// ================================================================
+let currentTeam = null;
+
+function openPanel(teamKey) {
+  const t = teams[teamKey];
+  if (!t) return;
+  currentTeam = teamKey;
+
+  // Highlight selected card
+  document.querySelectorAll('.team-card').forEach(c => c.classList.remove('selected'));
+  event.currentTarget.classList.add('selected');
+
+  // Render panel content
+  const panel = document.getElementById('slidePanel');
+  const content = document.getElementById('panelContent');
+
+  const isDone = t.status === 'done' || t.status === 'errored';
+  if (!isDone && t.liveAgents) {
+    content.innerHTML = renderLivePanel(teamKey);
+  } else {
+    content.innerHTML = renderSummaryPanel(teamKey);
+  }
+
+  panel.classList.add('open');
+  document.getElementById('panelBackdrop').classList.add('open');
+}
+
+function closePanel() {
+  document.getElementById('slidePanel').classList.remove('open');
+  document.getElementById('panelBackdrop').classList.remove('open');
+  document.querySelectorAll('.team-card').forEach(c => c.classList.remove('selected'));
+  currentTeam = null;
+}
+
+function switchMode(teamKey, mode) {
+  const content = document.getElementById('panelContent');
+  if (mode === 'live') {
+    content.innerHTML = renderLivePanel(teamKey);
+  } else {
+    content.innerHTML = renderSummaryPanel(teamKey);
+  }
+}
+
+function toggleAgent(header) {
+  const chevron = header.querySelector('.agent-section-chevron');
+  const body = header.nextElementSibling;
+  chevron.classList.toggle('open');
+  body.classList.toggle('open');
+}
+
+// ================================================================
+// VIEW SWITCHING
+// ================================================================
+let currentView = 'dashboard';
+let currentProjectView = null;
+let selectedProjectTeam = null;
+
+function setNavActive(type, id) {
+  document.querySelectorAll('.nav-project, .nav-dashboard').forEach(p => p.classList.remove('active'));
+  if (type === 'dashboard') {
+    document.querySelector('.nav-dashboard').classList.add('active');
+  } else {
+    const navItem = document.querySelector(`.nav-project[data-project="${id}"]`);
+    if (navItem) navItem.classList.add('active');
+  }
+}
+
+function showDashboard() {
+  closePanel();
+  currentView = 'dashboard';
+  currentProjectView = null;
+  selectedProjectTeam = null;
+  document.getElementById('dashboardView').classList.add('active');
+  document.getElementById('projectDetailView').classList.remove('active');
+  setNavActive('dashboard');
+}
+
+function showProjectView(projectId) {
+  closePanel();
+  currentView = 'project';
+  currentProjectView = projectId;
+  selectedProjectTeam = null;
+
+  document.getElementById('dashboardView').classList.remove('active');
+  document.getElementById('projectDetailView').classList.add('active');
+  setNavActive('project', projectId);
+
+  renderProjectDetail(projectId);
+}
+
+function renderProjectDetail(projectId) {
+  const proj = projects[projectId];
+  if (!proj) return;
+
+  const teamKeys = proj.teams;
+  const teamData = teamKeys.map(k => ({ key: k, ...teams[k] })).filter(t => t.name);
+
+  // Count stats
+  const counts = { active: 0, review: 0, done: 0, error: 0, blocked: 0 };
+  teamData.forEach(t => {
+    if (t.status === 'done') counts.done++;
+    else if (t.status === 'errored') counts.error++;
+    else if (t.status === 'revision_needed' || t.status === 'blocked') counts.blocked++;
+    else if (t.phase === 'review') counts.review++;
+    else counts.active++;
+  });
+
+  const statsHtml = [
+    counts.blocked > 0 ? `<span class="stat-pill" style="background:#da363322;color:#f85149;font-size:0.65rem">${counts.blocked} blocked</span>` : '',
+    counts.error > 0 ? `<span class="stat-pill" style="background:#da363322;color:#f85149;font-size:0.65rem">${counts.error} errored</span>` : '',
+    counts.active > 0 ? `<span class="stat-pill" style="background:#1f6feb22;color:#58a6ff;font-size:0.65rem">${counts.active} active</span>` : '',
+    counts.review > 0 ? `<span class="stat-pill" style="background:#d2992222;color:#d29922;font-size:0.65rem">${counts.review} review</span>` : '',
+    counts.done > 0 ? `<span class="stat-pill" style="background:#23863622;color:#3fb950;font-size:0.65rem">${counts.done} done</span>` : '',
+  ].filter(Boolean).join('');
+
+  const cardsHtml = teamData.map(t => {
+    const phases = getPhaseData(t);
+    const segsHtml = phases.map(p => `<div class="compact-phase-seg ${p}"></div>`).join('');
+    const statusStyle = getStatusStyle(t);
+    const cardClass = getCardStatusClass(t);
+
+    return `
+      <div class="team-card-compact ${cardClass}" onclick="selectProjectTeam('${t.key}', '${projectId}')" data-team-key="${t.key}">
+        <div class="compact-name">${t.name}</div>
+        <div class="compact-phase-segments">${segsHtml}</div>
+        <div class="compact-footer">
+          <span class="compact-status" style="${statusStyle.style}">${statusStyle.label}</span>
+          <span class="compact-time">${t.duration}${t.status !== 'done' && t.status !== 'errored' ? '...' : ''}</span>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  document.getElementById('projectDetailContent').innerHTML = `
+    <div class="project-detail-header">
+      <div class="project-detail-title-row">
+        <div>
+          <div class="project-detail-name">${proj.name}</div>
+          <div class="project-detail-path">${proj.path}</div>
+        </div>
+        <div class="project-detail-stats">${statsHtml}</div>
+      </div>
+    </div>
+    <div class="project-detail-cards">
+      <div class="project-detail-grid">${cardsHtml}</div>
+    </div>
+    <div class="project-detail-content" id="projectTeamDetail">
+      <div class="project-detail-empty">
+        <div class="project-detail-empty-icon">&#8593;</div>
+        <div class="project-detail-empty-text">Select a team above to view details</div>
+      </div>
+    </div>
+  `;
+
+  // Auto-select first team that needs attention, or first team
+  const attentionTeam = teamData.find(t => t.status === 'errored' || t.status === 'revision_needed' || t.status === 'blocked');
+  const firstTeam = attentionTeam || teamData[0];
+  if (firstTeam) {
+    selectProjectTeam(firstTeam.key, projectId);
+  }
+}
+
+function selectProjectTeam(teamKey, projectId) {
+  selectedProjectTeam = teamKey;
+  const t = teams[teamKey];
+  if (!t) return;
+
+  // Highlight selected compact card
+  document.querySelectorAll('.team-card-compact').forEach(c => c.classList.remove('selected'));
+  const card = document.querySelector(`.team-card-compact[data-team-key="${teamKey}"]`);
+  if (card) card.classList.add('selected');
+
+  // Render detail content inline
+  // Done/errored teams default to Summary. Active teams with liveAgents default to Live.
+  const container = document.getElementById('projectTeamDetail');
+  const isDone = t.status === 'done' || t.status === 'errored';
+  if (!isDone && t.liveAgents) {
+    container.innerHTML = renderInlineLiveDetail(teamKey);
+  } else {
+    container.innerHTML = renderInlineSummaryDetail(teamKey);
+  }
+}
+
+function renderInlineSummaryDetail(teamKey) {
+  const t = teams[teamKey];
+  const statusIcon = t.status === 'done' ? '&#10003;' : t.status === 'errored' ? '&#10007;' : '&#9888;';
+  const statusClass = t.status === 'done' ? 'pass' : 'fail';
+  const statusText = t.status === 'done' ? 'All gates passed' :
+                     t.status === 'errored' ? 'Pipeline errored in ' + t.phase + ' phase' :
+                     t.agents.reviewer.verdict === 'REVISION_NEEDED' ? 'Reviewer requested revision' :
+                     'Needs attention';
+
+  let reqHtml = '';
+  if (t.agents.worker2.requirements && t.agents.worker2.requirements.length > 0) {
+    reqHtml = '<ul class="req-list">' + t.agents.worker2.requirements.map(r =>
+      `<li><span class="${r.met ? 'req-check' : 'req-uncheck'}">${r.met ? '&#10003;' : '&#10007;'}</span> ${r.text}</li>`
+    ).join('') + '</ul>';
+  } else {
+    reqHtml = '<div style="color:#484f58;font-style:italic">Verification was skipped</div>';
+  }
+
+  const verdictColor = (v) => {
+    if (v === 'APPROVED' || v === 'Complete' || v.includes('met')) return 'background:#23863622;color:#3fb950';
+    if (v === 'SKIPPED') return 'background:#21262d;color:#484f58';
+    if (v === 'ERRORED') return 'background:#da363322;color:#f85149';
+    return 'background:#d2992222;color:#d29922';
+  };
+
+  return `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+      <div style="display:flex;align-items:center;gap:12px">
+        <div class="summary-status-icon ${statusClass}" style="width:36px;height:36px;font-size:1.1rem">${statusIcon}</div>
+        <div>
+          <div style="font-weight:600;font-size:1rem;color:#f0f6fc">${t.name}</div>
+          <div style="font-size:0.78rem;color:${statusClass === 'pass' ? '#3fb950' : '#f85149'};margin-top:2px">${statusText}</div>
+        </div>
+      </div>
+      <div class="mode-toggle">
+        <button class="mode-btn active" onclick="switchInlineMode('${teamKey}', 'summary')">Summary</button>
+        <button class="mode-btn" onclick="switchInlineMode('${teamKey}', 'live')">Live</button>
+      </div>
+    </div>
+
+    <div style="font-size:0.85rem;color:#c9d1d9;margin-bottom:16px;padding:12px;background:#161b22;border:1px solid #30363d;border-radius:8px">${t.task}</div>
+
+    <div class="summary-actions" style="margin-bottom:16px">
+      ${t.status === 'done' ? `<button class="btn btn-primary" onclick="confirmMerge('${teamKey}')">Merge to Main</button>` : ''}
+      ${t.status === 'done' ? `<button class="btn btn-secondary" onclick="showSecurityReview('${teamKey}')">Security Review</button>` : ''}
+      ${t.status === 'errored' ? `<button class="btn btn-secondary" onclick="retryTask('${teamKey}')">Retry Task</button>` : ''}
+      ${t.status === 'revision_needed' ? `<button class="btn btn-secondary" onclick="showRevisionDetails('${teamKey}')">View Revision Details</button>` : ''}
+      <button class="btn btn-secondary" onclick="showNewTaskModal('${teamKey}')">Assign New Task</button>
+    </div>
+
+    <div class="pipeline-stats" style="margin-bottom:16px">
+      <div class="pipeline-stat"><div class="pipeline-stat-value">${t.stats.duration}</div><div class="pipeline-stat-label">Duration</div></div>
+      <div class="pipeline-stat"><div class="pipeline-stat-value">${t.stats.revisions}</div><div class="pipeline-stat-label">Revisions</div></div>
+      <div class="pipeline-stat"><div class="pipeline-stat-value">${t.stats.verifications}</div><div class="pipeline-stat-label">Verify Passes</div></div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;align-items:start">
+      <div class="agent-section"><div class="agent-section-header" onclick="toggleAgent(this)"><span class="agent-section-chevron">&#9654;</span><span class="agent-section-dot" style="background:#f85149"></span><span class="agent-section-name">Security-1</span><span class="agent-section-verdict" style="${verdictColor(t.agents.security.verdict)}">${t.agents.security.verdict}</span></div><div class="agent-section-body"><div class="agent-detail-value mono">${t.agents.security.detail}</div></div></div>
+      <div class="agent-section"><div class="agent-section-header" onclick="toggleAgent(this)"><span class="agent-section-chevron">&#9654;</span><span class="agent-section-dot" style="background:#3fb950"></span><span class="agent-section-name">Worker-1</span><span class="agent-section-verdict" style="${verdictColor(t.agents.worker1.verdict)}">${t.agents.worker1.verdict}</span></div><div class="agent-section-body"><div class="agent-detail-value mono">${t.agents.worker1.detail}</div></div></div>
+      <div class="agent-section"><div class="agent-section-header" onclick="toggleAgent(this)"><span class="agent-section-chevron">&#9654;</span><span class="agent-section-dot" style="background:#3fb950"></span><span class="agent-section-name">Worker-2</span><span class="agent-section-verdict" style="${verdictColor(t.agents.worker2.verdict)}">${t.agents.worker2.verdict}</span></div><div class="agent-section-body">${reqHtml}</div></div>
+      <div class="agent-section"><div class="agent-section-header" onclick="toggleAgent(this)"><span class="agent-section-chevron">&#9654;</span><span class="agent-section-dot" style="background:#d29922"></span><span class="agent-section-name">Reviewer-1</span><span class="agent-section-verdict" style="${verdictColor(t.agents.reviewer.verdict)}">${t.agents.reviewer.verdict}</span></div><div class="agent-section-body"><div class="agent-detail-value mono">${t.agents.reviewer.detail}</div></div></div>
+    </div>
+  `;
+}
+
+function renderInlineLiveDetail(teamKey) {
+  const t = teams[teamKey];
+  const la = t.liveAgents || {
+    security: { status: 'done', color: '#f85149', progress: 100, output: 'Completed.' },
+    worker1: { status: 'done', color: '#3fb950', progress: 100, output: 'Completed.' },
+    worker2: { status: 'done', color: '#3fb950', progress: 100, output: 'Completed.' },
+    reviewer: { status: 'done', color: '#d29922', progress: 100, output: 'Completed.' }
+  };
+
+  const phases = ['scan', 'build', 'sweep', 'review', 'done'];
+  const phaseIndex = { pre_work: 0, work: 1, handoff: 2, review: 3, done: 4 };
+  const currentIdx = phaseIndex[t.phase] || 0;
+
+  const phaseBarHtml = phases.map((p, i) => {
+    const dotClass = i < currentIdx ? 'past' : i === currentIdx ? 'active' : '';
+    const labelClass = i < currentIdx ? 'past' : i === currentIdx ? 'active' : '';
+    const dotContent = i < currentIdx ? '&#10003;' : (i + 1);
+    const connector = i < phases.length - 1 ?
+      `<div class="live-phase-connector ${i < currentIdx ? 'past' : ''}"></div>` : '';
+    return `<div class="live-phase-step"><div class="live-phase-dot ${dotClass}">${dotContent}</div><div class="live-phase-label ${labelClass}">${p}</div></div>${connector}`;
+  }).join('');
+
+  const agentCardHtml = (name, key, agent) => {
+    const isWorking = agent.status === 'working';
+    const dotClass = agent.status === 'working' ? 'working' : agent.status === 'done' ? 'done' : '';
+    return `
+      <div class="live-agent-card ${isWorking ? 'active-agent' : ''}" style="--agent-color:${agent.color}">
+        <div class="live-agent-header">
+          <div class="live-agent-dot ${dotClass}" style="--agent-color:${agent.color}"></div>
+          <div class="live-agent-name">${name}</div>
+          <div class="live-agent-status" style="color:${agent.status === 'working' ? agent.color : '#484f58'}">${agent.status.toUpperCase()}</div>
+        </div>
+        <div class="live-agent-progress"><div class="live-agent-progress-fill" style="width:${agent.progress}%;background:${agent.color}"></div></div>
+        <div class="live-agent-output">${agent.output || '<span style="color:#30363d">Waiting...</span>'}</div>
+      </div>
+    `;
+  };
+
+  return `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+      <div>
+        <div style="font-weight:600;font-size:1rem;color:#f0f6fc">${t.name}</div>
+        <div style="font-size:0.78rem;color:#8b949e;margin-top:2px">${t.task}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:12px">
+        <span style="font-size:0.85rem;color:#8b949e;font-variant-numeric:tabular-nums">${t.duration}...</span>
+        <div class="mode-toggle">
+          <button class="mode-btn" onclick="switchInlineMode('${teamKey}', 'summary')">Summary</button>
+          <button class="mode-btn active" onclick="switchInlineMode('${teamKey}', 'live')">Live</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="live-phase-bar">${phaseBarHtml}</div>
+
+    <div class="live-agent-cards">
+      ${agentCardHtml('Security-1', 'security', la.security)}
+      ${agentCardHtml('Worker-1', 'worker1', la.worker1)}
+      ${agentCardHtml('Worker-2', 'worker2', la.worker2)}
+      ${agentCardHtml('Reviewer-1', 'reviewer', la.reviewer)}
+    </div>
+
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn btn-danger" style="flex:1" onclick="confirmStop('${teamKey}')">Stop Pipeline</button>
+      <button class="btn btn-secondary" style="flex:1" onclick="showFeedback('${teamKey}')"><span class="info-tip"><span class="info-tip-icon">i</span><span class="info-tip-text">Send a message to the currently active agent</span></span>Steer Agent</button>
+    </div>
+  `;
+}
+
+function switchInlineMode(teamKey, mode) {
+  const container = document.getElementById('projectTeamDetail');
+  if (mode === 'live') {
+    container.innerHTML = renderInlineLiveDetail(teamKey);
+  } else {
+    container.innerHTML = renderInlineSummaryDetail(teamKey);
+  }
+}
+
+// Helper functions for compact cards
+function getPhaseData(t) {
+  const phaseMap = { pre_work: 0, work: 1, handoff: 2, review: 3, done: 4 };
+  const idx = phaseMap[t.phase] || 0;
+  return [0,1,2,3,4].map(i => {
+    if (t.status === 'errored' && i === idx) return 'errored';
+    if (t.status === 'blocked' && i === idx) return 'blocked';
+    if (t.status === 'revision_needed' && i === idx) return 'blocked';
+    if (i < idx || t.status === 'done') return 'completed';
+    if (i === idx) return 'active';
+    return '';
+  });
+}
+
+function getCardStatusClass(t) {
+  if (t.status === 'done') return 'status-done';
+  if (t.status === 'errored') return 'status-errored';
+  if (t.status === 'blocked' || t.status === 'revision_needed') return 'status-blocked';
+  if (t.phase === 'review') return 'status-review';
+  return 'status-working';
+}
+
+function getStatusStyle(t) {
+  if (t.status === 'done') return { style: 'background:#23863622;color:#3fb950', label: 'Done' };
+  if (t.status === 'errored') return { style: 'background:#da363322;color:#f85149', label: 'Errored' };
+  if (t.status === 'revision_needed') return { style: 'background:#da363322;color:#f85149', label: 'Revision' };
+  if (t.status === 'blocked') return { style: 'background:#da363322;color:#f85149', label: 'Blocked' };
+  if (t.phase === 'pre_work') return { style: 'background:#1f6feb22;color:#58a6ff', label: 'Scanning' };
+  if (t.phase === 'work') return { style: 'background:#1f6feb22;color:#58a6ff', label: 'Building' };
+  if (t.phase === 'handoff') return { style: 'background:#1f6feb22;color:#58a6ff', label: 'Sweeping' };
+  if (t.phase === 'review') return { style: 'background:#d2992222;color:#d29922', label: 'In Review' };
+  return { style: 'background:#1f6feb22;color:#58a6ff', label: 'Active' };
+}
+
+function scrollToProject(id) {
+  showDashboard();
+  setTimeout(() => {
+    const el = document.getElementById('project-' + id);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, 50);
+}
+
+function showPortfolio() {
+  showDashboard();
+}
+
+// ================================================================
+// FILTER SYSTEM
+// ================================================================
+const globalFilters = new Set();
+const projectFilters = {}; // { projectId: Set of active filters }
+
+// Map card statuses to global filter categories
+function statusToGlobalFilter(status) {
+  if (status === 'active' || status === 'working') return 'active';
+  if (status === 'review') return 'review';
+  if (status === 'done') return 'done';
+  if (status === 'error' || status === 'errored' || status === 'blocked') return 'error';
+  return status;
+}
+
+// Map card statuses to project filter categories (more specific)
+function statusToProjectFilter(status) {
+  if (status === 'active' || status === 'working') return 'active';
+  if (status === 'review') return 'active'; // review is "in progress" at project level
+  if (status === 'done') return 'done';
+  if (status === 'blocked') return 'blocked';
+  if (status === 'error' || status === 'errored') return 'error';
+  return status;
+}
+
+function toggleGlobalFilter(pill) {
+  const filter = pill.dataset.filter;
+
+  // Global click always clears all project-level overrides
+  Object.keys(projectFilters).forEach(k => projectFilters[k].clear());
+  document.querySelectorAll('.project-section-stats .stat-pill').forEach(p => p.classList.remove('filter-active'));
+
+  if (globalFilters.has(filter)) {
+    globalFilters.delete(filter);
+    pill.classList.remove('filter-active');
+  } else {
+    globalFilters.add(filter);
+    pill.classList.add('filter-active');
+  }
+  applyFilters();
+}
+
+function toggleProjectFilter(pill) {
+  const filter = pill.dataset.filter;
+  const project = pill.dataset.project;
+
+  if (!projectFilters[project]) projectFilters[project] = new Set();
+
+  if (projectFilters[project].has(filter)) {
+    projectFilters[project].delete(filter);
+    pill.classList.remove('filter-active');
+  } else {
+    projectFilters[project].add(filter);
+    pill.classList.add('filter-active');
+  }
+  applyFilters();
+}
+
+function applyFilters() {
+  const hasGlobal = globalFilters.size > 0;
+
+  document.querySelectorAll('.team-card').forEach(card => {
+    const rawStatus = card.dataset.status;
+    const section = card.closest('.project-section');
+    const projectId = section ? section.id.replace('project-', '') : '';
+
+    // Project-level filter overrides global for that project
+    const projFilter = projectFilters[projectId];
+    const hasProjectOverride = projFilter && projFilter.size > 0;
+
+    let show = true;
+
+    if (hasProjectOverride) {
+      // This project has its own filter — match against project-level mapping
+      const projStatus = statusToProjectFilter(rawStatus);
+      show = projFilter.has(projStatus) || projFilter.has(rawStatus);
+    } else if (hasGlobal) {
+      // No project override — fall back to global filter with global mapping
+      const globalStatus = statusToGlobalFilter(rawStatus);
+      show = globalFilters.has(globalStatus);
+    }
+
+    card.classList.toggle('filtered-out', !show);
+  });
+
+  // Fade entire project sections if no visible cards
+  const anyFilterActive = hasGlobal || Object.values(projectFilters).some(s => s.size > 0);
+  if (anyFilterActive) {
+    document.querySelectorAll('.project-section').forEach(section => {
+      const visibleCards = section.querySelectorAll('.team-card:not(.filtered-out)');
+      section.classList.toggle('filtered-out', visibleCards.length === 0);
+    });
+  } else {
+    document.querySelectorAll('.project-section').forEach(s => s.classList.remove('filtered-out'));
+  }
+}
+
+// Keyboard: Escape closes panel/modal
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    if (document.getElementById('modalBackdrop').classList.contains('open')) {
+      closeModal();
+    } else {
+      closePanel();
+    }
+  }
+});
+
+// ================================================================
+// TOAST SYSTEM
+// ================================================================
+function showToast(message, type = 'info', duration = 4000) {
+  const container = document.getElementById('toastContainer');
+  const icons = { success: '&#10003;', info: '&#8505;', warning: '&#9888;', error: '&#10007;' };
+  const toast = document.createElement('div');
+  toast.className = `toast ${type}`;
+  toast.innerHTML = `<span class="toast-icon">${icons[type]}</span><span>${message}</span><button class="toast-dismiss" onclick="dismissToast(this)">&times;</button>`;
+  container.appendChild(toast);
+  setTimeout(() => {
+    toast.style.animation = 'toast-out 0.3s ease forwards';
+    setTimeout(() => toast.remove(), 300);
+  }, duration);
+}
+
+function dismissToast(btn) {
+  const toast = btn.parentElement;
+  toast.style.animation = 'toast-out 0.3s ease forwards';
+  setTimeout(() => toast.remove(), 300);
+}
+
+// ================================================================
+// MODAL SYSTEM
+// ================================================================
+function openModal(html) {
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalBackdrop').classList.add('open');
+}
+
+function closeModal() {
+  document.getElementById('modalBackdrop').classList.remove('open');
+}
+
+// ================================================================
+// ACTION HANDLERS
+// ================================================================
+
+// Merge to Main
+function confirmMerge(teamKey) {
+  const t = teams[teamKey];
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">Merge to Main</div>
+      <button class="panel-close" onclick="closeModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="confirm-message">Push <strong>${t.name}</strong> branch to remote and merge into <strong>main</strong>?</div>
+      <div class="confirm-detail">
+git push origin dev<br>
+git checkout main && git pull origin main<br>
+git merge dev --no-edit<br>
+git push origin main<br>
+git checkout dev
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="executeMerge('${teamKey}')">Push & Merge</button>
+    </div>
+  `);
+}
+
+function executeMerge(teamKey) {
+  closeModal();
+  showToast(`Pushing ${teams[teamKey].name} to remote...`, 'info', 2000);
+  setTimeout(() => showToast(`Merged ${teams[teamKey].name} into main successfully`, 'success'), 2500);
+}
+
+// Security Review
+function showSecurityReview(teamKey) {
+  const t = teams[teamKey];
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">Final Security Review</div>
+      <button class="panel-close" onclick="closeModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="confirm-message">Run a thorough security review on all changes in <strong>${t.name}</strong>?</div>
+      <div style="font-size:0.78rem;color:#8b949e;margin-top:8px">This spawns Security-1 with an expanded checklist analyzing the full git diff against main. Takes ~30-60 seconds.</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="executeSecurityReview('${teamKey}')" style="background:#f85149">Run Review</button>
+    </div>
+  `);
+}
+
+function executeSecurityReview(teamKey) {
+  closeModal();
+  showToast(`Security review started for ${teams[teamKey].name}...`, 'info', 3000);
+  setTimeout(() => showToast(`Security review PASSED — no issues found`, 'success'), 4000);
+}
+
+// Retry Task
+function retryTask(teamKey) {
+  const t = teams[teamKey];
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">Retry Task</div>
+      <button class="panel-close" onclick="closeModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="confirm-message">Restart the pipeline for <strong>${t.name}</strong> from the beginning?</div>
+      <div style="font-size:0.78rem;color:#8b949e;margin-top:8px">This will reset the team to pre_work phase and re-run the full pipeline: Security Scan → Build → Verify → Sweep → Review.</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="executeRetry('${teamKey}')">Retry</button>
+    </div>
+  `);
+}
+
+function executeRetry(teamKey) {
+  closeModal();
+  closePanel();
+  showToast(`Retrying ${teams[teamKey].name} — pipeline restarting...`, 'info');
+}
+
+// Revision Details
+function showRevisionDetails(teamKey) {
+  const t = teams[teamKey];
+  const reviewerDetail = t.agents.reviewer.detail;
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">Revision Details — ${t.name}</div>
+      <button class="panel-close" onclick="closeModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div style="font-size:0.72rem;color:#484f58;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:6px">Reviewer-1 Feedback</div>
+      <div class="confirm-detail" style="white-space:pre-wrap">${reviewerDetail}</div>
+      <div style="margin-top:16px;font-size:0.78rem;color:#8b949e">Worker-1 will receive this feedback and make targeted fixes. The pipeline will re-run from the Build phase.</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Close</button>
+      <button class="btn btn-primary" onclick="executeRevision('${teamKey}')">Send to Worker-1</button>
+    </div>
+  `);
+}
+
+function executeRevision(teamKey) {
+  closeModal();
+  showToast(`Revision feedback sent to Worker-1 for ${teams[teamKey].name}`, 'info');
+}
+
+// Assign New Task
+function showNewTaskModal(teamKey) {
+  const t = teams[teamKey];
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">Assign New Task — ${t.name}</div>
+      <button class="panel-close" onclick="closeModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">Task Description</label>
+        <textarea class="form-textarea" id="newTaskDesc" placeholder="Describe the feature, bug fix, or task..." rows="4"></textarea>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Attach Images (optional)</label>
+        <div style="border:1px dashed #30363d;border-radius:8px;padding:20px;text-align:center;color:#484f58;font-size:0.82rem;cursor:pointer" onclick="showToast('File picker would open here', 'info', 2000)">
+          Drop mockups or screenshots here
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="assignNewTask('${teamKey}')">Assign Task</button>
+    </div>
+  `);
+}
+
+function assignNewTask(teamKey) {
+  const desc = document.getElementById('newTaskDesc')?.value;
+  if (!desc || !desc.trim()) {
+    showToast('Please enter a task description', 'warning', 2000);
+    return;
+  }
+  closeModal();
+  closePanel();
+  showToast(`New task assigned to ${teams[teamKey].name} — pipeline starting...`, 'success');
+}
+
+// Cancel Team
+function confirmCancel(teamKey) {
+  const t = teams[teamKey];
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">Cancel Team</div>
+      <button class="panel-close" onclick="closeModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="confirm-message" style="color:#f85149">Cancel <strong>${t.name}</strong> and stop all agents?</div>
+      <div style="font-size:0.78rem;color:#8b949e;margin-top:8px">This will terminate all 4 agent sessions and transition the team to cancelled state. Any uncommitted work will be lost.</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Keep Running</button>
+      <button class="btn btn-danger" onclick="executeCancel('${teamKey}')">Cancel Team</button>
+    </div>
+  `);
+}
+
+function executeCancel(teamKey) {
+  closeModal();
+  closePanel();
+  showToast(`${teams[teamKey].name} cancelled — all agents stopped`, 'warning');
+}
+
+// Stop Pipeline (live mode)
+function confirmStop(teamKey) {
+  const t = teams[teamKey];
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">Stop Pipeline</div>
+      <button class="panel-close" onclick="closeModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="confirm-message" style="color:#f85149">Stop the running pipeline for <strong>${t.name}</strong>?</div>
+      <div style="font-size:0.78rem;color:#8b949e;margin-top:8px">Current phase work will be interrupted. The team will transition to cancelled state. Work completed so far (auto-committed at phase boundaries) is preserved.</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Keep Running</button>
+      <button class="btn btn-danger" onclick="executeStop('${teamKey}')">Stop</button>
+    </div>
+  `);
+}
+
+function executeStop(teamKey) {
+  closeModal();
+  closePanel();
+  showToast(`Pipeline stopped for ${teams[teamKey].name}`, 'warning');
+}
+
+// Steer Agent (live mode)
+function showFeedback(teamKey) {
+  const t = teams[teamKey];
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">Steer Agent — ${t.name}</div>
+      <button class="panel-close" onclick="closeModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">Message to Active Agent</label>
+        <textarea class="form-textarea" id="feedbackMsg" placeholder="e.g., 'Make sure to handle the edge case where...' or 'Don't forget to update the tests'" rows="3"></textarea>
+      </div>
+      <div style="font-size:0.78rem;color:#8b949e">This message will be sent to the currently active agent while it works.</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="sendFeedback('${teamKey}')">Send</button>
+    </div>
+  `);
+}
+
+function sendFeedback(teamKey) {
+  const msg = document.getElementById('feedbackMsg')?.value;
+  if (!msg || !msg.trim()) {
+    showToast('Please enter a message', 'warning', 2000);
+    return;
+  }
+  closeModal();
+  showToast(`Feedback queued for ${teams[teamKey].name}`, 'success', 3000);
+}
+
+// ================================================================
+// NEW TEAM MODAL (from nav rail + button)
+// ================================================================
+function showCreateTeamModal() {
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">Create New Team</div>
+      <button class="panel-close" onclick="closeModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">Team Name</label>
+        <input class="form-input" id="createTeamName" placeholder="e.g., auth-api, fix-login-bug" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">Project</label>
+        <select class="form-select" id="createTeamProject">
+          <option value="">Select a project...</option>
+          <option value="e-commerce-app">e-commerce-app</option>
+          <option value="pcoi-app">pcoi-app</option>
+          <option value="saas-dashboard">saas-dashboard</option>
+          <option value="mobile-api">mobile-api</option>
+          <option value="marketing-site">marketing-site</option>
+          <option value="__new">+ New Project...</option>
+        </select>
+      </div>
+      <div class="form-group" id="newProjectGroup" style="display:none">
+        <label class="form-label">New Project Path</label>
+        <div style="display:flex;gap:8px">
+          <input class="form-input" id="createProjectPath" placeholder="/Users/me/my-project" style="flex:1" />
+          <button class="btn btn-secondary" onclick="showToast('Finder dialog would open here', 'info', 2000)">Browse</button>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Task Description</label>
+        <textarea class="form-textarea" id="createTeamTask" placeholder="Describe the feature, bug fix, or task..." rows="4"></textarea>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Attach Images (optional)</label>
+        <div style="border:1px dashed #30363d;border-radius:8px;padding:20px;text-align:center;color:#484f58;font-size:0.82rem;cursor:pointer" onclick="showToast('File picker would open here', 'info', 2000)">
+          Drop mockups or screenshots here
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="createTeam()">Create Team & Start Pipeline</button>
+    </div>
+  `);
+
+  // Show/hide new project path field
+  setTimeout(() => {
+    const sel = document.getElementById('createTeamProject');
+    if (sel) {
+      sel.addEventListener('change', () => {
+        document.getElementById('newProjectGroup').style.display = sel.value === '__new' ? 'block' : 'none';
+      });
+    }
+  }, 50);
+}
+
+function createTeam() {
+  const name = document.getElementById('createTeamName')?.value;
+  const project = document.getElementById('createTeamProject')?.value;
+  const task = document.getElementById('createTeamTask')?.value;
+  if (!name?.trim()) { showToast('Please enter a team name', 'warning', 2000); return; }
+  if (!project) { showToast('Please select a project', 'warning', 2000); return; }
+  if (!task?.trim()) { showToast('Please enter a task description', 'warning', 2000); return; }
+  closeModal();
+  showToast(`Team "${name}" created — spawning 4 agents...`, 'success', 3000);
+  setTimeout(() => showToast(`${name}: Security-1 starting pre-scan...`, 'info', 3000), 1500);
+}
+
+// Settings modal
+function showSettings() {
+  openModal(`
+    <div class="modal-header">
+      <div class="modal-title">Settings</div>
+      <button class="panel-close" onclick="closeModal()">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-group">
+        <label class="form-label">Max Concurrent Teams (per project)</label>
+        <input class="form-input" type="number" value="5" min="1" max="10" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">Max Revisions</label>
+        <input class="form-input" type="number" value="3" min="1" max="10" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">Max Rejections</label>
+        <input class="form-input" type="number" value="2" min="1" max="5" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">Worker Model</label>
+        <select class="form-select">
+          <option selected>claude-opus-4-6</option>
+          <option>claude-sonnet-4-6</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Security / Reviewer Model</label>
+        <select class="form-select">
+          <option selected>claude-opus-4-6</option>
+          <option>claude-sonnet-4-6</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Skip Requirements Extraction</label>
+        <select class="form-select">
+          <option value="false" selected>No — extract and confirm requirements</option>
+          <option value="true">Yes — skip to pipeline immediately</option>
+        </select>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="closeModal(); showToast('Settings saved', 'success', 2000)">Save</button>
+    </div>
+  `);
+}
+</script>
+
+</body>
+</html>

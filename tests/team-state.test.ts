@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { AgentState } from '../src/types/index.js';
@@ -453,7 +454,7 @@ describe('StatePersistence', () => {
   let persistence: StatePersistence;
 
   beforeEach(() => {
-    baseDir = path.join('/private/tmp/claude-501', `test-state-${randomUUID()}`);
+    baseDir = path.join(os.tmpdir(), `test-state-${randomUUID()}`);
     persistence = new StatePersistence({ debounceMs: 50 });
   });
 

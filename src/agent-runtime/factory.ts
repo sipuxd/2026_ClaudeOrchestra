@@ -5,7 +5,7 @@ import type { AgentSession, AgentSessionOptions } from './types.js';
 export function createAgentSession(
   name: string,
   systemPrompt: string,
-  opts: AgentSessionOptions
+  opts: AgentSessionOptions,
 ): AgentSession {
   if (opts.runtime.provider === 'claude') {
     return new ClaudeAgentSession(name, systemPrompt, opts);

@@ -75,7 +75,7 @@ export function createMockQuery(): {
     },
 
     async simulateSubagentStart(agentType: string, agentId?: string): Promise<void> {
-      const hookMatchers = hooks['SubagentStart'];
+      const hookMatchers = hooks.SubagentStart;
       if (!hookMatchers) return;
 
       const input: Partial<HookInput> = {
@@ -95,7 +95,7 @@ export function createMockQuery(): {
     },
 
     async simulateSubagentStop(agentType: string, agentId?: string): Promise<void> {
-      const hookMatchers = hooks['SubagentStop'];
+      const hookMatchers = hooks.SubagentStop;
       if (!hookMatchers) return;
 
       const input: Partial<HookInput> = {

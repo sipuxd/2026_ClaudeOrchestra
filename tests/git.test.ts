@@ -1,8 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
-import * as os from 'node:os';
 import { execSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { GitOps } from '../src/git.js';
 
 let tmpDir: string;
@@ -173,8 +173,13 @@ describe('GitOps', () => {
 
       // Go back to main/master
       const mainBranch = execSync('git branch --list main master', {
-        cwd: tmpDir, encoding: 'utf-8',
-      }).trim().replace('* ', '').split('\n')[0].trim();
+        cwd: tmpDir,
+        encoding: 'utf-8',
+      })
+        .trim()
+        .replace('* ', '')
+        .split('\n')[0]
+        .trim();
       execSync(`git checkout ${mainBranch}`, { cwd: tmpDir, stdio: 'pipe' });
 
       const result = GitOps.merge(tmpDir, 'dev');
@@ -211,7 +216,8 @@ describe('GitOps', () => {
       // Determine default branch name and set it
       commitFile(workDir, 'init.txt', 'initial', 'initial commit');
       const defaultBranch = execSync('git rev-parse --abbrev-ref HEAD', {
-        cwd: workDir, encoding: 'utf-8',
+        cwd: workDir,
+        encoding: 'utf-8',
       }).trim();
 
       execSync(`git remote add origin "${bareDir}"`, { cwd: workDir, stdio: 'pipe' });

@@ -29,6 +29,7 @@ rl.on('line', (line) => {
       break;
     case 'crash':
       process.exit(1);
+      break;
     case 'silent':
       // Do nothing
       break;

@@ -10,15 +10,15 @@
 // One process serves all projects via ?folder=<path> on the iframe URL,
 // so we never need per-project spawning.
 
-import { spawn, execFile, type ChildProcess } from 'node:child_process';
+import { type ChildProcess, execFile, spawn } from 'node:child_process';
 import * as http from 'node:http';
 
 export type CodeServerState =
   | 'unavailable' // binary not installed
-  | 'idle'        // installed but not started
-  | 'starting'    // spawned, waiting for /healthz
-  | 'ready'       // /healthz responded OK
-  | 'error';      // spawn or health check failed
+  | 'idle' // installed but not started
+  | 'starting' // spawned, waiting for /healthz
+  | 'ready' // /healthz responded OK
+  | 'error'; // spawn or health check failed
 
 export interface CodeServerStatus {
   state: CodeServerState;
@@ -79,9 +79,7 @@ export class CodeServerManager {
       state: this.state,
       ...(this.port !== undefined && this.state !== 'unavailable' ? { port: this.port } : {}),
       ...(this.binaryPath ? { binaryPath: this.binaryPath } : {}),
-      ...(this.state === 'unavailable'
-        ? { installCommand: 'brew install code-server' }
-        : {}),
+      ...(this.state === 'unavailable' ? { installCommand: 'brew install code-server' } : {}),
       ...(this.lastError ? { error: this.lastError } : {}),
     };
   }
@@ -116,10 +114,17 @@ export class CodeServerManager {
       proc.kill('SIGTERM');
       await new Promise<void>((resolve) => {
         const timer = setTimeout(() => {
-          try { proc.kill('SIGKILL'); } catch { /* already dead */ }
+          try {
+            proc.kill('SIGKILL');
+          } catch {
+            /* already dead */
+          }
           resolve();
         }, 2000);
-        proc.once('exit', () => { clearTimeout(timer); resolve(); });
+        proc.once('exit', () => {
+          clearTimeout(timer);
+          resolve();
+        });
       });
     } catch {
       // best effort
@@ -188,10 +193,13 @@ export class CodeServerManager {
         (res) => {
           res.resume();
           resolve(res.statusCode === 200);
-        }
+        },
       );
       req.on('error', () => resolve(false));
-      req.on('timeout', () => { req.destroy(); resolve(false); });
+      req.on('timeout', () => {
+        req.destroy();
+        resolve(false);
+      });
     });
   }
 

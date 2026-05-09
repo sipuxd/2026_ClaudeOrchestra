@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { classifyComplexity } from '../src/router/complexity-router.js';
 
 describe('classifyComplexity', () => {
@@ -17,7 +17,9 @@ describe('classifyComplexity', () => {
   });
 
   it('classifies short content creation as simple', () => {
-    expect(classifyComplexity("Create hello.txt with the content 'Hello from ClaudeOrchestra!'")).toBe('simple');
+    expect(
+      classifyComplexity("Create hello.txt with the content 'Hello from ClaudeOrchestra!'"),
+    ).toBe('simple');
   });
 
   it('classifies single-word tasks as simple', () => {
@@ -69,7 +71,8 @@ describe('classifyComplexity', () => {
   // --- Standard tasks (word count trigger) ---
 
   it('classifies long descriptions as standard regardless of keywords', () => {
-    const longDesc = 'Create a file in the project root directory that contains a greeting message ' +
+    const longDesc =
+      'Create a file in the project root directory that contains a greeting message ' +
       'and make sure the file is properly formatted with correct line endings';
     expect(classifyComplexity(longDesc)).toBe('standard');
   });

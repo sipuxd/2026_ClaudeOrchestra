@@ -20,8 +20,9 @@ export function toCodexReasoningEffort(effort: EffortLevel): CodexReasoningEffor
   return effort;
 }
 
-export function toProviderEffort(provider: AgentProvider, effort: EffortLevel): ClaudeEffortLevel | CodexReasoningEffort {
-  return provider === 'claude'
-    ? toClaudeEffort(effort)
-    : toCodexReasoningEffort(effort);
+export function toProviderEffort(
+  provider: AgentProvider,
+  effort: EffortLevel,
+): ClaudeEffortLevel | CodexReasoningEffort {
+  return provider === 'claude' ? toClaudeEffort(effort) : toCodexReasoningEffort(effort);
 }

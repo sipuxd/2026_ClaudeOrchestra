@@ -4,11 +4,11 @@
 // Commands: create-team, assign-task, status, list, dashboard
 
 import * as path from 'node:path';
-import { PipelineOrchestrator, type PipelineOrchestraConfig } from './pipeline-orchestrator.js';
-import { DashboardServer } from './dashboard/index.js';
-import { TeamPhase } from './state/team-state.js';
-import { Logger } from './logger/logger.js';
 import { applyCliOverrides, buildPipelineConfig, loadConfig, resolveConfigPath } from './config.js';
+import { DashboardServer } from './dashboard/index.js';
+import { Logger } from './logger/logger.js';
+import { type PipelineOrchestraConfig, PipelineOrchestrator } from './pipeline-orchestrator.js';
+import { TeamPhase } from './state/team-state.js';
 
 // --- CLI Argument Parsing ---
 
@@ -71,7 +71,6 @@ function logError(msg: string): void {
   console.error(`${colors.brightRed}ERROR:${colors.reset} ${msg}`);
 }
 
-
 function getRoleColor(instance: string): string {
   if (instance.startsWith('Worker')) return colors.green;
   if (instance.startsWith('Security')) return colors.red;
@@ -132,14 +131,18 @@ ${colors.bold}Agents:${colors.reset}`);
 
   for (const [instance, agent] of Object.entries(status.agents)) {
     const roleColor = getRoleColor(instance);
-    const stateIndicator = agent.state === 'active' ? colors.green + 'active' :
-      agent.state === 'errored' ? colors.brightRed + 'errored' :
-      agent.state === 'idle' ? colors.dim + 'idle' :
-      colors.yellow + agent.state;
+    const stateIndicator =
+      agent.state === 'active'
+        ? colors.green + 'active'
+        : agent.state === 'errored'
+          ? colors.brightRed + 'errored'
+          : agent.state === 'idle'
+            ? colors.dim + 'idle'
+            : colors.yellow + agent.state;
     console.log(
       `  ${roleColor}${instance}${colors.reset}: ${stateIndicator}${colors.reset}` +
-      (agent.currentJob ? ` — ${agent.currentJob}` : '') +
-      (agent.pid ? ` (pid ${agent.pid})` : '')
+        (agent.currentJob ? ` — ${agent.currentJob}` : '') +
+        (agent.pid ? ` (pid ${agent.pid})` : ''),
     );
   }
   console.log();
@@ -149,16 +152,20 @@ function showList(orchestrator: PipelineOrchestrator): void {
   const teams = orchestrator.getAllTeams();
   const runtime = orchestrator.getAgentRuntime();
   if (teams.length === 0) {
-    console.log(`No active teams. Runtime: ${runtime.provider} / ${runtime.auth} / ${runtime.model ?? 'default'}.`);
+    console.log(
+      `No active teams. Runtime: ${runtime.provider} / ${runtime.auth} / ${runtime.model ?? 'default'}.`,
+    );
     return;
   }
 
-  console.log(`\n${colors.bold}Active Teams:${colors.reset} ${colors.dim}(runtime: ${runtime.provider} / ${runtime.auth} / ${runtime.model ?? 'default'})${colors.reset}\n`);
+  console.log(
+    `\n${colors.bold}Active Teams:${colors.reset} ${colors.dim}(runtime: ${runtime.provider} / ${runtime.auth} / ${runtime.model ?? 'default'})${colors.reset}\n`,
+  );
   for (const t of teams) {
     const phaseColor = PHASE_COLORS[t.currentPhase] ?? colors.reset;
     console.log(
       `  ${t.teamId}: ${phaseColor}${t.currentPhase}${colors.reset}` +
-      (t.currentTask ? ` — ${t.currentTask.description.substring(0, 60)}` : '')
+        (t.currentTask ? ` — ${t.currentTask.description.substring(0, 60)}` : ''),
     );
   }
   console.log();
@@ -308,15 +315,25 @@ async function main(): Promise<void> {
 
       await dashboard.start();
       const runtime = orchestrator.getAgentRuntime();
-      log(`${colors.green}Dashboard running at${colors.reset} ${colors.bold}http://localhost:${port}${colors.reset}`);
-      log(`${colors.green}Agent runtime:${colors.reset} ${colors.bold}${runtime.provider}${colors.reset} / ${runtime.auth} / ${runtime.model ?? 'default'}`);
-      log(`${colors.dim}Create teams and launch tasks from the browser. Press Ctrl+C to stop.${colors.reset}`);
+      log(
+        `${colors.green}Dashboard running at${colors.reset} ${colors.bold}http://localhost:${port}${colors.reset}`,
+      );
+      log(
+        `${colors.green}Agent runtime:${colors.reset} ${colors.bold}${runtime.provider}${colors.reset} / ${runtime.auth} / ${runtime.model ?? 'default'}`,
+      );
+      log(
+        `${colors.dim}Create teams and launch tasks from the browser. Press Ctrl+C to stop.${colors.reset}`,
+      );
 
       // Auto-open browser (best effort, macOS/Linux/Windows)
       try {
         const { exec } = await import('node:child_process');
-        const openCmd = process.platform === 'darwin' ? 'open' :
-                        process.platform === 'win32' ? 'start' : 'xdg-open';
+        const openCmd =
+          process.platform === 'darwin'
+            ? 'open'
+            : process.platform === 'win32'
+              ? 'start'
+              : 'xdg-open';
         exec(`${openCmd} http://localhost:${port}`);
       } catch {
         // Silent fail — user can open manually

@@ -1,7 +1,7 @@
-import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   applyCliOverrides,
   buildPipelineConfig,
@@ -23,55 +23,59 @@ afterEach(() => {
 describe('config loading', () => {
   it('loads all orchestrator config sections from JSON', () => {
     const configPath = path.join(tmpDir, 'orchestra.config.json');
-    fs.writeFileSync(configPath, JSON.stringify({
-      agentRuntime: {
-        provider: 'codex',
-        auth: 'subscription',
-        model: 'gpt-5.5',
-      },
-      engine: {
-        registryPath: './registry.test.json',
-        logDirectory: './test-logs',
-        rolesDir: './test-agents',
-      },
-      teams: {
-        maxConcurrentTeams: 2,
-      },
-      limits: {
-        maxRevisions: 4,
-      },
-      models: {
-        Worker: 'claude-sonnet-4-6',
-      },
-      efforts: {
-        Worker: 'xhigh',
-        Security: 'high',
-      },
-      disallowedTools: {
-        Security: ['Write', 'Edit', 'Bash'],
-      },
-      maxTurns: {
-        Worker: 50,
-      },
-      guardrails: {
-        enabled: true,
-        abortCodexOnForbiddenStreamEvent: false,
-      },
-      contracts: {
-        mode: 'phased-fallback',
-        validationRetries: 1,
-      },
-      review: {
-        complexFileThreshold: 8,
-        complexDiffLineThreshold: 600,
-        maxFilesPerBatch: 5,
-      },
-      recovery: {
-        maxProviderRetries: 2,
-        initialBackoffMs: 1000,
-      },
-      skipRequirements: true,
-    }), 'utf-8');
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        agentRuntime: {
+          provider: 'codex',
+          auth: 'subscription',
+          model: 'gpt-5.5',
+        },
+        engine: {
+          registryPath: './registry.test.json',
+          logDirectory: './test-logs',
+          rolesDir: './test-agents',
+        },
+        teams: {
+          maxConcurrentTeams: 2,
+        },
+        limits: {
+          maxRevisions: 4,
+        },
+        models: {
+          Worker: 'claude-sonnet-4-6',
+        },
+        efforts: {
+          Worker: 'xhigh',
+          Security: 'high',
+        },
+        disallowedTools: {
+          Security: ['Write', 'Edit', 'Bash'],
+        },
+        maxTurns: {
+          Worker: 50,
+        },
+        guardrails: {
+          enabled: true,
+          abortCodexOnForbiddenStreamEvent: false,
+        },
+        contracts: {
+          mode: 'phased-fallback',
+          validationRetries: 1,
+        },
+        review: {
+          complexFileThreshold: 8,
+          complexDiffLineThreshold: 600,
+          maxFilesPerBatch: 5,
+        },
+        recovery: {
+          maxProviderRetries: 2,
+          initialBackoffMs: 1000,
+        },
+        skipRequirements: true,
+      }),
+      'utf-8',
+    );
 
     const config = loadConfig(configPath);
 
@@ -115,23 +119,26 @@ describe('config loading', () => {
   });
 
   it('uses CLI flags as value overrides after loading the selected config file', () => {
-    const config = applyCliOverrides({
-      registryPath: './from-file.json',
-      agentRuntime: {
-        provider: 'claude',
-        auth: 'subscription',
-        model: 'claude-opus-4-6',
+    const config = applyCliOverrides(
+      {
+        registryPath: './from-file.json',
+        agentRuntime: {
+          provider: 'claude',
+          auth: 'subscription',
+          model: 'claude-opus-4-6',
+        },
+        models: {
+          [Role.Worker]: 'claude-role-model',
+        },
       },
-      models: {
-        [Role.Worker]: 'claude-role-model',
+      {
+        '--registry': './from-cli.json',
+        '--provider': 'codex',
+        '--model': 'gpt-5.5',
+        '--model-worker': 'gpt-5.5-worker',
+        '--max-teams': '7',
       },
-    }, {
-      '--registry': './from-cli.json',
-      '--provider': 'codex',
-      '--model': 'gpt-5.5',
-      '--model-worker': 'gpt-5.5-worker',
-      '--max-teams': '7',
-    });
+    );
 
     expect(config.registryPath).toBe('./from-cli.json');
     expect(config.agentRuntime).toEqual({
@@ -174,12 +181,22 @@ describe('config loading', () => {
   });
 
   it('selects the config file path before applying value overrides', () => {
-    expect(resolveConfigPath({ '--config': './cli.json' }, {
-      CLAUDE_ORCHESTRA_CONFIG: './env.json',
-    })).toBe('./cli.json');
-    expect(resolveConfigPath({}, {
-      CLAUDE_ORCHESTRA_CONFIG: './env.json',
-    })).toBe('./env.json');
+    expect(
+      resolveConfigPath(
+        { '--config': './cli.json' },
+        {
+          CLAUDE_ORCHESTRA_CONFIG: './env.json',
+        },
+      ),
+    ).toBe('./cli.json');
+    expect(
+      resolveConfigPath(
+        {},
+        {
+          CLAUDE_ORCHESTRA_CONFIG: './env.json',
+        },
+      ),
+    ).toBe('./env.json');
     expect(resolveConfigPath({}, {})).toBe('./orchestra.config.json');
   });
 });

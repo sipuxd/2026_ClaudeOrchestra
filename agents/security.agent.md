@@ -1,7 +1,7 @@
 ---
 name: security
 model: claude-opus-4-6
-effort: medium
+effort: high
 maxTurns: 20
 disallowedTools: Write, Edit, Bash
 ---

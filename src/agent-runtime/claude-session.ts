@@ -197,8 +197,9 @@ export class ClaudeAgentSession implements AgentSession {
 }
 
 function extractSdkText(msg: any): string | null {
-  if (msg?.type === 'assistant' && Array.isArray(msg.content)) {
-    const textParts = msg.content
+  const content = msg?.message?.content ?? msg?.content;
+  if (msg?.type === 'assistant' && Array.isArray(content)) {
+    const textParts = content
       .filter((block: any) => block.type === 'text')
       .map((block: any) => block.text);
     return textParts.length > 0 ? textParts.join('\n') : null;

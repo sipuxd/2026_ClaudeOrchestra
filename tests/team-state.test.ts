@@ -17,14 +17,14 @@ import { StatePersistence } from '../src/state/persistence.js';
 // =============================================
 
 describe('TeamState creation', () => {
-  it('creates a team with all 4 agents in spawning state', () => {
+  it('creates a team with all 5 agents in spawning state', () => {
     const team = TeamState.create('team-1', 'my-project', '/path/to/project');
 
     expect(team.teamId).toBe('team-1');
     expect(team.currentPhase).toBe(TeamPhase.PreWork);
 
     const agents = team.getAllAgents();
-    expect(agents).toHaveLength(4);
+    expect(agents).toHaveLength(5);
 
     for (const [, agent] of agents) {
       expect(agent.state).toBe(AgentState.Spawning);
@@ -38,6 +38,7 @@ describe('TeamState creation', () => {
     expect(team.getAgent('Worker-2')?.role).toBe(Role.Worker);
     expect(team.getAgent('Security-1')?.role).toBe(Role.Security);
     expect(team.getAgent('Reviewer-1')?.role).toBe(Role.Reviewer);
+    expect(team.getAgent('Coordinator-1')?.role).toBe(Role.Coordinator);
   });
 
   it('starts with zero counters', () => {
@@ -479,7 +480,7 @@ describe('StatePersistence', () => {
     expect(loaded!.teamId).toBe('team-1');
     expect(loaded!.teamName).toBe('test');
     expect(loaded!.currentPhase).toBe(TeamPhase.PreWork);
-    expect(Object.keys(loaded!.agents)).toHaveLength(4);
+    expect(Object.keys(loaded!.agents)).toHaveLength(5);
   });
 
   it('returns null for nonexistent team', () => {
@@ -523,6 +524,55 @@ describe('StatePersistence', () => {
 
     const loaded = persistence.load('team-1');
     expect(loaded!.currentPhase).toBe(TeamPhase.Work);
+  });
+
+  it('appends chat messages to chat.jsonl and reloads them with the team', () => {
+    const teamDir = registerTeam('team-1');
+    persistence.ensureTeamDir('team-1');
+    const team = TeamState.create('team-1', 'test', '/path');
+    persistence.persistNow(team);
+
+    persistence.appendChatMessage('team-1', {
+      role: 'user',
+      content: 'Build a settings page',
+      timestamp: '2026-05-09T10:00:00.000Z',
+    });
+    persistence.appendChatMessage('team-1', {
+      role: 'coordinator',
+      content: 'Add a settings page at /settings',
+      timestamp: '2026-05-09T10:00:01.000Z',
+      verdict: 'TRIGGER_PIPELINE',
+    });
+
+    // chat.jsonl exists alongside state.json — and is line-delimited JSON.
+    const chatPath = path.join(teamDir, 'chat.jsonl');
+    expect(fs.existsSync(chatPath)).toBe(true);
+    const raw = fs.readFileSync(chatPath, 'utf-8');
+    expect(raw.split('\n').filter(Boolean)).toHaveLength(2);
+
+    // load() hydrates chatHistory from chat.jsonl.
+    const loaded = persistence.load('team-1');
+    expect(loaded!.chatHistory).toHaveLength(2);
+    expect(loaded!.chatHistory[0].role).toBe('user');
+    expect(loaded!.chatHistory[1].verdict).toBe('TRIGGER_PIPELINE');
+  });
+
+  it('does NOT write chatHistory into state.json (chat.jsonl is canonical)', () => {
+    const teamDir = registerTeam('team-1');
+    persistence.ensureTeamDir('team-1');
+    const team = TeamState.create('team-1', 'test', '/path');
+    team.appendChatMessage({
+      role: 'user',
+      content: 'hello',
+      timestamp: '2026-05-09T10:00:00.000Z',
+    });
+    persistence.persistNow(team);
+
+    const stateJsonRaw = fs.readFileSync(path.join(teamDir, 'state.json'), 'utf-8');
+    const parsed = JSON.parse(stateJsonRaw);
+    // chatHistory must be absent from state.json — keeping it out of dirty-flush
+    // writes is the whole reason chat.jsonl exists as the canonical store.
+    expect(parsed.chatHistory).toBeUndefined();
   });
 
   it('debounces non-phase-transition writes', async () => {

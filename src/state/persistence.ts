@@ -9,7 +9,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { TeamState, type TeamStateData } from './team-state.js';
+import { TeamState, type TeamStateData, type ChatMessage } from './team-state.js';
 
 export interface PersistenceOptions {
   /** Debounce interval in ms (default: 1000) */
@@ -51,6 +51,15 @@ export class StatePersistence {
       throw new Error(`No directory registered for team "${teamId}". Call registerTeamDir() first.`);
     }
     return path.join(dir, 'state.json');
+  }
+
+  /** Get the chat.jsonl path for a team. */
+  private chatPath(teamId: string): string {
+    const dir = this.teamDirs.get(teamId);
+    if (!dir) {
+      throw new Error(`No directory registered for team "${teamId}". Call registerTeamDir() first.`);
+    }
+    return path.join(dir, 'chat.jsonl');
   }
 
   /** Ensure the team directory exists. */
@@ -98,13 +107,16 @@ export class StatePersistence {
 
   /**
    * Read persisted state for a team. Returns null if no state file exists.
+   * Hydrates chatHistory from chat.jsonl if present.
    */
   load(teamId: string): TeamStateData | null {
     const filePath = this.statePath(teamId);
     if (!fs.existsSync(filePath)) return null;
     try {
       const content = fs.readFileSync(filePath, 'utf-8');
-      return JSON.parse(content) as TeamStateData;
+      const data = JSON.parse(content) as TeamStateData;
+      data.chatHistory = this.readChatFile(this.chatPath(teamId));
+      return data;
     } catch {
       return null;
     }
@@ -113,15 +125,49 @@ export class StatePersistence {
   /**
    * Load state from a specific directory path (used by recover()
    * when reading from registry entries before the team is registered).
+   * Hydrates chatHistory from sibling chat.jsonl if present.
    */
   loadFromDir(teamDir: string): TeamStateData | null {
     const filePath = path.join(teamDir, 'state.json');
     if (!fs.existsSync(filePath)) return null;
     try {
       const content = fs.readFileSync(filePath, 'utf-8');
-      return JSON.parse(content) as TeamStateData;
+      const data = JSON.parse(content) as TeamStateData;
+      data.chatHistory = this.readChatFile(path.join(teamDir, 'chat.jsonl'));
+      return data;
     } catch {
       return null;
+    }
+  }
+
+  /**
+   * Append a single chat message to the team's chat.jsonl.
+   * The orchestrator calls this on every user/coordinator message; chat.jsonl
+   * is the canonical source of truth for chat history (state.json does not
+   * carry it). Append is atomic at the line boundary because the file is
+   * opened with append-mode and a single write per call.
+   */
+  appendChatMessage(teamId: string, message: ChatMessage): void {
+    const dir = this.teamDirs.get(teamId);
+    if (!dir) {
+      throw new Error(`No directory registered for team "${teamId}". Call registerTeamDir() first.`);
+    }
+    fs.mkdirSync(dir, { recursive: true });
+    const filePath = path.join(dir, 'chat.jsonl');
+    fs.appendFileSync(filePath, JSON.stringify(message) + '\n', 'utf-8');
+  }
+
+  /** Read every line of chat.jsonl as a ChatMessage[]. Returns [] if missing. */
+  private readChatFile(filePath: string): ChatMessage[] {
+    if (!fs.existsSync(filePath)) return [];
+    try {
+      const content = fs.readFileSync(filePath, 'utf-8');
+      return content
+        .split('\n')
+        .filter(line => line.trim().length > 0)
+        .map(line => JSON.parse(line) as ChatMessage);
+    } catch {
+      return [];
     }
   }
 
@@ -153,7 +199,10 @@ export class StatePersistence {
     const finalPath = path.join(dir, 'state.json');
     const tmpPath = path.join(dir, `.tmp-state-${randomUUID()}.json`);
 
-    const json = JSON.stringify(state.snapshot, null, 2);
+    // chatHistory lives in chat.jsonl (append-only) — exclude from state.json
+    // so we don't rewrite the entire conversation on every dirty-state flush.
+    const { chatHistory: _omit, ...withoutChat } = state.snapshot;
+    const json = JSON.stringify(withoutChat, null, 2);
     fs.writeFileSync(tmpPath, json, 'utf-8');
     fs.renameSync(tmpPath, finalPath);
 

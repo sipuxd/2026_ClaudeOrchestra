@@ -18,7 +18,7 @@ import { EventEmitter } from 'node:events';
 import { Role, type RoleInstance } from './roles/role-types.js';
 import { INSTANCE_AGENT_FILES, INSTANCE_TO_ROLE, ALL_INSTANCES } from './spawner/agent-files.js';
 import { AgentState } from './types/index.js';
-import { TeamState, TeamPhase, type TeamStateData, type LoopLimits, DEFAULT_LOOP_LIMITS } from './state/team-state.js';
+import { TeamState, TeamPhase, type TeamStateData, type LoopLimits, type ChatMessage, DEFAULT_LOOP_LIMITS } from './state/team-state.js';
 import { StatePersistence } from './state/persistence.js';
 import { Registry } from './registry.js';
 import { GitOps } from './git.js';
@@ -64,6 +64,11 @@ export interface OrchestratorEvents {
   'pr-created': [teamId: string, prNumber: number, prUrl: string];
   'team-archived': [teamId: string, prUrl: string];
   'team-deleted': [teamId: string];
+  // Emitted on every user/coordinator message and on synthetic system notes
+  // (e.g. "Pipeline started for: ..."). Dashboard appends to the team's chat
+  // panel. Includes the verdict for coordinator messages so the UI can style
+  // TRIGGER_PIPELINE differently from RESPONDING/ASKING.
+  'chat-message': [teamId: string, message: ChatMessage];
   'shutdown': [];
 }
 
@@ -91,6 +96,7 @@ const FALLBACK_MAX_TURNS = 20;
 export type SecurityVerdict = 'APPROVED' | 'FLAGGED' | 'BLOCKED';
 export type ReviewVerdict = 'APPROVED' | 'REVISION_NEEDED' | 'REJECTED';
 export type VerifyVerdict = 'COMPLETE' | 'GAPS_FOUND';
+export type ChatVerdict = 'RESPONDING' | 'ASKING' | 'TRIGGER_PIPELINE';
 export type TaskClassification = 'SIMPLE' | 'STANDARD' | 'COMPLEX';
 
 export interface ParsedVerdict<V extends string> {
@@ -160,6 +166,20 @@ export function parseVerifyVerdict(text: string): VerdictResult<VerifyVerdict> {
   if (upper.startsWith('GAPS_FOUND')) return { verdict: 'GAPS_FOUND', details: trimmed };
   if (upper.startsWith('COMPLETE')) return { verdict: 'COMPLETE', details: trimmed };
   return { verdict: 'AMBIGUOUS', raw: trimmed };
+}
+
+// Coordinator-1 verdict: RESPONDING | ASKING | TRIGGER_PIPELINE.
+// `details` contains everything AFTER the verdict word on the first line, plus
+// any subsequent lines, trimmed. Body is what the orchestrator routes to chat
+// (for RESPONDING / ASKING) or to assignTask (for TRIGGER_PIPELINE).
+export function parseChatVerdict(text: string): VerdictResult<ChatVerdict> {
+  const stripped = text.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
+  const trimmed = stripped.trimStart();
+  const match = trimmed.match(/^(TRIGGER_PIPELINE|RESPONDING|ASKING)\b\s*[:\-—]?\s*([\s\S]*)$/i);
+  if (!match) return { verdict: 'AMBIGUOUS', raw: trimmed };
+  const verdict = match[1].toUpperCase() as ChatVerdict;
+  const body = match[2].trim();
+  return { verdict, details: body };
 }
 
 const MAX_VERIFY_PASSES = 2;
@@ -309,6 +329,14 @@ interface PipelineTeamContext {
   securityReviewSession?: AgentSession;
   /** Whether Security-1 classified the task as COMPLEX */
   isComplex?: boolean;
+  /** Long-running Coordinator-1 session for the team's chat panel.
+   *  Created at team creation, kept alive across pipeline runs, closed on
+   *  terminateTeam. Lazy-spawned when sendChatMessage is called for a
+   *  recovered team that pre-dates the chat feature. */
+  coordinatorSession?: AgentSession;
+  /** Serializes sendChatMessage calls so concurrent dashboard messages don't
+   *  interleave on the same coordinator session. */
+  chatLock?: Promise<void>;
 }
 
 // --- PipelineOrchestrator ---
@@ -438,9 +466,186 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     };
 
     this.teams.set(teamId, ctx);
+
+    // Coordinator-1 is lazy-spawned on the first sendChatMessage so we don't
+    // pay the SDK cold-start cost for teams that never use the chat panel,
+    // and so the existing pipeline test fixtures don't see an extra session
+    // appear before assignTask runs.
+
     this.emit('team-created', teamId);
 
     return state;
+  }
+
+  // --- Chat (Coordinator-1) ---
+
+  /**
+   * Send a user message to a team's Coordinator-1. Appends to chat.jsonl,
+   * sends the full chat history to the coordinator, parses its verdict, and
+   * dispatches:
+   *   - RESPONDING / ASKING → coordinator's reply goes back to chat
+   *   - TRIGGER_PIPELINE → kicks off assignTask with the body as task
+   *
+   * Serialized per team via ctx.chatLock so two concurrent dashboard messages
+   * don't interleave on the same coordinator session.
+   */
+  async sendChatMessage(teamId: string, userMessage: string): Promise<void> {
+    if (this.shuttingDown) {
+      throw new Error('Orchestrator is shutting down');
+    }
+    const ctx = this.teams.get(teamId);
+    if (!ctx) throw new Error(`Team "${teamId}" not found`);
+    const text = userMessage.trim();
+    if (!text) throw new Error('Empty chat message');
+
+    const previous = ctx.chatLock ?? Promise.resolve();
+    const next = previous.then(() => this.handleChatTurn(teamId, ctx, text));
+    ctx.chatLock = next.catch(() => undefined);
+    return next;
+  }
+
+  private async handleChatTurn(
+    teamId: string,
+    ctx: PipelineTeamContext,
+    userMessage: string
+  ): Promise<void> {
+    // 1. Persist + emit the user's message immediately so the UI feels live.
+    const userMsg: ChatMessage = {
+      role: 'user',
+      content: userMessage,
+      timestamp: new Date().toISOString(),
+    };
+    ctx.state.appendChatMessage(userMsg);
+    this.persistence.appendChatMessage(teamId, userMsg);
+    this.emit('chat-message', teamId, userMsg);
+
+    // 2. Lazy-spawn the coordinator session if missing (e.g. recovered team
+    //    that pre-dates the chat feature, or the createTeam-time spawn failed).
+    if (!ctx.coordinatorSession || ctx.coordinatorSession.closed) {
+      try {
+        ctx.coordinatorSession = this.createSession(
+          'Coordinator-1',
+          ctx.state.snapshot.projectPath,
+          (text) => this.emit('agent-progress', teamId, 'Coordinator-1', text),
+        );
+      } catch (err: any) {
+        const errMsg: ChatMessage = {
+          role: 'system',
+          content: `Could not start Coordinator-1: ${err.message}`,
+          timestamp: new Date().toISOString(),
+        };
+        ctx.state.appendChatMessage(errMsg);
+        this.persistence.appendChatMessage(teamId, errMsg);
+        this.emit('chat-message', teamId, errMsg);
+        return;
+      }
+    }
+
+    // 3. Build the full-history prompt. Claude Agent SDK does not auto-persist
+    //    session state across send() calls, so we replay history every turn.
+    const prompt = this.buildCoordinatorPrompt(ctx);
+
+    // 4. Send + parse verdict with the same fail-loud pattern as other gates.
+    let parsed: ParsedVerdict<ChatVerdict>;
+    try {
+      parsed = await sendWithVerdict(
+        ctx.coordinatorSession,
+        prompt,
+        parseChatVerdict,
+        ['RESPONDING', 'ASKING', 'TRIGGER_PIPELINE'] as const,
+        {
+          onResponse: (raw) => this.emit('agent-output', teamId, 'Coordinator-1', raw),
+          onMalformed: (raw) => this.emit('malformed-output', teamId, 'Coordinator-1', raw),
+        },
+        'Coordinator-1',
+      );
+    } catch (err: any) {
+      const errMsg: ChatMessage = {
+        role: 'system',
+        content: `Coordinator-1 emitted unparseable output twice. ${err.message}`,
+        timestamp: new Date().toISOString(),
+      };
+      ctx.state.appendChatMessage(errMsg);
+      this.persistence.appendChatMessage(teamId, errMsg);
+      this.emit('chat-message', teamId, errMsg);
+      return;
+    }
+
+    // 5. Persist + emit the coordinator's response.
+    const reply: ChatMessage = {
+      role: 'coordinator',
+      content: parsed.details,
+      timestamp: new Date().toISOString(),
+      verdict: parsed.verdict,
+    };
+    ctx.state.appendChatMessage(reply);
+    this.persistence.appendChatMessage(teamId, reply);
+    this.emit('chat-message', teamId, reply);
+
+    // 6. If TRIGGER_PIPELINE, dispatch the body as a new task. Don't await
+    //    the pipeline — the chat turn ends here. Pipeline progress streams
+    //    back via the existing agent-output/phase-transition events.
+    if (parsed.verdict === 'TRIGGER_PIPELINE') {
+      const task = parsed.details;
+      if (!task) {
+        const warn: ChatMessage = {
+          role: 'system',
+          content: 'Coordinator emitted TRIGGER_PIPELINE with an empty body. Ignoring.',
+          timestamp: new Date().toISOString(),
+        };
+        ctx.state.appendChatMessage(warn);
+        this.persistence.appendChatMessage(teamId, warn);
+        this.emit('chat-message', teamId, warn);
+        return;
+      }
+      try {
+        this.assignTask(teamId, task);
+      } catch (err: any) {
+        const errMsg: ChatMessage = {
+          role: 'system',
+          content: `Could not start pipeline: ${err.message}`,
+          timestamp: new Date().toISOString(),
+        };
+        ctx.state.appendChatMessage(errMsg);
+        this.persistence.appendChatMessage(teamId, errMsg);
+        this.emit('chat-message', teamId, errMsg);
+      }
+    }
+  }
+
+  private buildCoordinatorPrompt(ctx: PipelineTeamContext): string {
+    const { teamName, projectPath, currentPhase, currentTask } = ctx.state.snapshot;
+    const history = ctx.state.getChatHistory();
+
+    const lines: string[] = [
+      `TEAM: ${teamName}`,
+      `PROJECT: ${projectPath}`,
+      `CURRENT PHASE: ${currentPhase}`,
+    ];
+    if (currentTask?.description) {
+      lines.push(`MOST RECENT TASK: ${currentTask.description}`);
+    }
+    lines.push('', 'CONVERSATION HISTORY:');
+
+    for (const msg of history) {
+      if (msg.role === 'user') {
+        lines.push(`[user] ${msg.content}`);
+      } else if (msg.role === 'coordinator') {
+        const v = msg.verdict ?? 'RESPONDING';
+        lines.push(`[coordinator ${v}] ${msg.content}`);
+      } else {
+        lines.push(`[system] ${msg.content}`);
+      }
+    }
+
+    lines.push(
+      '',
+      'Respond to the LAST user message above. Begin your response with one of:',
+      '  RESPONDING — your reply goes to chat as-is',
+      '  ASKING — your reply is a clarifying question',
+      '  TRIGGER_PIPELINE — body becomes the task description for a new pipeline run',
+    );
+    return lines.join('\n');
   }
 
   // --- Recovery ---
@@ -649,6 +854,12 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     // Close all active sessions
     this.closeSessions(ctx);
 
+    // Also close the long-running coordinator chat session if alive.
+    if (ctx.coordinatorSession && !ctx.coordinatorSession.closed) {
+      try { ctx.coordinatorSession.close(); } catch { /* best effort */ }
+      ctx.coordinatorSession = undefined;
+    }
+
     if (!ctx.state.isTerminal) {
       const fromPhase = ctx.state.currentPhase;
       try {
@@ -678,6 +889,10 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
     for (const [, ctx] of this.teams) {
       this.closeSessions(ctx);
+      if (ctx.coordinatorSession && !ctx.coordinatorSession.closed) {
+        try { ctx.coordinatorSession.close(); } catch { /* best effort */ }
+        ctx.coordinatorSession = undefined;
+      }
       if (!ctx.state.isTerminal) {
         try {
           ctx.state.transitionPhase(TeamPhase.Cancelled);

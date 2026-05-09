@@ -156,6 +156,10 @@ export class DashboardServer {
       this.broadcast('team-deleted', { teamId });
     });
 
+    this.orchestrator.on('chat-message', (teamId, message) => {
+      this.broadcast('chat-message', { teamId, message });
+    });
+
     this.orchestrator.on('shutdown', () => {
       this.broadcast('shutdown', {});
       for (const client of this.sseClients) {
@@ -245,6 +249,19 @@ export class DashboardServer {
     const askMatch = pathname.match(/^\/api\/teams\/([^/]+)\/ask$/);
     if (askMatch && method === 'POST') {
       this.handleAskAgent(decodeURIComponent(askMatch[1]), req, res);
+      return;
+    }
+
+    // Team-level Coordinator-1 chat. POST sends a user message, GET returns
+    // the team's full chat history. Both routes resolve the team by name
+    // (decoded so names with spaces/slashes work).
+    const chatPostMatch = pathname.match(/^\/api\/teams\/([^/]+)\/chat$/);
+    if (chatPostMatch && method === 'POST') {
+      this.handleSendChatMessage(decodeURIComponent(chatPostMatch[1]), req, res);
+      return;
+    }
+    if (chatPostMatch && method === 'GET') {
+      this.handleGetChatHistory(decodeURIComponent(chatPostMatch[1]), res);
       return;
     }
 
@@ -493,6 +510,50 @@ export class DashboardServer {
     } catch (err: any) {
       this.sendJSON(res, { error: err.message }, 400);
     }
+  }
+
+  // POST /api/teams/:id/chat — body { message: string }. Fire-and-forget;
+  // both the user message and the coordinator's reply (and any TRIGGER_PIPELINE
+  // synthetic notes) flow back to the dashboard via the chat-message SSE event,
+  // so the route returns 202 immediately.
+  private async handleSendChatMessage(
+    teamId: string,
+    req: http.IncomingMessage,
+    res: http.ServerResponse
+  ): Promise<void> {
+    try {
+      const body = JSON.parse(await this.readBody(req));
+      const message = typeof body?.message === 'string' ? body.message.trim() : '';
+      if (!message) {
+        this.sendJSON(res, { error: 'message is required' }, 400);
+        return;
+      }
+      this.orchestrator.sendChatMessage(teamId, message).catch((err) => {
+        // Surface as a chat-message system note so the user sees what failed.
+        this.broadcast('chat-message', {
+          teamId,
+          message: {
+            role: 'system',
+            content: `Could not deliver chat message: ${err.message}`,
+            timestamp: new Date().toISOString(),
+          },
+        });
+      });
+      this.sendJSON(res, { ok: true }, 202);
+    } catch (err: any) {
+      this.sendJSON(res, { error: err.message }, 400);
+    }
+  }
+
+  // GET /api/teams/:id/chat — returns the team's chat history (read from the
+  // in-memory snapshot, which is hydrated from chat.jsonl on team load).
+  private handleGetChatHistory(teamId: string, res: http.ServerResponse): void {
+    const status = this.orchestrator.getTeamStatus(teamId);
+    if (!status) {
+      this.sendJSON(res, { error: `Team "${teamId}" not found` }, 404);
+      return;
+    }
+    this.sendJSON(res, { messages: status.chatHistory ?? [] });
   }
 
   private handleSecurityReview(

@@ -141,7 +141,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => {
 });
 
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
-import { PipelineOrchestrator, parseSecurityVerdict, parseReviewVerdict, parseVerifyVerdict, parseClassification, postProcessRequirements, sendWithVerdict, MalformedVerdictError } from '../src/pipeline-orchestrator.js';
+import { PipelineOrchestrator, parseSecurityVerdict, parseReviewVerdict, parseVerifyVerdict, parseChatVerdict, parseClassification, postProcessRequirements, sendWithVerdict, MalformedVerdictError } from '../src/pipeline-orchestrator.js';
 
 const GUARDED_ENV_KEYS = [
   'CLAUDE_CODE_USE_BEDROCK',
@@ -194,6 +194,8 @@ describe('PipelineOrchestrator', () => {
       '---\nname: security\nmodel: claude-opus-4-6\neffort: low\nmaxTurns: 5\ndisallowedTools: Write, Edit, Bash\n---\n\n# Security\nYou scan for security issues.');
     fs.writeFileSync(path.join(rolesDir, 'reviewer.agent.md'),
       '---\nname: reviewer\nmodel: claude-opus-4-6\neffort: low\nmaxTurns: 5\ndisallowedTools: Write, Edit, Bash\n---\n\n# Reviewer\nYou review code quality.');
+    fs.writeFileSync(path.join(rolesDir, 'coordinator.agent.md'),
+      '---\nname: coordinator\nmodel: claude-opus-4-6\neffort: medium\nmaxTurns: 100\ndisallowedTools: Write, Edit, Bash, NotebookEdit\n---\n\n# Coordinator\nYou hold the team chat.');
 
     mock = createPipelineMock();
     vi.mocked(sdkQuery).mockImplementation(mock.mockQueryFn);
@@ -411,7 +413,8 @@ describe('PipelineOrchestrator', () => {
       // Wait for session to be created
       await new Promise(resolve => setTimeout(resolve, 50));
 
-      // Simple task: only 1 query() call (Worker-1)
+      // Simple task: only 1 query() call (Worker-1). Coordinator-1 is
+      // lazy-spawned on first chat message and is not part of pipeline counts.
       expect(mock.sessions.length).toBe(1);
     });
 
@@ -534,7 +537,8 @@ describe('PipelineOrchestrator', () => {
       // Wait for sessions to be created
       await new Promise(resolve => setTimeout(resolve, 50));
 
-      // Standard task: 4 query() calls (Security, Worker-1, Worker-2, Reviewer)
+      // Standard task: 4 query() calls (Security, Worker-1, Worker-2, Reviewer).
+      // Coordinator-1 is lazy-spawned on first chat message and not in the count.
       expect(mock.sessions.length).toBe(4);
     });
 
@@ -1105,6 +1109,48 @@ describe('PipelineOrchestrator', () => {
   });
 
   // --- parseVerifyVerdict ---
+
+  describe('parseChatVerdict', () => {
+    it('parses RESPONDING with body on the same line', () => {
+      const result = parseChatVerdict('RESPONDING — Worker-2 flagged the missing test because the task description called for unit coverage.');
+      expect(result.verdict).toBe('RESPONDING');
+      if (result.verdict !== 'AMBIGUOUS') {
+        expect(result.details).toContain('flagged the missing test');
+      }
+    });
+
+    it('parses ASKING and extracts the body', () => {
+      const result = parseChatVerdict('ASKING\n\nDo you want vitest or jest for the new tests?');
+      expect(result.verdict).toBe('ASKING');
+      if (result.verdict !== 'AMBIGUOUS') {
+        expect(result.details).toContain('vitest or jest');
+      }
+    });
+
+    it('parses TRIGGER_PIPELINE with the task in the body', () => {
+      const body = 'Add a settings page at /settings with a dark mode toggle that persists to localStorage.';
+      const result = parseChatVerdict('TRIGGER_PIPELINE: ' + body);
+      expect(result.verdict).toBe('TRIGGER_PIPELINE');
+      if (result.verdict !== 'AMBIGUOUS') {
+        expect(result.details).toBe(body);
+      }
+    });
+
+    it('strips a leaked <thinking> block before applying the prefix check', () => {
+      const result = parseChatVerdict('<thinking>The user wants tests added.</thinking>\nTRIGGER_PIPELINE — Add unit tests for the auth module.');
+      expect(result.verdict).toBe('TRIGGER_PIPELINE');
+    });
+
+    it('returns AMBIGUOUS when no recognized prefix appears', () => {
+      const result = parseChatVerdict("Sure, I'll go ahead and start the pipeline now.");
+      expect(result.verdict).toBe('AMBIGUOUS');
+    });
+
+    it('is case-insensitive on the prefix', () => {
+      const result = parseChatVerdict('responding -- here is the answer.');
+      expect(result.verdict).toBe('RESPONDING');
+    });
+  });
 
   describe('parseVerifyVerdict', () => {
     it('parses COMPLETE', () => {

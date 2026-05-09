@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import { execSync } from 'node:child_process';
 import { TeamPhase } from '../src/state/team-state.js';
 import { Role } from '../src/roles/role-types.js';
+import { AgentState } from '../src/types/index.js';
 
 // --- Mock infrastructure for pipeline orchestrator ---
 // The pipeline creates multiple query() calls (one per agent session).
@@ -185,8 +186,10 @@ describe('PipelineOrchestrator', () => {
     fs.mkdirSync(rolesDir, { recursive: true });
 
     // Create role prompt files with frontmatter (config is read from frontmatter)
-    fs.writeFileSync(path.join(rolesDir, 'worker.agent.md'),
-      '---\nname: worker\nmodel: claude-opus-4-6\neffort: high\nmaxTurns: 50\n---\n\n# Worker\nYou execute coding tasks.');
+    fs.writeFileSync(path.join(rolesDir, 'worker-1.agent.md'),
+      '---\nname: worker-1\nmodel: claude-opus-4-6\neffort: high\nmaxTurns: 50\n---\n\n# Worker-1\nYou execute coding tasks.');
+    fs.writeFileSync(path.join(rolesDir, 'worker-2.agent.md'),
+      '---\nname: worker-2\nmodel: claude-opus-4-6\neffort: medium\nmaxTurns: 20\ndisallowedTools: Write, Edit, Bash\n---\n\n# Worker-2\nYou verify requirements.');
     fs.writeFileSync(path.join(rolesDir, 'security.agent.md'),
       '---\nname: security\nmodel: claude-opus-4-6\neffort: low\nmaxTurns: 5\ndisallowedTools: Write, Edit, Bash\n---\n\n# Security\nYou scan for security issues.');
     fs.writeFileSync(path.join(rolesDir, 'reviewer.agent.md'),
@@ -392,6 +395,26 @@ describe('PipelineOrchestrator', () => {
       expect(mock.sessions.length).toBe(1);
     });
 
+    it('does not block simple tasks on requirements extraction', async () => {
+      const orch = new PipelineOrchestrator({
+        registryPath: path.join(tmpDir, 'registry-simple-no-requirements.json'),
+        rolesDir,
+        maxConcurrentTeams: 3,
+      });
+
+      try {
+        orch.createTeam('simple-no-requirements', projectDir);
+        orch.assignTask('simple-no-requirements', 'build me a calculator');
+
+        await new Promise(resolve => setTimeout(resolve, 50));
+
+        expect(mock.sessions.length).toBe(1);
+        expect(mock.getSession(0).receivedMessages.join('\n')).toContain('build me a calculator');
+      } finally {
+        await orch.shutdown();
+      }
+    });
+
     it('completes simple pipeline with Worker-1 result', async () => {
       const completionPromise = new Promise<void>((resolve) => {
         orchestrator.on('task-complete', () => resolve());
@@ -417,6 +440,10 @@ describe('PipelineOrchestrator', () => {
 
       const status = orchestrator.getTeamStatus('simple');
       expect(status?.currentPhase).toBe(TeamPhase.Done);
+      expect(status?.agents['Worker-1'].state).toBe(AgentState.Done);
+      expect(status?.agents['Worker-2'].state).toBe(AgentState.Spawning);
+      expect(status?.agents['Security-1'].state).toBe(AgentState.Spawning);
+      expect(status?.agents['Reviewer-1'].state).toBe(AgentState.Spawning);
     });
 
     it('emits task-classified with simple complexity', () => {
@@ -560,6 +587,10 @@ describe('PipelineOrchestrator', () => {
 
       const status = orchestrator.getTeamStatus('standard');
       expect(status?.currentPhase).toBe(TeamPhase.Done);
+      expect(status?.agents['Security-1'].state).toBe(AgentState.Done);
+      expect(status?.agents['Worker-1'].state).toBe(AgentState.Done);
+      expect(status?.agents['Worker-2'].state).toBe(AgentState.Done);
+      expect(status?.agents['Reviewer-1'].state).toBe(AgentState.Done);
 
       expect(phases).toContain(TeamPhase.Work);
       expect(phases).toContain(TeamPhase.Handoff);
@@ -594,16 +625,18 @@ describe('PipelineOrchestrator', () => {
       }
     });
 
-    it('uses per-role effort levels', async () => {
+    it('uses per-instance effort levels from frontmatter', async () => {
       orchestrator.createTeam('standard', projectDir);
       orchestrator.assignTask('standard', 'implement user authentication with JWT tokens and database integration');
 
       await new Promise(resolve => setTimeout(resolve, 50));
 
-      // Sessions: [0]=Security, [1]=Worker-1, [2]=Worker-2, [3]=Reviewer
+      // Sessions: [0]=Security, [1]=Worker-1, [2]=Worker-2, [3]=Reviewer.
+      // Worker-1 and Worker-2 now load separate prompt files and may carry
+      // different effort levels in frontmatter (verifier needs less than implementer).
       expect(mock.getSession(0).options.effort).toBe('low');    // Security
-      expect(mock.getSession(1).options.effort).toBe('high');   // Worker-1
-      expect(mock.getSession(2).options.effort).toBe('high');   // Worker-2
+      expect(mock.getSession(1).options.effort).toBe('high');   // Worker-1 (implementer)
+      expect(mock.getSession(2).options.effort).toBe('medium'); // Worker-2 (verifier)
       expect(mock.getSession(3).options.effort).toBe('low');    // Reviewer
     });
   });
@@ -804,6 +837,16 @@ describe('PipelineOrchestrator', () => {
       });
       // Should use default registryPath, not crash
       expect(orch).toBeDefined();
+    });
+
+    it('enforces Worker-2 SDK-level tool denial via per-instance frontmatter', () => {
+      // Worker-2's frontmatter declares disallowedTools: Write, Edit, Bash.
+      // The orchestrator must pick this up per-instance, not per-role,
+      // otherwise Worker-1's empty disallowedTools would leak to Worker-2
+      // and the verifier could write/edit code despite its prompt.
+      const tools = (orchestrator as any).disallowedTools as Record<string, string[]>;
+      expect(tools['Worker-2']).toEqual(['Write', 'Edit', 'Bash']);
+      expect(tools['Worker-1']).toEqual([]);
     });
   });
 

@@ -44,7 +44,8 @@ describe('guardrail policy', () => {
 
   it('warns on dependency and runtime config paths', () => {
     expect(evaluateChangedPath('package.json').map(f => f.kind)).toContain('dependency_change');
-    expect(evaluateChangedPath('agents/worker.agent.md').map(f => f.kind)).toContain('runtime_config_change');
+    expect(evaluateChangedPath('agents/worker-1.agent.md').map(f => f.kind)).toContain('runtime_config_change');
+    expect(evaluateChangedPath('agents/worker-2.agent.md').map(f => f.kind)).toContain('runtime_config_change');
   });
 
   it('blocks forbidden shell commands', () => {

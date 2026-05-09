@@ -36,8 +36,8 @@ The `PipelineOrchestrator` is the brain. It creates provider-agnostic `AgentSess
 | Agent | What it does | Tools it cannot use |
 |-------|-------------|---------------------|
 | Security-1 | Pre-scan + post-sweep, classifies task complexity | Write, Edit, Bash |
-| Worker-1 | Implements the task | Full access |
-| Worker-2 | Verifies requirements only, never writes code | Full access |
+| Worker-1 | Implements the task (prompt: `agents/worker-1.agent.md`) | Full access |
+| Worker-2 | Verifies requirements only — read-only at the SDK boundary (prompt: `agents/worker-2.agent.md`) | Write, Edit, Bash |
 | Reviewer-1 | Code review, verdict: APPROVED/REVISION_NEEDED/REJECTED | Write, Edit, Bash |
 
 Agent prompts live in `agents/*.agent.md`.

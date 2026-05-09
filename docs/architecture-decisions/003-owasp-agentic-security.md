@@ -15,7 +15,7 @@ The OWASP Top 10 for Agentic Applications (2026) identifies security risks speci
 
 **Our coverage:** Partially mitigated.
 - `security.agent.md` scans for prompt injection patterns during pre-scan
-- `worker.agent.md` includes instructions to ignore embedded instructions that contradict the role assignment
+- Both `worker-1.agent.md` and `worker-2.agent.md` include instructions to ignore embedded instructions that contradict the role assignment
 - The deterministic pipeline prevents agents from self-routing to skip security gates
 
 **Remaining gap:** Task descriptions come from the dashboard user input and are passed directly to agents as prompt content. A sophisticated injection in the task description could still influence Worker-1's behavior within its cleared scope. A content sanitization layer before the orchestrator would be the full mitigation but is not yet implemented.
@@ -29,8 +29,8 @@ The OWASP Top 10 for Agentic Applications (2026) identifies security risks speci
 **Our coverage:** Mitigated.
 - Security and Reviewer agents have `Write`, `Edit`, and `Bash` tools explicitly disallowed
 - Worker-1's tool access is scoped to the cleared project directory
-- Worker-2 is instructed never to modify code (requirements verification only)
-- `worker.agent.md` includes explicit Bash constraints (no `curl | sh`, no `rm -rf /`, no network calls to unknown hosts)
+- Worker-2's frontmatter declares `disallowedTools: Write, Edit, Bash` — the SDK adapter strips those tools before the session starts, so the read-only constraint is enforced rather than merely instructed
+- `worker-1.agent.md` includes explicit Bash constraints (no `curl | sh`, no `rm -rf /`, no network calls to unknown hosts)
 - Shared guardrail policy is enforced through Claude hooks, Codex stream monitoring, and orchestrator post-phase audits
 
 **Remaining gap:** Codex does not expose a true pre-tool hook callback in the installed SDK. Codex stream aborts are post-detection, so sandboxing and orchestrator audits remain the hard guarantee.
@@ -70,7 +70,7 @@ The OWASP Top 10 for Agentic Applications (2026) identifies security risks speci
 
 **Our coverage:** Partially mitigated.
 - Security and Reviewer agents cannot execute code (Bash is disallowed)
-- `worker.agent.md` includes explicit constraints: no piped installs (`curl | sh`), no recursive deletions (`rm -rf /`), no `..` path traversal above the project root, no network calls to unknown hosts
+- `worker-1.agent.md` includes explicit constraints: no piped installs (`curl | sh`), no recursive deletions (`rm -rf /`), no `..` path traversal above the project root, no network calls to unknown hosts (Worker-2 cannot run Bash at all per its SDK-level tool denial)
 - The pipeline runs Worker-1 in a specific project directory, not system-wide
 - Claude Worker tool calls pass through shared `PreToolUse` command/path guardrails
 - Codex Worker turns run with network disabled, stream monitoring, abort-on-detection, and post-phase audits before commits
@@ -126,7 +126,7 @@ This is a planned future enhancement.
 **Risk:** Users over-trust persuasive agent recommendations, allowing attackers to influence decisions through deceptive agent explanations.
 
 **Our coverage:** Partially mitigated.
-- `worker.agent.md` requires Decision Transparency — every implementation decision must include reasoning, options considered, and trade-offs
+- `worker-1.agent.md` requires Decision Transparency — every implementation decision must include reasoning, options considered, and trade-offs
 - `reviewer.agent.md` includes instruction to flag cases where worker reasoning appears designed to persuade rather than inform
 - The dashboard displays agent outputs for human review
 

@@ -328,7 +328,8 @@ src/
     └── index.ts                   # Shared enums (Phase, Priority, etc.)
 
 agents/                            # Agent system prompts (YAML frontmatter + markdown)
-├── worker.agent.md               # Worker-1 (implementer) & Worker-2 (verifier)
+├── worker-1.agent.md             # Implementer
+├── worker-2.agent.md             # Requirements verifier (Write/Edit/Bash denied at SDK)
 ├── security.agent.md             # Security pre-scan & post-sweep
 ├── reviewer.agent.md             # Code review & verdicts
 └── security-review.agent.md      # Final security review (on-demand)

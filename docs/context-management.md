@@ -59,7 +59,8 @@ Provider parity notes:
 Runtime agents receive explicit prompts from:
 
 ```text
-agents/worker.agent.md
+agents/worker-1.agent.md
+agents/worker-2.agent.md
 agents/security.agent.md
 agents/reviewer.agent.md
 agents/security-review.agent.md

@@ -16,6 +16,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { Role, type RoleInstance } from './roles/role-types.js';
+import { INSTANCE_AGENT_FILES, INSTANCE_TO_ROLE, ALL_INSTANCES } from './spawner/agent-files.js';
 import { AgentState } from './types/index.js';
 import { TeamState, TeamPhase, type TeamStateData, type LoopLimits, DEFAULT_LOOP_LIMITS } from './state/team-state.js';
 import { StatePersistence } from './state/persistence.js';
@@ -83,12 +84,6 @@ export interface FeedbackPayload {
 const FALLBACK_MODEL = 'claude-opus-4-6';
 const FALLBACK_EFFORT: EffortLevel = 'medium';
 const FALLBACK_MAX_TURNS = 20;
-
-const ROLE_AGENT_FILES: Record<Role, string> = {
-  [Role.Worker]: 'worker.agent.md',
-  [Role.Security]: 'security.agent.md',
-  [Role.Reviewer]: 'reviewer.agent.md',
-};
 
 // --- Verdict types ---
 
@@ -287,10 +282,10 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   private readonly agentRuntime: AgentRuntimeConfig;
   private readonly persistence: StatePersistence;
   private readonly registry: Registry;
-  private readonly models: Record<Role, string>;
-  private readonly efforts: Record<Role, EffortLevel>;
-  private readonly disallowedTools: Record<Role, string[]>;
-  private readonly maxTurnsPerRole: Record<Role, number>;
+  private readonly models: Record<RoleInstance, string>;
+  private readonly efforts: Record<RoleInstance, EffortLevel>;
+  private readonly disallowedTools: Record<RoleInstance, string[]>;
+  private readonly maxTurnsPerInstance: Record<RoleInstance, number>;
   private readonly guardrails: GuardrailRuntimeConfig;
   private readonly teams: Map<string, PipelineTeamContext> = new Map();
   private shuttingDown = false;
@@ -311,12 +306,22 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     this.persistence = new StatePersistence();
     this.registry = new Registry(this.config.registryPath);
 
-    // Build defaults from agent file frontmatter, then apply config overrides
+    // Build per-instance defaults from each instance's frontmatter, then
+    // apply role-level config overrides on top. Config stays role-keyed for
+    // backward compat; per-instance differentiation lives in frontmatter
+    // (e.g. worker-2.agent.md sets disallowedTools at the SDK boundary).
     const fmDefaults = this.loadFrontmatterDefaults(this.config.rolesDir);
-    this.models = { ...fmDefaults.models, ...config.models };
-    this.efforts = { ...fmDefaults.efforts, ...config.efforts };
-    this.disallowedTools = { ...fmDefaults.disallowedTools, ...config.disallowedTools };
-    this.maxTurnsPerRole = { ...fmDefaults.maxTurns, ...config.maxTurns };
+    this.models = {} as Record<RoleInstance, string>;
+    this.efforts = {} as Record<RoleInstance, EffortLevel>;
+    this.disallowedTools = {} as Record<RoleInstance, string[]>;
+    this.maxTurnsPerInstance = {} as Record<RoleInstance, number>;
+    for (const instance of ALL_INSTANCES) {
+      const role = INSTANCE_TO_ROLE[instance];
+      this.models[instance] = config.models?.[role] ?? fmDefaults.models[instance];
+      this.efforts[instance] = config.efforts?.[role] ?? fmDefaults.efforts[instance];
+      this.disallowedTools[instance] = config.disallowedTools?.[role] ?? fmDefaults.disallowedTools[instance];
+      this.maxTurnsPerInstance[instance] = config.maxTurns?.[role] ?? fmDefaults.maxTurns[instance];
+    }
   }
 
   getAgentRuntime(): AgentRuntimeConfig {
@@ -505,13 +510,14 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     complexity: 'simple' | 'standard' | 'complex',
     images?: Array<{ media_type: string; data: string }>
   ): Promise<void> {
+    if (complexity === 'simple') {
+      this.runSimplePipeline(teamId, ctx, task, images);
+      return;
+    }
+
     if (this.config.skipRequirements) {
       // Skip extraction — go straight to pipeline
-      if (complexity === 'simple') {
-        this.runSimplePipeline(teamId, ctx, task, images);
-      } else {
-        this.runStandardPipeline(teamId, ctx, task, images);
-      }
+      this.runStandardPipeline(teamId, ctx, task, images);
       return;
     }
 
@@ -564,11 +570,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     }
 
     // Start the pipeline
-    if (complexity === 'simple') {
-      this.runSimplePipeline(teamId, ctx, task, images);
-    } else {
-      this.runStandardPipeline(teamId, ctx, task, images);
-    }
+    this.runStandardPipeline(teamId, ctx, task, images);
   }
 
   // --- Query ---
@@ -943,26 +945,21 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   }
 
   private createSession(
-    name: string,
-    role: Role,
+    name: RoleInstance,
     cwd: string,
     onProgress?: (accumulated: string) => void
   ): AgentSession {
-    const systemPrompt = this.loadRolePrompt(
-      role === Role.Worker ? 'worker.agent.md' :
-        role === Role.Security ? 'security.agent.md' :
-          'reviewer.agent.md'
-    );
+    const systemPrompt = this.loadRolePrompt(INSTANCE_AGENT_FILES[name]);
 
     return createAgentSession(name, systemPrompt, {
       runtime: this.agentRuntime,
-      model: this.getModelForRole(role),
+      model: this.getModelForInstance(name),
       cwd,
-      effort: this.efforts[role],
-      disallowedTools: this.disallowedTools[role].length > 0
-        ? this.disallowedTools[role]
+      effort: this.efforts[name],
+      disallowedTools: this.disallowedTools[name].length > 0
+        ? this.disallowedTools[name]
         : undefined,
-      maxTurns: this.maxTurnsPerRole[role],
+      maxTurns: this.maxTurnsPerInstance[name],
       guardrails: this.guardrails,
       onProgress,
     });
@@ -984,10 +981,12 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       this.tryTransitionPhase(ctx.state, teamId, fromPhase, TeamPhase.Work, 'simple pipeline start');
 
       // Create Worker-1 session
-      const worker = this.createSession('Worker-1', Role.Worker, ctx.state.snapshot.projectPath,
+      const worker = this.createSession('Worker-1', ctx.state.snapshot.projectPath,
         (text) => this.emit('agent-progress', teamId, 'Worker-1' as any, text));
       ctx.sessions.push(worker);
 
+      ctx.state.setAgentJob('Worker-1' as any, 'Implementing task (simple)');
+      this.emit('agent-task', teamId, 'Worker-1' as any, 'Implementing task (simple)');
       this.emit('agent-output', teamId, 'Worker-1' as any, `[Pipeline] Starting simple task...`);
 
       // Send task to worker (with approved requirements if present)
@@ -1001,6 +1000,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       this.runGuardrailAudit(teamId, ctx, 'simple-work');
 
       // Done — keep session alive for Q&A
+      this.markAgentDone(ctx, 'Worker-1' as any);
       this.completePipeline(teamId, ctx, startTime);
     } catch (err: any) {
       this.failPipeline(teamId, ctx, err, startTime);
@@ -1024,13 +1024,13 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
     try {
       // Create all 4 agent sessions in parallel (cold starts happen simultaneously)
-      const security = this.createSession('Security', Role.Security, cwd,
+      const security = this.createSession('Security-1', cwd,
         (text) => this.emit('agent-progress', teamId, 'Security-1' as any, text));
-      const worker1 = this.createSession('Worker-1', Role.Worker, cwd,
+      const worker1 = this.createSession('Worker-1', cwd,
         (text) => this.emit('agent-progress', teamId, 'Worker-1' as any, text));
-      const worker2 = this.createSession('Worker-2', Role.Worker, cwd,
+      const worker2 = this.createSession('Worker-2', cwd,
         (text) => this.emit('agent-progress', teamId, 'Worker-2' as any, text));
-      const reviewer = this.createSession('Reviewer', Role.Reviewer, cwd,
+      const reviewer = this.createSession('Reviewer-1', cwd,
         (text) => this.emit('agent-progress', teamId, 'Reviewer-1' as any, text));
       ctx.sessions = [security, worker1, worker2, reviewer];
 
@@ -1093,6 +1093,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
             this.emit('agent-output', teamId, 'Worker-1' as any, simpleDisplay);
             this.runGuardrailAudit(teamId, ctx, 'simple-work-reclassified');
 
+            this.markAgentDone(ctx, 'Worker-1' as any);
             this.completePipeline(teamId, ctx, startTime);
             return;
           }
@@ -1321,6 +1322,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       GitOps.commit(cwd, task.substring(0, 72));
 
       // Keep sessions alive for Q&A after completion
+      this.markAllNonErroredAgentsDone(ctx);
       this.completePipeline(teamId, ctx, startTime);
     } catch (err: any) {
       this.closeSessions(ctx);
@@ -1507,6 +1509,25 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     this.persistence.persistNow(ctx.state);
   }
 
+  private markAgentDone(ctx: PipelineTeamContext, instance: RoleInstance): void {
+    const current = ctx.state.getAgent(instance)?.state;
+    if (!current || current === AgentState.Done || current === AgentState.Errored) return;
+
+    if (current === AgentState.Spawning) {
+      ctx.state.transitionAgent(instance, AgentState.Active);
+    }
+
+    ctx.state.transitionAgent(instance, AgentState.Done);
+  }
+
+  private markAllNonErroredAgentsDone(ctx: PipelineTeamContext): void {
+    for (const [instance, agent] of ctx.state.getAllAgents()) {
+      if (agent.state !== AgentState.Errored) {
+        this.markAgentDone(ctx, instance);
+      }
+    }
+  }
+
   private failPipeline(teamId: string, ctx: PipelineTeamContext, err: any, startTime: number): void {
     if (this.shuttingDown) return;
 
@@ -1578,42 +1599,38 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   // --- Private: Role Prompt Loading ---
 
   private loadFrontmatterDefaults(rolesDir: string): {
-    models: Record<Role, string>;
-    efforts: Record<Role, EffortLevel>;
-    disallowedTools: Record<Role, string[]>;
-    maxTurns: Record<Role, number>;
+    models: Record<RoleInstance, string>;
+    efforts: Record<RoleInstance, EffortLevel>;
+    disallowedTools: Record<RoleInstance, string[]>;
+    maxTurns: Record<RoleInstance, number>;
   } {
-    const models: Record<string, string> = {};
-    const efforts: Record<string, EffortLevel> = {};
-    const disallowedTools: Record<string, string[]> = {};
-    const maxTurns: Record<string, number> = {};
+    const models = {} as Record<RoleInstance, string>;
+    const efforts = {} as Record<RoleInstance, EffortLevel>;
+    const disallowedTools = {} as Record<RoleInstance, string[]>;
+    const maxTurns = {} as Record<RoleInstance, number>;
 
-    for (const [role, filename] of Object.entries(ROLE_AGENT_FILES)) {
+    for (const instance of ALL_INSTANCES) {
+      const filename = INSTANCE_AGENT_FILES[instance];
       const filePath = path.join(rolesDir, filename);
       try {
         const content = fs.readFileSync(filePath, 'utf-8');
         const { frontmatter } = parseFrontmatter(content);
 
-        models[role] = frontmatter.model ?? FALLBACK_MODEL;
-        efforts[role] = (frontmatter.effort as EffortLevel) ?? FALLBACK_EFFORT;
-        maxTurns[role] = frontmatter.maxTurns ? parseInt(frontmatter.maxTurns, 10) : FALLBACK_MAX_TURNS;
-        disallowedTools[role] = frontmatter.disallowedTools
+        models[instance] = frontmatter.model ?? FALLBACK_MODEL;
+        efforts[instance] = (frontmatter.effort as EffortLevel) ?? FALLBACK_EFFORT;
+        maxTurns[instance] = frontmatter.maxTurns ? parseInt(frontmatter.maxTurns, 10) : FALLBACK_MAX_TURNS;
+        disallowedTools[instance] = frontmatter.disallowedTools
           ? frontmatter.disallowedTools.split(',').map((t: string) => t.trim())
           : [];
       } catch {
-        models[role] = FALLBACK_MODEL;
-        efforts[role] = FALLBACK_EFFORT;
-        maxTurns[role] = FALLBACK_MAX_TURNS;
-        disallowedTools[role] = [];
+        models[instance] = FALLBACK_MODEL;
+        efforts[instance] = FALLBACK_EFFORT;
+        maxTurns[instance] = FALLBACK_MAX_TURNS;
+        disallowedTools[instance] = [];
       }
     }
 
-    return {
-      models: models as Record<Role, string>,
-      efforts: efforts as Record<Role, EffortLevel>,
-      disallowedTools: disallowedTools as Record<Role, string[]>,
-      maxTurns: maxTurns as Record<Role, number>,
-    };
+    return { models, efforts, disallowedTools, maxTurns };
   }
 
   private loadRolePrompt(filename: string): string {
@@ -1626,10 +1643,23 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     }
   }
 
+  private getModelForInstance(instance: RoleInstance): string | undefined {
+    const runtimeModel = normalizeProviderModel(this.agentRuntime.model);
+    if (runtimeModel) return runtimeModel;
+    if (this.agentRuntime.provider === 'codex') return undefined;
+    return this.models[instance];
+  }
+
+  // Used by agents that aren't part of the standard pipeline rotation
+  // (final security review, requirements extraction). Picks the first
+  // instance for the given role as a stable proxy for "the role's model."
   private getModelForRole(role: Role): string | undefined {
     const runtimeModel = normalizeProviderModel(this.agentRuntime.model);
     if (runtimeModel) return runtimeModel;
     if (this.agentRuntime.provider === 'codex') return undefined;
-    return this.models[role];
+    const proxyInstance = ALL_INSTANCES.find(
+      (i) => INSTANCE_TO_ROLE[i] === role
+    );
+    return proxyInstance ? this.models[proxyInstance] : undefined;
   }
 }

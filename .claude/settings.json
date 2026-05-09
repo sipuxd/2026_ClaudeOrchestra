@@ -10,7 +10,6 @@
       "Bash(mv agents/security-review.claude.md agents/security-review.agent.md)",
       "Bash(mv agents/security.claude.md agents/security.agent.md)",
       "Bash(mv agents/supervisor.claude.md agents/supervisor.agent.md)",
-      "Bash(mv agents/worker.claude.md agents/worker.agent.md)",
       "Read(//Users/josephsip/Documents/__Agent-Architecture-Stuff/files/**)",
       "WebFetch(domain:pcoi.ai)",
       "Bash(grep -n \"^import.*message-bus\\\\|^import.*message-types\\\\|^import.*flag-enums\" /Users/josephsip/Documents/__ClaudeOrchestra/2026_ClaudeOrchestra/tests/*.ts)",

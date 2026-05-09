@@ -117,7 +117,8 @@ claude-orchestra/
 │       └── index.ts              # Shared types
 │
 ├── agents/                       # Agent prompt files (YAML frontmatter + markdown)
-│   ├── worker.agent.md
+│   ├── worker-1.agent.md
+│   ├── worker-2.agent.md
 │   ├── security.agent.md
 │   ├── reviewer.agent.md
 │   └── security-review.agent.md
@@ -243,9 +244,9 @@ SDK session model, warm sessions, context budgets.
 session on its identity and behavior. Dashboard provides
 real-time visibility.
 
-**Build 4 agent files in `agents/`:**
-- `agents/worker.agent.md` — implementation instructions for
-  Worker-1, verification instructions for Worker-2
+**Build 5 agent files in `agents/`:**
+- `agents/worker-1.agent.md` — implementer instructions
+- `agents/worker-2.agent.md` — requirements verifier with `disallowedTools: Write, Edit, Bash` (SDK-enforced read-only)
 - `agents/security.agent.md` — pre-scan and sweep procedures
 - `agents/reviewer.agent.md` — evaluation framework
 - `agents/security-review.agent.md` — final security review (on-demand)

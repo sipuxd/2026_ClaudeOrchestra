@@ -140,13 +140,13 @@ The Security agent receives a `PRE-WORK SCAN REQUEST` with the task description,
 ### Step 2: Build — Worker-1 Implements + Worker-2 Verifies (Phase: `work`)
 
 **Worker-1** receives: task description, approved requirements, security clearance report, revision feedback (if retry).
-- Prompt file: `agents/worker.agent.md`
+- Prompt file: `agents/worker-1.agent.md`
 - Implements the full task within cleared boundaries
 - Large outputs (>100 lines) must be written to files, not inline
 
 **Worker-2** receives: original task, approved requirements, Worker-1's output summary (truncated to 3000 chars).
-- Same prompt file but role-specific instructions in prompt
-- Acts as engineering manager — verifies requirements only, does NOT write code
+- Prompt file: `agents/worker-2.agent.md` (separate file — `disallowedTools: Write, Edit, Bash` enforced at the SDK boundary, not just in prose)
+- Acts as engineering manager — verifies requirements only, **cannot** write code
 - Outputs a checklist: `- [x] Requirement — implemented` / `- [ ] Requirement — NOT implemented`
 - Must begin verdict with `COMPLETE` or `GAPS_FOUND`
 
@@ -446,11 +446,15 @@ All git commands have 30-second timeout.
 
 ## Agent Prompt Files
 
-### `agents/worker.agent.md`
-- Worker-1: implements code, fixes gaps from Worker-2
-- Worker-2: requirements verifier only, never modifies code
+### `agents/worker-1.agent.md`
+- Implements code, fixes gaps reported by Worker-2
 - Decision Transparency: must explain reasoning for every choice
 - Constraints: respect clearance boundaries, don't touch off-limits files
+
+### `agents/worker-2.agent.md`
+- Requirements verifier only — `disallowedTools: Write, Edit, Bash` enforced via frontmatter at the SDK boundary
+- Verdict prefix contract: response must begin with `COMPLETE` or `GAPS_FOUND`
+- Reports gaps as `- Requirement N: <description>` lines that Worker-1 fixes verbatim
 
 ### `agents/security.agent.md`
 - 10-point security checklist
@@ -657,7 +661,8 @@ npm run test:watch    # Watch mode
 │       └── index.ts                      # Phase, Priority, MessageStatus, AgentState enums (45 lines)
 │
 ├── agents/                               # Agent system prompts (YAML frontmatter + markdown)
-│   ├── worker.agent.md                  # Worker-1 (implement) + Worker-2 (verify)
+│   ├── worker-1.agent.md                # Implementer
+│   ├── worker-2.agent.md                # Requirements verifier (Write/Edit/Bash denied at SDK)
 │   ├── security.agent.md                # Security scan + sweep (10-point checklist)
 │   ├── reviewer.agent.md                # Code review verdicts
 │   └── security-review.agent.md         # Final comprehensive security review (on-demand)

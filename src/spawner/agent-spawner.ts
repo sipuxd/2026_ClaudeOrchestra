@@ -8,20 +8,13 @@ import * as path from 'node:path';
 import { Role, type RoleInstance, ROLE_INSTANCES } from '../roles/role-types.js';
 import { AgentProcess, type AgentSpawnOptions, ProcessState } from './agent-process.js';
 import { parseFrontmatter } from './frontmatter-parser.js';
+import { INSTANCE_AGENT_FILES } from './agent-files.js';
 
 // --- Fallback defaults (used when frontmatter is missing a field) ---
 
 const FALLBACK_MODEL = 'claude-opus-4-6';
 const FALLBACK_EFFORT: 'low' | 'medium' | 'high' | 'max' = 'medium';
 const FALLBACK_MAX_TURNS = 20;
-
-// --- Role to agent filename mapping ---
-
-const ROLE_AGENT_FILES: Record<Role, string> = {
-  [Role.Worker]: 'worker.agent.md',
-  [Role.Security]: 'security.agent.md',
-  [Role.Reviewer]: 'reviewer.agent.md',
-};
 
 // --- Spawner options ---
 
@@ -283,7 +276,7 @@ export class AgentSpawner {
     instance: RoleInstance,
     projectPath: string
   ): AgentProcess {
-    const agentFilePath = path.join(this.options.rolesDir, ROLE_AGENT_FILES[role]);
+    const agentFilePath = path.join(this.options.rolesDir, INSTANCE_AGENT_FILES[instance]);
 
     // Read and parse frontmatter from the agent file
     let frontmatterModel = FALLBACK_MODEL;

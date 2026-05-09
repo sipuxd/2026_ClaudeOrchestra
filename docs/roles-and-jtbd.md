@@ -98,7 +98,7 @@ Verdict effects:
 
 **Mission:** Implement assigned work within cleared boundaries.
 
-Prompt file: `agents/worker.agent.md`
+Prompt file: `agents/worker-1.agent.md`
 
 Default constraints:
 
@@ -137,13 +137,13 @@ Responsibilities:
 
 **Mission:** Verify that Worker-1's implementation satisfies the user's explicit requirements. Worker-2 acts as an engineering manager and never modifies code.
 
-Prompt file: `agents/worker.agent.md` with Worker-2 instructions supplied in the phase prompt.
+Prompt file: `agents/worker-2.agent.md` (separate file with `disallowedTools: Write, Edit, Bash` declared in frontmatter — the SDK adapter strips those tools before the session starts, so the read-only constraint is enforced rather than merely instructed).
 
 Default constraints:
 
-- Uses Worker role prompt but receives explicit "do not modify code" instructions.
-- Default effort: `high`
-- Default max turns: `50`
+- Read-only tool surface (Write, Edit, Bash denied at the SDK boundary).
+- Default effort: `medium`
+- Default max turns: `20`
 
 ### Requirements Verification
 

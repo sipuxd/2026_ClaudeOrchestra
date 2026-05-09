@@ -226,7 +226,8 @@ describe('Logger', () => {
       fs.mkdirSync(projDir, { recursive: true });
       const rolesDir = path.join(tmpDir, 'roles');
       fs.mkdirSync(rolesDir, { recursive: true });
-      fs.writeFileSync(path.join(rolesDir, 'worker.agent.md'), '# Worker');
+      fs.writeFileSync(path.join(rolesDir, 'worker-1.agent.md'), '# Worker-1');
+      fs.writeFileSync(path.join(rolesDir, 'worker-2.agent.md'), '# Worker-2');
       fs.writeFileSync(path.join(rolesDir, 'security.agent.md'), '# Security');
       fs.writeFileSync(path.join(rolesDir, 'reviewer.agent.md'), '# Reviewer');
       const orchestrator = new PipelineOrchestrator({
@@ -258,7 +259,8 @@ describe('Logger', () => {
       fs.mkdirSync(projDir, { recursive: true });
       const rolesDir = path.join(tmpDir, 'roles');
       fs.mkdirSync(rolesDir, { recursive: true });
-      fs.writeFileSync(path.join(rolesDir, 'worker.agent.md'), '# Worker');
+      fs.writeFileSync(path.join(rolesDir, 'worker-1.agent.md'), '# Worker-1');
+      fs.writeFileSync(path.join(rolesDir, 'worker-2.agent.md'), '# Worker-2');
       fs.writeFileSync(path.join(rolesDir, 'security.agent.md'), '# Security');
       fs.writeFileSync(path.join(rolesDir, 'reviewer.agent.md'), '# Reviewer');
       const orchestrator = new PipelineOrchestrator({
@@ -288,7 +290,8 @@ describe('Logger', () => {
 
       const rolesDir = path.join(tmpDir, 'roles');
       fs.mkdirSync(rolesDir, { recursive: true });
-      fs.writeFileSync(path.join(rolesDir, 'worker.agent.md'), '# Worker');
+      fs.writeFileSync(path.join(rolesDir, 'worker-1.agent.md'), '# Worker-1');
+      fs.writeFileSync(path.join(rolesDir, 'worker-2.agent.md'), '# Worker-2');
       fs.writeFileSync(path.join(rolesDir, 'security.agent.md'), '# Security');
       fs.writeFileSync(path.join(rolesDir, 'reviewer.agent.md'), '# Reviewer');
       const orchestrator = new PipelineOrchestrator({

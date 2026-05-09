@@ -400,6 +400,27 @@ a:hover{text-decoration:underline}
 .security-result{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);
   padding:12px;font-family:'SF Mono','Fira Code',monospace;font-size:.75rem;white-space:pre-wrap;
   max-height:200px;overflow-y:auto;color:var(--text-secondary);margin-top:8px}
+
+/* --- Team chat panel (Coordinator-1) --- */
+.chat-panel{margin-top:24px;border-top:1px solid var(--border);padding-top:16px;display:flex;flex-direction:column;gap:10px}
+.chat-panel-header{font-size:.75rem;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em}
+.chat-log{display:flex;flex-direction:column;gap:8px;max-height:480px;overflow-y:auto;padding:4px}
+.chat-empty{color:var(--text-muted);font-style:italic;font-size:.875rem;padding:20px;text-align:center}
+.chat-msg{display:flex;width:100%}
+.chat-msg-user{justify-content:flex-end}
+.chat-msg-coordinator{justify-content:flex-start}
+.chat-msg-system{justify-content:center}
+.chat-bubble{max-width:80%;padding:10px 14px;border-radius:var(--radius-sm);font-size:.875rem;line-height:1.5;white-space:pre-wrap;word-wrap:break-word}
+.chat-bubble-user{background:var(--accent);color:white}
+.chat-bubble-coordinator{background:var(--surface);color:var(--text);border:1px solid var(--border)}
+.chat-bubble-system{background:transparent;color:var(--text-muted);border:1px dashed var(--border);font-style:italic;max-width:90%}
+.chat-bubble-meta{font-size:.65rem;font-weight:600;text-transform:uppercase;letter-spacing:.05em;opacity:.7;margin-bottom:4px}
+.chat-pending{opacity:.7;font-style:italic}
+.chat-input-row{display:flex;gap:8px;align-items:flex-end}
+.chat-input{flex:1;min-height:44px;padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg);color:var(--text);font-family:inherit;font-size:.875rem;resize:vertical}
+.chat-input:focus{outline:none;border-color:var(--accent)}
+.chat-input:disabled{opacity:.6;cursor:wait}
+.chat-send-btn{align-self:stretch;padding:0 20px;flex-shrink:0}
 `;
 
 const JS = `
@@ -412,6 +433,8 @@ const state = {
   projects: {},        // projectPath -> { name, teams: Set }
   feedbacks: {},       // teamId -> [ feedback objects ]
   liveOutput: {},      // teamId -> [ { agent, text, type } ]
+  chatMessages: {},    // teamId -> [ { role, content, timestamp, verdict? } ]
+  chatPending: {},     // teamId -> bool (true while a coordinator turn is in flight)
   currentView: 'dashboard', // 'dashboard' | 'project'
   currentProject: null,
   topTab: 'portfolio',      // 'portfolio' | 'code' — outer view selector
@@ -604,6 +627,13 @@ function addOrUpdateTeam(teamId, data) {
   state.projects[projPath].teams.add(teamId);
   if (!state.feedbacks[teamId]) state.feedbacks[teamId] = [];
   if (!state.liveOutput[teamId]) state.liveOutput[teamId] = [];
+  // Seed chat history from the team payload if present (init / team-created).
+  // After that, chat-message SSE events append; we don't overwrite from later
+  // payloads that lack chatHistory.
+  if (Array.isArray(data && data.chatHistory) && !state.chatMessages[teamId]) {
+    state.chatMessages[teamId] = data.chatHistory.slice();
+  }
+  if (!state.chatMessages[teamId]) state.chatMessages[teamId] = [];
 }
 
 function getTeamPhaseCategory(team) {
@@ -1126,7 +1156,64 @@ function renderPanel() {
   // Always show feedback blocks at top
   html += renderFeedbackBlocks(state.panelTeamId);
   html += renderSummaryContent(state.panelTeamId);
+  html += renderChatPanel(state.panelTeamId);
   body.innerHTML = html;
+}
+
+// ---- Render: Team Chat Panel (Coordinator-1 conversation) ----
+function renderChatPanel(teamId) {
+  var messages = state.chatMessages[teamId] || [];
+  var pending = !!state.chatPending[teamId];
+  var team = state.teams[teamId];
+
+  var html = '<div class="chat-panel">';
+  html += '<div class="chat-panel-header">Chat with Coordinator-1</div>';
+  html += '<div class="chat-log" id="chatLog-' + esc(teamId) + '">';
+
+  if (messages.length === 0) {
+    // Empty-state hint. If the team had a previous task (existing teams that
+    // pre-date the chat feature), surface it as a synthetic system message so
+    // the conversation has context.
+    if (team && team.currentTask && team.currentTask.description) {
+      html += '<div class="chat-msg chat-msg-system">';
+      html +=   '<div class="chat-bubble chat-bubble-system">';
+      html +=     '<div class="chat-bubble-meta">Original task</div>';
+      html +=     esc(team.currentTask.description);
+      html +=   '</div>';
+      html += '</div>';
+    } else {
+      html += '<div class="chat-empty">Send a message to get started. Your first message becomes the team\\'s task.</div>';
+    }
+  }
+
+  for (var i = 0; i < messages.length; i++) {
+    var m = messages[i];
+    var bubbleClass = 'chat-bubble-' + (m.role === 'user' ? 'user' : (m.role === 'system' ? 'system' : 'coordinator'));
+    var rowClass = 'chat-msg chat-msg-' + (m.role === 'user' ? 'user' : (m.role === 'system' ? 'system' : 'coordinator'));
+    html += '<div class="' + rowClass + '">';
+    html +=   '<div class="chat-bubble ' + bubbleClass + '">';
+    if (m.role === 'coordinator' && m.verdict) {
+      html += '<div class="chat-bubble-meta">' + esc(m.verdict) + '</div>';
+    } else if (m.role === 'system') {
+      html += '<div class="chat-bubble-meta">system</div>';
+    }
+    html += esc(m.content || '');
+    html +=   '</div>';
+    html += '</div>';
+  }
+
+  if (pending) {
+    html += '<div class="chat-msg chat-msg-coordinator"><div class="chat-bubble chat-bubble-coordinator chat-pending">Coordinator-1 is thinking…</div></div>';
+  }
+
+  html += '</div>'; // end chat-log
+
+  html += '<form class="chat-input-row" onsubmit="window.__api.sendChat(event, \\'' + esc(teamId).replace(/'/g, "\\\\'") + '\\')">';
+  html +=   '<textarea class="chat-input" id="chatInput-' + esc(teamId) + '" rows="2" placeholder="Type a message — e.g. \\'Build a settings page with dark mode\\' or \\'Why did Worker-2 flag X?\\'" ' + (pending ? 'disabled' : '') + '></textarea>';
+  html +=   '<button type="submit" class="btn btn-primary chat-send-btn"' + (pending ? ' disabled' : '') + '>Send</button>';
+  html += '</form>';
+  html += '</div>'; // end chat-panel
+  return html;
 }
 
 // ---- Render: Current View ----
@@ -1340,7 +1427,7 @@ window.__modal = {
     openModal('createTeamModal');
     $('ctName').value = '';
     $('ctPath').value = '';
-    $('ctTask').value = '';
+    // Note: ctTask field was removed — first chat message is now the task.
 
     // Build the Project dropdown from known projects (each rendered with its
     // last-segment name + team count). Last option is the new-project sentinel.
@@ -1443,7 +1530,6 @@ window.__api = {
     var projectPath = sel && sel.value && sel.value !== '__new__'
       ? sel.value
       : $('ctPath').value.trim();
-    var task = $('ctTask').value.trim();
     if (!name) {
       showToast('Team name is required', 'error');
       return;
@@ -1452,9 +1538,8 @@ window.__api = {
       showToast(sel && sel.value === '__new__' ? 'New project path is required' : 'Pick a project', 'error');
       return;
     }
+    // Body intentionally omits the task field — chat panel is the new task-entry surface.
     var body = { name: name, projectPath: projectPath };
-    if (task) body.task = task;
-    if (attachedImages.length > 0) body.images = attachedImages;
     fetch('/api/teams', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1462,12 +1547,43 @@ window.__api = {
     }).then(function(r) {
       if (!r.ok) return r.json().then(function(d){ throw new Error(d.error || 'Failed'); });
       return r.json();
-    }).then(function(data) {
+    }).then(function() {
       closeModal();
       showToast('Team "' + name + '" created');
+      // Auto-open the new team's chat panel and focus the input. The
+      // team-created SSE event populates state.teams shortly after; if it
+      // hasn't arrived yet, the chat panel renders an empty log.
+      window.__nav.openPanel(name);
+      setTimeout(function() {
+        var inp = document.getElementById('chatInput-' + name);
+        if (inp) inp.focus();
+      }, 200);
     }).catch(function(e) {
       showToast(e.message, 'error');
     });
+  },
+  // Send a chat message to a team's Coordinator-1. Wired from the chat-input
+  // form's onsubmit. Optimistically marks the team as "pending" so the input
+  // disables until the coordinator's response arrives via SSE.
+  sendChat: function(ev, teamId) {
+    if (ev && ev.preventDefault) ev.preventDefault();
+    var inp = $('chatInput-' + teamId);
+    if (!inp) return false;
+    var msg = (inp.value || '').trim();
+    if (!msg) return false;
+    inp.value = '';
+    state.chatPending[teamId] = true;
+    if (state.panelOpen && state.panelTeamId === teamId) renderPanel();
+    fetch('/api/teams/' + encodeURIComponent(teamId) + '/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: msg }),
+    }).catch(function(e) {
+      state.chatPending[teamId] = false;
+      showToast('Failed to send message: ' + e.message, 'error');
+      if (state.panelOpen && state.panelTeamId === teamId) renderPanel();
+    });
+    return false;
   },
   assignTask: function() {
     var teamId = $('atTeamId').value;
@@ -1782,6 +1898,24 @@ function connectSSE() {
     renderCurrentView();
   });
 
+  es.addEventListener('chat-message', function(e) {
+    var data = JSON.parse(e.data);
+    if (!state.chatMessages[data.teamId]) state.chatMessages[data.teamId] = [];
+    state.chatMessages[data.teamId].push(data.message);
+    // Coordinator response or system note ends the "pending" spinner.
+    if (data.message.role !== 'user') {
+      state.chatPending[data.teamId] = false;
+    }
+    if (state.panelOpen && state.panelTeamId === data.teamId) {
+      renderPanel();
+      // Auto-scroll the chat to the bottom on new message.
+      setTimeout(function() {
+        var log = $('chatLog-' + data.teamId);
+        if (log) log.scrollTop = log.scrollHeight;
+      }, 0);
+    }
+  });
+
   es.addEventListener('shutdown', function() {
     state.sseConnected = false;
     showToast('Server shutting down', 'info');
@@ -1915,18 +2049,7 @@ return `<!DOCTYPE html>
         <label>New Project Path</label>
         <input type="text" id="ctPath" placeholder="/path/to/project" autocomplete="off" autocapitalize="off" spellcheck="false">
       </div>
-      <div class="form-group">
-        <label>Task (optional)</label>
-        <textarea id="ctTask" placeholder="Describe the task to assign immediately..."></textarea>
-      </div>
-      <div class="form-group">
-        <label>Images (optional)</label>
-        <div class="image-attach-area" id="ctImageArea">
-          Drop images here or click to browse<br><span style="font-size:.75rem;color:var(--text-muted)">You can also paste from clipboard</span>
-        </div>
-        <input type="file" id="ctImageInput" accept="image/*" multiple style="display:none">
-        <div class="image-previews"></div>
-      </div>
+      <p style="color:var(--text-muted);font-size:.8125rem;margin-top:8px">After creation, the team's chat panel opens. Your first message becomes the task.</p>
     </div>
     <div class="modal-footer">
       <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>

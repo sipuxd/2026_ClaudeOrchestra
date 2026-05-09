@@ -39,8 +39,19 @@ The `PipelineOrchestrator` is the brain. It creates provider-agnostic `AgentSess
 | Worker-1 | Implements the task (prompt: `agents/worker-1.agent.md`) | Full access |
 | Worker-2 | Verifies requirements only — read-only at the SDK boundary (prompt: `agents/worker-2.agent.md`) | Write, Edit, Bash |
 | Reviewer-1 | Code review, verdict: APPROVED/REVISION_NEEDED/REJECTED | Write, Edit, Bash |
+| Coordinator-1 | Holds the team's chat panel (prompt: `agents/coordinator.agent.md`); decides when to RESPOND, ASK, or TRIGGER_PIPELINE | Write, Edit, Bash, NotebookEdit |
 
 Agent prompts live in `agents/*.agent.md`.
+
+### Team Chat (Coordinator-1)
+
+Each team has a persistent chat panel in the dashboard backed by a long-running `Coordinator-1` session. The chat is the team's primary entry point — your first message becomes the team's task. Coordinator-1 emits one of three structured verdicts on every turn:
+
+- `RESPONDING` — direct reply (questions, explanations, status)
+- `ASKING` — clarification question to the user
+- `TRIGGER_PIPELINE` — body becomes a fresh `assignTask` call, kicking off Security-1 → Worker-1/2 → Reviewer-1
+
+Verdict parsing is fail-loud (mirrors the existing pipeline gates): malformed responses retry once, then surface an error in the chat. Chat history persists to `.claude-orchestra/teams/<teamId>/chat.jsonl` (append-only, line-delimited JSON). The session is lazy-spawned on first message, kept alive across pipeline runs, closed on team termination.
 
 ### State Machine (`src/state/team-state.ts`)
 

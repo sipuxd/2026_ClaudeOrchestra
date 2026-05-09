@@ -82,6 +82,7 @@ describe('DashboardServer', () => {
     fs.writeFileSync(path.join(rolesDir, 'worker-2.agent.md'), '# Worker-2');
     fs.writeFileSync(path.join(rolesDir, 'security.agent.md'), '# Security');
     fs.writeFileSync(path.join(rolesDir, 'reviewer.agent.md'), '# Reviewer');
+    fs.writeFileSync(path.join(rolesDir, 'coordinator.agent.md'), '# Coordinator');
 
     orchestrator = new PipelineOrchestrator({
       registryPath: path.join(tmpDir, 'registry.json'),

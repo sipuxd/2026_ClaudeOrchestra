@@ -39,6 +39,19 @@ export interface TaskInfo {
   requirements?: string;
 }
 
+// --- Chat (Coordinator-1 conversation) ---
+
+export type ChatVerdict = 'RESPONDING' | 'ASKING' | 'TRIGGER_PIPELINE';
+
+export interface ChatMessage {
+  role: 'user' | 'coordinator' | 'system';
+  content: string;
+  timestamp: string;
+  // Only set when role === 'coordinator'. Records what the coordinator
+  // emitted, so the UI can render trigger events differently from replies.
+  verdict?: ChatVerdict;
+}
+
 // --- Loop counters ---
 
 export interface LoopCounters {
@@ -91,6 +104,11 @@ export interface TeamStateData {
   prNumber?: number;
   prUrl?: string;
   enforcement?: EnforcementState;
+  // Chat history with the team's Coordinator-1. The canonical source of
+  // truth lives in `<teamDir>/chat.jsonl` (append-only); the persistence
+  // layer hydrates this field when it loads a team from disk. This field
+  // is intentionally NOT serialized into state.json — chat.jsonl owns it.
+  chatHistory: ChatMessage[];
 }
 
 // --- Transition errors ---
@@ -173,13 +191,17 @@ export class TeamState {
       counters: { revisions: 0, rejections: 0, totalBackwardTransitions: 0 },
       createdAt: now,
       updatedAt: now,
+      chatHistory: [],
     };
 
     return new TeamState(data, limits);
   }
 
-  /** Restore from persisted data. */
+  /** Restore from persisted data. Defaults chatHistory for older state.json files. */
   static fromData(data: TeamStateData, limits?: LoopLimits): TeamState {
+    if (!data.chatHistory) {
+      data.chatHistory = [];
+    }
     return new TeamState(data, limits ?? DEFAULT_LOOP_LIMITS);
   }
 
@@ -373,6 +395,23 @@ export class TeamState {
     }
     this.data.currentTask.requirements = requirements;
     this.touch();
+  }
+
+  // --- Chat history (Coordinator-1 conversation) ---
+  // chat.jsonl is the canonical source; appending here does NOT mark dirty.
+  // The persistence layer is responsible for the file write on each append.
+
+  appendChatMessage(message: ChatMessage): void {
+    this.data.chatHistory.push(message);
+  }
+
+  getChatHistory(): ReadonlyArray<ChatMessage> {
+    return this.data.chatHistory;
+  }
+
+  /** Used by persistence to hydrate chat history from chat.jsonl on load. */
+  setChatHistory(messages: ChatMessage[]): void {
+    this.data.chatHistory = messages;
   }
 
   recordGuardrailReport(report: EnforcementReportSummary): void {

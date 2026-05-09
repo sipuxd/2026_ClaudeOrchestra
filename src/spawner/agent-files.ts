@@ -10,6 +10,7 @@ export const INSTANCE_AGENT_FILES: Record<RoleInstance, string> = {
   'Worker-2': 'worker-2.agent.md',
   'Security-1': 'security.agent.md',
   'Reviewer-1': 'reviewer.agent.md',
+  'Coordinator-1': 'coordinator.agent.md',
 };
 
 export const INSTANCE_TO_ROLE: Record<RoleInstance, Role> = {
@@ -17,6 +18,7 @@ export const INSTANCE_TO_ROLE: Record<RoleInstance, Role> = {
   'Worker-2': Role.Worker,
   'Security-1': Role.Security,
   'Reviewer-1': Role.Reviewer,
+  'Coordinator-1': Role.Coordinator,
 };
 
 export const ALL_INSTANCES: readonly RoleInstance[] = Object.keys(

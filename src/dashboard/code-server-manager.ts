@@ -31,6 +31,21 @@ export interface CodeServerStatus {
 const HEALTH_TIMEOUT_MS = 30_000;
 const HEALTH_POLL_INTERVAL_MS = 300;
 
+// AI coding extensions are gated to the dashboard's team chat panel — the
+// whole architectural premise of the feature is that all Claude/agent
+// interactions for a team flow through one place. Allowing these extensions
+// to be invoked from inside the iframe code-view would create parallel,
+// untracked conversations the orchestrator can't see. Language servers,
+// linters, and Git UI are intentionally NOT in this list — code-view should
+// still be a fully usable read/edit surface.
+const AI_CODING_EXTENSIONS: readonly string[] = [
+  'anthropic.claude-code',
+  'github.copilot',
+  'github.copilot-chat',
+  'cursor.cursor',
+  'continue.continue',
+];
+
 export class CodeServerManager {
   private state: CodeServerState = 'idle';
   private port: number;
@@ -126,6 +141,8 @@ export class CodeServerManager {
       '--disable-telemetry',
       '--disable-update-check',
       // Don't open a workspace by default — the iframe URL drives folder selection.
+      // Block AI coding extensions; see AI_CODING_EXTENSIONS comment above.
+      ...AI_CODING_EXTENSIONS.flatMap((id) => ['--disable-extension', id]),
     ];
 
     try {

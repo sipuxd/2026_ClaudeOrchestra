@@ -6,6 +6,7 @@ export enum Role {
   Worker = 'Worker',
   Security = 'Security',
   Reviewer = 'Reviewer',
+  Coordinator = 'Coordinator',
 }
 
 // --- Role Instances ---
@@ -13,11 +14,13 @@ export enum Role {
 export type WorkerInstance = 'Worker-1' | 'Worker-2';
 export type SecurityInstance = 'Security-1';
 export type ReviewerInstance = 'Reviewer-1';
+export type CoordinatorInstance = 'Coordinator-1';
 
 export type RoleInstance =
   | WorkerInstance
   | SecurityInstance
-  | ReviewerInstance;
+  | ReviewerInstance
+  | CoordinatorInstance;
 
 // All valid instance identifiers
 export const VALID_INSTANCES: readonly RoleInstance[] = [
@@ -25,6 +28,7 @@ export const VALID_INSTANCES: readonly RoleInstance[] = [
   'Worker-2',
   'Security-1',
   'Reviewer-1',
+  'Coordinator-1',
 ] as const;
 
 // Map role to its valid instances
@@ -32,6 +36,7 @@ export const ROLE_INSTANCES: Record<Role, readonly RoleInstance[]> = {
   [Role.Worker]: ['Worker-1', 'Worker-2'],
   [Role.Security]: ['Security-1'],
   [Role.Reviewer]: ['Reviewer-1'],
+  [Role.Coordinator]: ['Coordinator-1'],
 } as const;
 
 // --- JTBD (Jobs To Be Done) ---

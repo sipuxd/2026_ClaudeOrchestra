@@ -39,12 +39,15 @@ The engine does not create projects. You create a repo, clone it locally, then c
               │   PIPELINE    │  ← TypeScript engine (Node.js)
               │  ORCHESTRATOR │
               └──┬──┬──┬──┬──┘
-                 │  │  │  │     4 warm provider SDK sessions
+                 │  │  │  │     4 warm provider SDK sessions, plus
+                 │  │  │  │     1 Coordinator-1 per team (chat panel)
                  │  │  │  └──── Reviewer-1  (quality gate)
                  │  │  └─────── Worker-2    (completeness verifier)
                  │  └────────── Worker-1    (implementer)
                  └───────────── Security-1  (pre-scan + post-sweep)
 ```
+
+Each team also has a `Coordinator-1` chat session (lazy-spawned on first message) that lives in the dashboard's slide panel. The user talks to Coordinator-1; it decides whether to respond directly or emit `TRIGGER_PIPELINE` to kick off a fresh Security-1 → Worker-1/2 → Reviewer-1 cycle. See [AGENTS.md](AGENTS.md#team-chat-coordinator-1) for the verdict contract.
 
 ### Pipeline Flow
 

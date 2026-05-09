@@ -1,8 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
-import * as path from 'node:path';
 import * as os from 'node:os';
-import { Logger, LogLevel, type LogEntry } from '../src/logger/logger.js';
+import * as path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { type LogEntry, Logger, LogLevel } from '../src/logger/logger.js';
 import { PipelineOrchestrator } from '../src/pipeline-orchestrator.js';
 import { TeamPhase } from '../src/state/team-state.js';
 
@@ -18,7 +18,8 @@ afterEach(() => {
 
 function readLogEntries(filePath: string): LogEntry[] {
   if (!fs.existsSync(filePath)) return [];
-  return fs.readFileSync(filePath, 'utf-8')
+  return fs
+    .readFileSync(filePath, 'utf-8')
     .trim()
     .split('\n')
     .filter(Boolean)

@@ -4,9 +4,8 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { Role, type RoleInstance } from '../roles/role-types.js';
-import { TeamPhase } from '../state/team-state.js';
 import type { PipelineOrchestrator } from '../pipeline-orchestrator.js';
+import { TeamPhase } from '../state/team-state.js';
 
 // --- Log Levels ---
 
@@ -26,11 +25,16 @@ const LOG_LEVEL_NAMES: Record<LogLevel, string> = {
 
 function parseLogLevel(value: string | undefined): LogLevel {
   switch (value?.toLowerCase()) {
-    case 'debug': return LogLevel.Debug;
-    case 'info': return LogLevel.Info;
-    case 'warn': return LogLevel.Warn;
-    case 'error': return LogLevel.Error;
-    default: return LogLevel.Info;
+    case 'debug':
+      return LogLevel.Debug;
+    case 'info':
+      return LogLevel.Info;
+    case 'warn':
+      return LogLevel.Warn;
+    case 'error':
+      return LogLevel.Error;
+    default:
+      return LogLevel.Info;
   }
 }
 
@@ -122,7 +126,7 @@ const LEVEL_LABELS: Record<string, string> = {
 // --- Log file rotation ---
 
 const MAX_MAIN_LOG_BYTES = 10 * 1024 * 1024; // 10 MB
-const MAX_ERROR_LOG_BYTES = 5 * 1024 * 1024;  // 5 MB
+const MAX_ERROR_LOG_BYTES = 5 * 1024 * 1024; // 5 MB
 
 // --- Logger ---
 
@@ -184,7 +188,7 @@ export class Logger {
       messageId?: string;
       flag?: string;
       data?: Record<string, unknown>;
-    }
+    },
   ): void {
     if (level < this.level) return;
 
@@ -266,10 +270,17 @@ export class Logger {
     });
 
     orchestrator.on('phase-transition', (teamId, from, to, trigger) => {
-      const level = to === TeamPhase.Errored ? LogLevel.Error :
-        to === TeamPhase.Cancelled ? LogLevel.Warn : LogLevel.Info;
-      const isLoopLimit = to === TeamPhase.Errored &&
-        (trigger.includes('revision') || trigger.includes('rejection') || trigger.includes('backward'));
+      const level =
+        to === TeamPhase.Errored
+          ? LogLevel.Error
+          : to === TeamPhase.Cancelled
+            ? LogLevel.Warn
+            : LogLevel.Info;
+      const isLoopLimit =
+        to === TeamPhase.Errored &&
+        (trigger.includes('revision') ||
+          trigger.includes('rejection') ||
+          trigger.includes('backward'));
       const event: LogEvent = isLoopLimit ? 'loop_limit_reached' : 'phase_transition';
 
       this.log(level, event, `${teamId}: ${from} -> ${to} (${trigger})`, {
@@ -281,8 +292,12 @@ export class Logger {
 
     orchestrator.on('task-complete', (teamId, phase, durationMs) => {
       const seconds = (durationMs / 1000).toFixed(1);
-      const outcome = phase === TeamPhase.Done ? 'SUCCESS' :
-        phase === TeamPhase.Errored ? 'ERRORED' : 'CANCELLED';
+      const outcome =
+        phase === TeamPhase.Done
+          ? 'SUCCESS'
+          : phase === TeamPhase.Errored
+            ? 'ERRORED'
+            : 'CANCELLED';
       this.info('task_complete', `Task ${outcome} in ${seconds}s`, {
         teamId,
         phase,
@@ -337,7 +352,8 @@ export class Logger {
 
     orchestrator.on('error', (teamId, err) => {
       const event: LogEvent = err.message.includes('validation')
-        ? 'validation_error' : 'agent_errored';
+        ? 'validation_error'
+        : 'agent_errored';
       this.error(event, `${teamId}: ${err.message}`, {
         teamId,
         data: { error: err.message },
@@ -396,7 +412,8 @@ export class Logger {
       case 'message_received': {
         const srcColor = this.instanceColor(entry.roleSourceInstance);
         const arrow = entry.event === 'message_sent' ? '=>' : '->';
-        line += `${srcColor}${entry.roleSourceInstance}${ANSI.reset} ${arrow} ` +
+        line +=
+          `${srcColor}${entry.roleSourceInstance}${ANSI.reset} ${arrow} ` +
           `[${ANSI.bold}${entry.flag}${ANSI.reset}] ${arrow} ${entry.roleTarget}`;
         break;
       }
@@ -455,9 +472,10 @@ export class Logger {
       case 'task_complete': {
         const outcome = entry.data.outcome as string;
         const secs = entry.data.durationSeconds as number;
-        const outcomeColor = outcome === 'SUCCESS' ? ANSI.green :
-          outcome === 'ERRORED' ? ANSI.brightRed : ANSI.yellow;
-        line += `\n` +
+        const outcomeColor =
+          outcome === 'SUCCESS' ? ANSI.green : outcome === 'ERRORED' ? ANSI.brightRed : ANSI.yellow;
+        line +=
+          `\n` +
           `${outcomeColor}${ANSI.bold}════════════════════════════════════════${ANSI.reset}\n` +
           `${outcomeColor}${ANSI.bold}  TASK ${outcome}${ANSI.reset}  ⏱  ${secs}s\n` +
           `${outcomeColor}${ANSI.bold}════════════════════════════════════════${ANSI.reset}`;
@@ -525,12 +543,7 @@ export class Logger {
     }
   }
 
-  private rotateIfNeeded(
-    filePath: string,
-    fd: number,
-    maxBytes: number,
-    reopen: () => void
-  ): void {
+  private rotateIfNeeded(filePath: string, fd: number, maxBytes: number, reopen: () => void): void {
     try {
       const stat = fs.fstatSync(fd);
       if (stat.size >= maxBytes) {

@@ -7,7 +7,7 @@ export type ConfigFlags = Record<string, string>;
 
 export function resolveConfigPath(
   flags: ConfigFlags,
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
 ): string {
   return flags['--config'] ?? env.CLAUDE_ORCHESTRA_CONFIG ?? './orchestra.config.json';
 }
@@ -25,14 +25,19 @@ export function loadConfig(configPath: string): Partial<PipelineOrchestraConfig>
     if (typeof parsed.skipRequirements === 'boolean') {
       config.skipRequirements = parsed.skipRequirements;
     }
-    if (parsed.teams?.maxConcurrentTeams) config.maxConcurrentTeams = parsed.teams.maxConcurrentTeams;
+    if (parsed.teams?.maxConcurrentTeams)
+      config.maxConcurrentTeams = parsed.teams.maxConcurrentTeams;
     if (parsed.agentRuntime) {
       config.agentRuntime = {};
       if (parsed.agentRuntime.provider) config.agentRuntime.provider = parsed.agentRuntime.provider;
       if (parsed.agentRuntime.auth) config.agentRuntime.auth = parsed.agentRuntime.auth;
       if (parsed.agentRuntime.model) config.agentRuntime.model = parsed.agentRuntime.model;
     }
-    if (parsed.limits?.maxRevisions || parsed.limits?.maxRejections || parsed.limits?.maxTotalBackwardTransitions) {
+    if (
+      parsed.limits?.maxRevisions ||
+      parsed.limits?.maxRejections ||
+      parsed.limits?.maxTotalBackwardTransitions
+    ) {
       config.limits = {
         maxRevisions: parsed.limits.maxRevisions ?? 3,
         maxRejections: parsed.limits.maxRejections ?? 2,
@@ -69,7 +74,8 @@ export function loadConfig(configPath: string): Partial<PipelineOrchestraConfig>
         config.guardrails.enabled = parsed.guardrails.enabled;
       }
       if (typeof parsed.guardrails.abortCodexOnForbiddenStreamEvent === 'boolean') {
-        config.guardrails.abortCodexOnForbiddenStreamEvent = parsed.guardrails.abortCodexOnForbiddenStreamEvent;
+        config.guardrails.abortCodexOnForbiddenStreamEvent =
+          parsed.guardrails.abortCodexOnForbiddenStreamEvent;
       }
     }
     if (parsed.contracts) {
@@ -108,7 +114,7 @@ export function loadConfig(configPath: string): Partial<PipelineOrchestraConfig>
 
 export function applyCliOverrides(
   fileConfig: Partial<PipelineOrchestraConfig>,
-  flags: ConfigFlags
+  flags: ConfigFlags,
 ): Partial<PipelineOrchestraConfig> {
   const config: Partial<PipelineOrchestraConfig> = { ...fileConfig };
 
@@ -137,7 +143,7 @@ export function applyCliOverrides(
 }
 
 export function buildPipelineConfig(
-  config: Partial<PipelineOrchestraConfig>
+  config: Partial<PipelineOrchestraConfig>,
 ): Partial<PipelineOrchestraConfig> {
   return {
     registryPath: config.registryPath,

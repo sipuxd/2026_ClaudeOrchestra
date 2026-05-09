@@ -22,5 +22,5 @@ export const INSTANCE_TO_ROLE: Record<RoleInstance, Role> = {
 };
 
 export const ALL_INSTANCES: readonly RoleInstance[] = Object.keys(
-  INSTANCE_AGENT_FILES
+  INSTANCE_AGENT_FILES,
 ) as RoleInstance[];

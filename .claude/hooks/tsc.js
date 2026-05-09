@@ -1,4 +1,4 @@
-import { execSync } from "child_process";
+import { execSync } from 'node:child_process';
 
 // Read the JSON payload from stdin
 async function readInput() {
@@ -11,9 +11,7 @@ async function readInput() {
 
 async function main() {
   const input = await readInput();
-  const file =
-    input.tool_response?.filePath ||
-    input.tool_input?.file_path;
+  const file = input.tool_response?.filePath || input.tool_input?.file_path;
 
   // Only check TypeScript files
   if (!file || !/\.(ts|tsx)$/.test(file)) {
@@ -21,12 +19,12 @@ async function main() {
   }
 
   try {
-    execSync("npx tsc --noEmit --incremental --tsBuildInfoFile .claude/.tsbuildinfo", {
-      stdio: ["ignore", "pipe", "pipe"],
+    execSync('npx tsc --noEmit --incremental --tsBuildInfoFile .claude/.tsbuildinfo', {
+      stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 30000,
     });
   } catch (err) {
-    const output = err.stderr?.toString() || err.stdout?.toString() || "";
+    const output = err.stderr?.toString() || err.stdout?.toString() || '';
     if (output) {
       console.error(output);
     }

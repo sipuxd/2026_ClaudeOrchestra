@@ -13,9 +13,12 @@
     "test:watch": "vitest",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "test:stress": "vitest run --config vitest.stress.config.ts",
-    "dashboard": "node dist/index.js dashboard --mode pipeline"
+    "dashboard": "node dist/index.js dashboard --mode pipeline",
+    "lint": "biome check .",
+    "format": "biome format --write ."
   },
   "devDependencies": {
+    "@biomejs/biome": "2.4.15",
     "@types/node": "^22.0.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"

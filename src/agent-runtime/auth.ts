@@ -31,14 +31,14 @@ function envWithout(keys: string[]): Record<string, string> {
 }
 
 function requireUnsetForSubscription(provider: AgentProvider, keys: string[]): void {
-  const setKeys = keys.filter(key => process.env[key]);
+  const setKeys = keys.filter((key) => process.env[key]);
   if (setKeys.length === 0) return;
 
   const label = provider === 'claude' ? 'Claude' : 'Codex';
   throw new Error(
     `${label} subscription auth requested, but ${setKeys.join(', ')} ` +
-    `${setKeys.length === 1 ? 'is' : 'are'} set. Unset ${setKeys.join(', ')} ` +
-    'to avoid API-key or provider-based billing.'
+      `${setKeys.length === 1 ? 'is' : 'are'} set. Unset ${setKeys.join(', ')} ` +
+      'to avoid API-key or provider-based billing.',
   );
 }
 
@@ -59,11 +59,7 @@ export function validateAgentRuntime(runtime: AgentRuntimeConfig): void {
   }
 
   if (runtime.provider === 'codex') {
-    requireUnsetForSubscription('codex', [
-      'CODEX_API_KEY',
-      'OPENAI_API_KEY',
-      'OPENAI_AUTH_TOKEN',
-    ]);
+    requireUnsetForSubscription('codex', ['CODEX_API_KEY', 'OPENAI_API_KEY', 'OPENAI_AUTH_TOKEN']);
     return;
   }
 
@@ -84,9 +80,5 @@ export function buildClaudeSubscriptionEnv(): Record<string, string | undefined>
 }
 
 export function buildCodexSubscriptionEnv(): Record<string, string> {
-  return envWithout([
-    'CODEX_API_KEY',
-    'OPENAI_API_KEY',
-    'OPENAI_AUTH_TOKEN',
-  ]);
+  return envWithout(['CODEX_API_KEY', 'OPENAI_API_KEY', 'OPENAI_AUTH_TOKEN']);
 }

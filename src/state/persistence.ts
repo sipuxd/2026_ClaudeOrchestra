@@ -6,10 +6,10 @@
 // target project's .claude-orchestra/teams/{teamId}/ directory,
 // not in a single global data/ directory.
 
+import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { randomUUID } from 'node:crypto';
-import { TeamState, type TeamStateData, type ChatMessage } from './team-state.js';
+import type { ChatMessage, TeamState, TeamStateData } from './team-state.js';
 
 export interface PersistenceOptions {
   /** Debounce interval in ms (default: 1000) */
@@ -48,7 +48,9 @@ export class StatePersistence {
   private statePath(teamId: string): string {
     const dir = this.teamDirs.get(teamId);
     if (!dir) {
-      throw new Error(`No directory registered for team "${teamId}". Call registerTeamDir() first.`);
+      throw new Error(
+        `No directory registered for team "${teamId}". Call registerTeamDir() first.`,
+      );
     }
     return path.join(dir, 'state.json');
   }
@@ -57,7 +59,9 @@ export class StatePersistence {
   private chatPath(teamId: string): string {
     const dir = this.teamDirs.get(teamId);
     if (!dir) {
-      throw new Error(`No directory registered for team "${teamId}". Call registerTeamDir() first.`);
+      throw new Error(
+        `No directory registered for team "${teamId}". Call registerTeamDir() first.`,
+      );
     }
     return path.join(dir, 'chat.jsonl');
   }
@@ -66,7 +70,9 @@ export class StatePersistence {
   ensureTeamDir(teamId: string): void {
     const dir = this.teamDirs.get(teamId);
     if (!dir) {
-      throw new Error(`No directory registered for team "${teamId}". Call registerTeamDir() first.`);
+      throw new Error(
+        `No directory registered for team "${teamId}". Call registerTeamDir() first.`,
+      );
     }
     fs.mkdirSync(dir, { recursive: true });
   }
@@ -150,7 +156,9 @@ export class StatePersistence {
   appendChatMessage(teamId: string, message: ChatMessage): void {
     const dir = this.teamDirs.get(teamId);
     if (!dir) {
-      throw new Error(`No directory registered for team "${teamId}". Call registerTeamDir() first.`);
+      throw new Error(
+        `No directory registered for team "${teamId}". Call registerTeamDir() first.`,
+      );
     }
     fs.mkdirSync(dir, { recursive: true });
     const filePath = path.join(dir, 'chat.jsonl');
@@ -164,8 +172,8 @@ export class StatePersistence {
       const content = fs.readFileSync(filePath, 'utf-8');
       return content
         .split('\n')
-        .filter(line => line.trim().length > 0)
-        .map(line => JSON.parse(line) as ChatMessage);
+        .filter((line) => line.trim().length > 0)
+        .map((line) => JSON.parse(line) as ChatMessage);
     } catch {
       return [];
     }
@@ -192,7 +200,9 @@ export class StatePersistence {
   private writeState(state: TeamState): void {
     const dir = this.teamDirs.get(state.teamId);
     if (!dir) {
-      throw new Error(`No directory registered for team "${state.teamId}". Call registerTeamDir() first.`);
+      throw new Error(
+        `No directory registered for team "${state.teamId}". Call registerTeamDir() first.`,
+      );
     }
     fs.mkdirSync(dir, { recursive: true });
 

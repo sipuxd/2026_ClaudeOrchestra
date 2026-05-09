@@ -1,13 +1,13 @@
-import { describe, expect, it, beforeEach, afterEach } from 'vitest';
+import { execSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { execSync } from 'node:child_process';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   auditProjectChanges,
   evaluateChangedPath,
-  evaluateCommand,
   evaluateCodexStreamItem,
+  evaluateCommand,
   evaluatePathAccess,
 } from '../src/guardrails.js';
 
@@ -32,7 +32,9 @@ function initRepo(): void {
 
 describe('guardrail policy', () => {
   it('blocks traversal path segments without blocking normal dots', () => {
-    expect(evaluatePathAccess('src/../../secret.txt').map(f => f.kind)).toContain('path_traversal');
+    expect(evaluatePathAccess('src/../../secret.txt').map((f) => f.kind)).toContain(
+      'path_traversal',
+    );
     expect(evaluatePathAccess('src/utils.test.ts')).toEqual([]);
   });
 
@@ -43,9 +45,13 @@ describe('guardrail policy', () => {
   });
 
   it('warns on dependency and runtime config paths', () => {
-    expect(evaluateChangedPath('package.json').map(f => f.kind)).toContain('dependency_change');
-    expect(evaluateChangedPath('agents/worker-1.agent.md').map(f => f.kind)).toContain('runtime_config_change');
-    expect(evaluateChangedPath('agents/worker-2.agent.md').map(f => f.kind)).toContain('runtime_config_change');
+    expect(evaluateChangedPath('package.json').map((f) => f.kind)).toContain('dependency_change');
+    expect(evaluateChangedPath('agents/worker-1.agent.md').map((f) => f.kind)).toContain(
+      'runtime_config_change',
+    );
+    expect(evaluateChangedPath('agents/worker-2.agent.md').map((f) => f.kind)).toContain(
+      'runtime_config_change',
+    );
   });
 
   it('blocks forbidden shell commands', () => {
@@ -62,7 +68,7 @@ describe('guardrail policy', () => {
       status: 'in_progress',
       aggregated_output: '',
     });
-    expect(commandFindings.some(f => f.kind === 'forbidden_command')).toBe(true);
+    expect(commandFindings.some((f) => f.kind === 'forbidden_command')).toBe(true);
 
     const fileFindings = evaluateCodexStreamItem({
       id: 'file-1',
@@ -70,19 +76,26 @@ describe('guardrail policy', () => {
       status: 'completed',
       changes: [{ path: '.env', kind: 'add' }],
     });
-    expect(fileFindings.some(f => f.kind === 'protected_path')).toBe(true);
+    expect(fileFindings.some((f) => f.kind === 'protected_path')).toBe(true);
   });
 
   it('audits changed paths and secret-like additions', () => {
     initRepo();
     fs.writeFileSync(path.join(tmpDir, 'package.json'), '{"dependencies":{}}\n');
-    fs.writeFileSync(path.join(tmpDir, 'new-secret.txt'), 'api_key = "sk-proj-abcdefghijklmnopqrstuvwxyz"\n');
+    fs.writeFileSync(
+      path.join(tmpDir, 'new-secret.txt'),
+      'api_key = "sk-proj-abcdefghijklmnopqrstuvwxyz"\n',
+    );
 
     const report = auditProjectChanges(tmpDir, 'work-phase');
 
     expect(report.ok).toBe(false);
-    expect(report.findings.some(f => f.kind === 'dependency_change' && f.severity === 'warn')).toBe(true);
-    expect(report.findings.some(f => f.kind === 'secret_pattern' && f.severity === 'block')).toBe(true);
+    expect(
+      report.findings.some((f) => f.kind === 'dependency_change' && f.severity === 'warn'),
+    ).toBe(true);
+    expect(report.findings.some((f) => f.kind === 'secret_pattern' && f.severity === 'block')).toBe(
+      true,
+    );
   });
 
   it('returns ok outside git repos so unit-test temp projects keep working', () => {

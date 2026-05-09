@@ -3,8 +3,7 @@
 // Replaces the legacy sidebar-based layout with a portfolio grid.
 
 export function buildDashboardHTML(): string {
-
-const CSS = `
+  const CSS = `
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
   --bg:#0d1117;--surface:#161b22;--border:#30363d;
@@ -423,7 +422,7 @@ a:hover{text-decoration:underline}
 .chat-send-btn{align-self:stretch;padding:0 20px;flex-shrink:0}
 `;
 
-const JS = `
+  const JS = `
 (function(){
 'use strict';
 
@@ -1973,7 +1972,7 @@ setTimeout(function() {
 })();
 `;
 
-return `<!DOCTYPE html>
+  return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">

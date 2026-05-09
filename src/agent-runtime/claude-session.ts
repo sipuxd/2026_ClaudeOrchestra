@@ -1,5 +1,5 @@
-import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { Query, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import { query } from '@anthropic-ai/claude-agent-sdk';
 import { buildGovernanceHooks } from '../hooks.js';
 import { buildClaudeSubscriptionEnv } from './auth.js';
 import { toClaudeEffort } from './effort.js';
@@ -15,7 +15,7 @@ class PromptChannel {
     if (images && images.length > 0) {
       content = [
         { type: 'text', text: prompt },
-        ...images.map(img => ({
+        ...images.map((img) => ({
           type: 'image' as const,
           source: { type: 'base64' as const, media_type: img.media_type, data: img.data },
         })),

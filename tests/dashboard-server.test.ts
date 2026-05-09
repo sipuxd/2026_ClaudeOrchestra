@@ -1,13 +1,15 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import * as http from 'node:http';
-import * as path from 'node:path';
 import * as fs from 'node:fs';
+import * as http from 'node:http';
 import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Mock the SDK before importing anything that uses it
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   query: vi.fn(() => {
-    async function* gen(): AsyncGenerator<any> { /* yields nothing */ }
+    async function* gen(): AsyncGenerator<any> {
+      /* yields nothing */
+    }
     const g = gen();
     return Object.assign(g, { close: () => {} });
   }),
@@ -33,7 +35,7 @@ function httpRequest(
   port: number,
   method: string,
   urlPath: string,
-  body?: object
+  body?: object,
 ): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const options: http.RequestOptions = {
@@ -45,7 +47,9 @@ function httpRequest(
     };
     const req = http.request(options, (res) => {
       let data = '';
-      res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+      res.on('data', (chunk: Buffer) => {
+        data += chunk.toString();
+      });
       res.on('end', () => resolve({ status: res.statusCode ?? 500, body: data }));
     });
     req.on('error', reject);
@@ -302,7 +306,7 @@ describe('DashboardServer', () => {
             // Check for team-created event
             if (gotInit && data.includes('event: team-created')) {
               const lines = data.split('\n');
-              const teamCreatedIdx = lines.findIndex(l => l === 'event: team-created');
+              const teamCreatedIdx = lines.indexOf('event: team-created');
               if (teamCreatedIdx >= 0 && lines[teamCreatedIdx + 1]) {
                 const eventData = JSON.parse(lines[teamCreatedIdx + 1].replace('data: ', ''));
                 expect(eventData.teamId).toBe('broadcast-test');
@@ -422,7 +426,7 @@ describe('DashboardServer', () => {
             }
             if (gotInit && data.includes('event: feedback')) {
               const lines = data.split('\n');
-              const fbIdx = lines.findIndex(l => l === 'event: feedback');
+              const fbIdx = lines.indexOf('event: feedback');
               if (fbIdx >= 0 && lines[fbIdx + 1]) {
                 const eventData = JSON.parse(lines[fbIdx + 1].replace('data: ', ''));
                 expect(eventData.teamId).toBe('fb-sse');

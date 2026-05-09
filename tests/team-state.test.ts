@@ -1,16 +1,11 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { randomUUID } from 'node:crypto';
-import { AgentState } from '../src/types/index.js';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Role } from '../src/roles/role-types.js';
-import {
-  TeamState,
-  TeamPhase,
-  TransitionError,
-  DEFAULT_LOOP_LIMITS,
-} from '../src/state/team-state.js';
 import { StatePersistence } from '../src/state/persistence.js';
+import { TeamPhase, TeamState, TransitionError } from '../src/state/team-state.js';
+import { AgentState } from '../src/types/index.js';
 
 // =============================================
 // TeamState — creation and accessors
@@ -228,9 +223,7 @@ describe('loop limits', () => {
 
     // Revision 3: should error
     team.transitionPhase(TeamPhase.Handoff);
-    expect(() => team.transitionPhase(TeamPhase.Work)).toThrow(
-      /Maximum revision count/
-    );
+    expect(() => team.transitionPhase(TeamPhase.Work)).toThrow(/Maximum revision count/);
     expect(team.currentPhase).toBe(TeamPhase.Errored);
   });
 
@@ -251,9 +244,7 @@ describe('loop limits', () => {
     team.transitionPhase(TeamPhase.Work);
     team.transitionPhase(TeamPhase.Handoff);
     team.transitionPhase(TeamPhase.Review);
-    expect(() => team.transitionPhase(TeamPhase.PreWork)).toThrow(
-      /Maximum rejection count/
-    );
+    expect(() => team.transitionPhase(TeamPhase.PreWork)).toThrow(/Maximum rejection count/);
     expect(team.currentPhase).toBe(TeamPhase.Errored);
   });
 
@@ -276,9 +267,7 @@ describe('loop limits', () => {
 
     // Backward 3: should error
     team.transitionPhase(TeamPhase.Handoff);
-    expect(() => team.transitionPhase(TeamPhase.Work)).toThrow(
-      /Maximum total backward/
-    );
+    expect(() => team.transitionPhase(TeamPhase.Work)).toThrow(/Maximum total backward/);
     expect(team.currentPhase).toBe(TeamPhase.Errored);
   });
 });
@@ -359,23 +348,19 @@ describe('agent state transitions', () => {
 
   // Invalid transitions
   it('rejects spawning → done (must go through active)', () => {
-    expect(() =>
-      team.transitionAgent('Worker-1', AgentState.Done)
-    ).toThrow(TransitionError);
+    expect(() => team.transitionAgent('Worker-1', AgentState.Done)).toThrow(TransitionError);
   });
 
   it('rejects idle → done', () => {
     team.transitionAgent('Worker-1', AgentState.Active);
     team.transitionAgent('Worker-1', AgentState.Idle);
-    expect(() =>
-      team.transitionAgent('Worker-1', AgentState.Done)
-    ).toThrow(TransitionError);
+    expect(() => team.transitionAgent('Worker-1', AgentState.Done)).toThrow(TransitionError);
   });
 
   it('rejects unknown instance', () => {
-    expect(() =>
-      team.transitionAgent('Worker-99' as any, AgentState.Active)
-    ).toThrow(TransitionError);
+    expect(() => team.transitionAgent('Worker-99' as any, AgentState.Active)).toThrow(
+      TransitionError,
+    );
   });
 });
 

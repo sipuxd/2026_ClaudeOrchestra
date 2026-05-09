@@ -1,10 +1,10 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import * as path from 'node:path';
+import { execSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
-import { execSync } from 'node:child_process';
-import { TeamPhase } from '../src/state/team-state.js';
+import * as path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Role } from '../src/roles/role-types.js';
+import { TeamPhase } from '../src/state/team-state.js';
 import { AgentState } from '../src/types/index.js';
 
 // --- Mock infrastructure for pipeline orchestrator ---
@@ -37,7 +37,9 @@ function createPipelineMock(): {
 
     const session: MockSession = {
       receivedMessages: [],
-      respond: () => { /* will be overridden below */ },
+      respond: () => {
+        /* will be overridden below */
+      },
       options: params.options ?? {},
       complete: () => {
         completed = true;
@@ -57,7 +59,7 @@ function createPipelineMock(): {
               session.receivedMessages.push(
                 typeof msg.message.content === 'string'
                   ? msg.message.content
-                  : JSON.stringify(msg.message.content)
+                  : JSON.stringify(msg.message.content),
               );
             }
           }
@@ -141,7 +143,16 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => {
 });
 
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
-import { PipelineOrchestrator, parseSecurityVerdict, parseReviewVerdict, parseVerifyVerdict, parseClassification, postProcessRequirements, sendWithVerdict, MalformedVerdictError } from '../src/pipeline-orchestrator.js';
+import {
+  MalformedVerdictError,
+  PipelineOrchestrator,
+  parseClassification,
+  parseReviewVerdict,
+  parseSecurityVerdict,
+  parseVerifyVerdict,
+  postProcessRequirements,
+  sendWithVerdict,
+} from '../src/pipeline-orchestrator.js';
 
 const GUARDED_ENV_KEYS = [
   'CLAUDE_CODE_USE_BEDROCK',
@@ -186,14 +197,22 @@ describe('PipelineOrchestrator', () => {
     fs.mkdirSync(rolesDir, { recursive: true });
 
     // Create role prompt files with frontmatter (config is read from frontmatter)
-    fs.writeFileSync(path.join(rolesDir, 'worker-1.agent.md'),
-      '---\nname: worker-1\nmodel: claude-opus-4-6\neffort: high\nmaxTurns: 50\n---\n\n# Worker-1\nYou execute coding tasks.');
-    fs.writeFileSync(path.join(rolesDir, 'worker-2.agent.md'),
-      '---\nname: worker-2\nmodel: claude-opus-4-6\neffort: medium\nmaxTurns: 20\ndisallowedTools: Write, Edit, Bash\n---\n\n# Worker-2\nYou verify requirements.');
-    fs.writeFileSync(path.join(rolesDir, 'security.agent.md'),
-      '---\nname: security\nmodel: claude-opus-4-6\neffort: low\nmaxTurns: 5\ndisallowedTools: Write, Edit, Bash\n---\n\n# Security\nYou scan for security issues.');
-    fs.writeFileSync(path.join(rolesDir, 'reviewer.agent.md'),
-      '---\nname: reviewer\nmodel: claude-opus-4-6\neffort: low\nmaxTurns: 5\ndisallowedTools: Write, Edit, Bash\n---\n\n# Reviewer\nYou review code quality.');
+    fs.writeFileSync(
+      path.join(rolesDir, 'worker-1.agent.md'),
+      '---\nname: worker-1\nmodel: claude-opus-4-6\neffort: high\nmaxTurns: 50\n---\n\n# Worker-1\nYou execute coding tasks.',
+    );
+    fs.writeFileSync(
+      path.join(rolesDir, 'worker-2.agent.md'),
+      '---\nname: worker-2\nmodel: claude-opus-4-6\neffort: medium\nmaxTurns: 20\ndisallowedTools: Write, Edit, Bash\n---\n\n# Worker-2\nYou verify requirements.',
+    );
+    fs.writeFileSync(
+      path.join(rolesDir, 'security.agent.md'),
+      '---\nname: security\nmodel: claude-opus-4-6\neffort: low\nmaxTurns: 5\ndisallowedTools: Write, Edit, Bash\n---\n\n# Security\nYou scan for security issues.',
+    );
+    fs.writeFileSync(
+      path.join(rolesDir, 'reviewer.agent.md'),
+      '---\nname: reviewer\nmodel: claude-opus-4-6\neffort: low\nmaxTurns: 5\ndisallowedTools: Write, Edit, Bash\n---\n\n# Reviewer\nYou review code quality.',
+    );
 
     mock = createPipelineMock();
     vi.mocked(sdkQuery).mockImplementation(mock.mockQueryFn);
@@ -235,15 +254,16 @@ describe('PipelineOrchestrator', () => {
 
     it('throws on duplicate team name', () => {
       orchestrator.createTeam('team-a', projectDir);
-      expect(() => orchestrator.createTeam('team-a', projectDir))
-        .toThrow('already exists');
+      expect(() => orchestrator.createTeam('team-a', projectDir)).toThrow('already exists');
     });
 
     it('enforces max concurrent teams per project (not global)', () => {
       // The limit is per-project: a single project can hold up to
       // maxConcurrentTeams teams, but a different project gets its own slots.
-      const pA = path.join(tmpDir, 'pA'); fs.mkdirSync(pA, { recursive: true });
-      const pB = path.join(tmpDir, 'pB'); fs.mkdirSync(pB, { recursive: true });
+      const pA = path.join(tmpDir, 'pA');
+      fs.mkdirSync(pA, { recursive: true });
+      const pB = path.join(tmpDir, 'pB');
+      fs.mkdirSync(pB, { recursive: true });
 
       // Fill project A to the cap (test config sets maxConcurrentTeams=3).
       orchestrator.createTeam('a1', pA);
@@ -251,8 +271,9 @@ describe('PipelineOrchestrator', () => {
       orchestrator.createTeam('a3', pA);
 
       // 4th team in the same project must be rejected.
-      expect(() => orchestrator.createTeam('a4', pA))
-        .toThrow(/Maximum concurrent teams.*for this project/);
+      expect(() => orchestrator.createTeam('a4', pA)).toThrow(
+        /Maximum concurrent teams.*for this project/,
+      );
 
       // But a team in a DIFFERENT project succeeds — slots are per-project.
       const stateB = orchestrator.createTeam('b1', pB);
@@ -355,20 +376,22 @@ describe('PipelineOrchestrator', () => {
     // the wrong verdict (silent flip toward less-severe). With the strip, the
     // explicit prefix check sees the post-thinking content and returns correctly.
     it('parses REVISION_NEEDED through a leaked <thinking> block containing approve language', () => {
-      const result = parseReviewVerdict('<thinking>looks good</thinking>\n\nREVISION_NEEDED — missing test');
+      const result = parseReviewVerdict(
+        '<thinking>looks good</thinking>\n\nREVISION_NEEDED — missing test',
+      );
       expect(result.verdict).toBe('REVISION_NEEDED');
     });
 
     it('parses REJECTED through a leaked <thinking> block containing approve-implying reasoning', () => {
       const result = parseReviewVerdict(
-        '<thinking>The implementation looks good but the error path has a bug</thinking>\n\nREJECTED — error path crashes on null input'
+        '<thinking>The implementation looks good but the error path has a bug</thinking>\n\nREJECTED — error path crashes on null input',
       );
       expect(result.verdict).toBe('REJECTED');
     });
 
     it('parses APPROVED through a leaked <thinking> block containing revision-implying reasoning', () => {
       const result = parseReviewVerdict(
-        '<thinking>code is well-implemented but missing tests would normally need revision</thinking>\n\nAPPROVED — tests cover the same paths via consumers'
+        '<thinking>code is well-implemented but missing tests would normally need revision</thinking>\n\nAPPROVED — tests cover the same paths via consumers',
       );
       expect(result.verdict).toBe('APPROVED');
     });
@@ -389,7 +412,8 @@ describe('PipelineOrchestrator', () => {
       // Without the two-step strip (thinking first, then prefix-to-numbered-line),
       // the lookahead in step 2 would anchor on "1. fake consideration" inside
       // the thinking block and leave its content in the output.
-      const input = '<thinking>I considered:\n1. fake consideration\n2. another fake</thinking>\n\n1. real requirement';
+      const input =
+        '<thinking>I considered:\n1. fake consideration\n2. another fake</thinking>\n\n1. real requirement';
       expect(postProcessRequirements(input)).toBe('1. real requirement');
     });
 
@@ -409,7 +433,7 @@ describe('PipelineOrchestrator', () => {
       orchestrator.assignTask('simple', 'fix a typo');
 
       // Wait for session to be created
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       // Simple task: only 1 query() call (Worker-1)
       expect(mock.sessions.length).toBe(1);
@@ -426,7 +450,7 @@ describe('PipelineOrchestrator', () => {
         orch.createTeam('simple-no-requirements', projectDir);
         orch.assignTask('simple-no-requirements', 'build me a calculator');
 
-        await new Promise(resolve => setTimeout(resolve, 50));
+        await new Promise((resolve) => setTimeout(resolve, 50));
 
         expect(mock.sessions.length).toBe(1);
         expect(mock.getSession(0).receivedMessages.join('\n')).toContain('build me a calculator');
@@ -443,14 +467,14 @@ describe('PipelineOrchestrator', () => {
       orchestrator.createTeam('simple', projectDir);
       orchestrator.assignTask('simple', 'fix a typo');
 
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       // Worker-1 session
       const workerSession = mock.getSession(0);
       expect(workerSession).toBeDefined();
 
       // Wait for the message to be received
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       // Respond as Worker-1
       workerSession.respond('Fixed the typo in README.md');
@@ -478,7 +502,7 @@ describe('PipelineOrchestrator', () => {
       orchestrator.createTeam('simple', projectDir);
       orchestrator.assignTask('simple', 'fix a typo');
 
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       const workerSession = mock.getSession(0);
       expect(workerSession.options.model).toBe('claude-opus-4-6');
@@ -488,7 +512,7 @@ describe('PipelineOrchestrator', () => {
       orchestrator.createTeam('simple', projectDir);
       orchestrator.assignTask('simple', 'fix a typo');
 
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       const workerSession = mock.getSession(0);
       expect(workerSession.options.permissionMode).toBe('bypassPermissions');
@@ -504,7 +528,7 @@ describe('PipelineOrchestrator', () => {
       orchestrator.createTeam('guarded-simple', projectDir);
       orchestrator.assignTask('guarded-simple', 'fix a typo');
 
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       const workerSession = mock.getSession(0);
       fs.writeFileSync(
@@ -529,10 +553,13 @@ describe('PipelineOrchestrator', () => {
   describe('standard pipeline', () => {
     it('creates 4 agent sessions for standard tasks', async () => {
       orchestrator.createTeam('standard', projectDir);
-      orchestrator.assignTask('standard', 'implement user authentication with JWT tokens and database integration');
+      orchestrator.assignTask(
+        'standard',
+        'implement user authentication with JWT tokens and database integration',
+      );
 
       // Wait for sessions to be created
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       // Standard task: 4 query() calls (Security, Worker-1, Worker-2, Reviewer)
       expect(mock.sessions.length).toBe(4);
@@ -542,7 +569,10 @@ describe('PipelineOrchestrator', () => {
       const handler = vi.fn();
       orchestrator.on('task-classified', handler);
       orchestrator.createTeam('standard', projectDir);
-      orchestrator.assignTask('standard', 'implement user authentication with JWT tokens and database integration');
+      orchestrator.assignTask(
+        'standard',
+        'implement user authentication with JWT tokens and database integration',
+      );
       expect(handler).toHaveBeenCalledWith('standard', 'standard', 4);
     });
 
@@ -557,9 +587,12 @@ describe('PipelineOrchestrator', () => {
       });
 
       orchestrator.createTeam('standard', projectDir);
-      orchestrator.assignTask('standard', 'implement user authentication with JWT tokens and database integration');
+      orchestrator.assignTask(
+        'standard',
+        'implement user authentication with JWT tokens and database integration',
+      );
 
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       // Sessions: [0]=Security, [1]=Worker-1, [2]=Worker-2, [3]=Reviewer
       const security = mock.getSession(0);
@@ -568,31 +601,31 @@ describe('PipelineOrchestrator', () => {
       const reviewer = mock.getSession(3);
 
       // Wait for security scan message
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
       // Step 1: Security scan responds
       security.respond('SAFE: all files\nNo issues found.');
 
       // Wait for Worker-1 to receive message (sequential now, not parallel)
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
       // Step 2a: Worker-1 implements
       worker1.respond('Implemented JWT auth module.');
 
       // Wait for Worker-2 to receive verification prompt
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
       // Step 2b: Worker-2 verifies completeness
       worker2.respond('COMPLETE — all requirements implemented.');
 
       // Wait for security sweep
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
       // Step 3: Security sweep responds
       security.respond('APPROVED — no vulnerabilities found.');
 
       // Wait for reviewer
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
       // Step 4: Reviewer approves
       reviewer.respond('APPROVED — implementation is correct and well-tested.');
@@ -620,9 +653,12 @@ describe('PipelineOrchestrator', () => {
 
     it('uses opus model for all agents', async () => {
       orchestrator.createTeam('standard', projectDir);
-      orchestrator.assignTask('standard', 'implement user authentication with JWT tokens and database integration');
+      orchestrator.assignTask(
+        'standard',
+        'implement user authentication with JWT tokens and database integration',
+      );
 
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       // All 4 sessions should use opus
       for (let i = 0; i < 4; i++) {
@@ -632,9 +668,12 @@ describe('PipelineOrchestrator', () => {
 
     it('passes governance hooks to all agent sessions', async () => {
       orchestrator.createTeam('standard', projectDir);
-      orchestrator.assignTask('standard', 'implement user authentication with JWT tokens and database integration');
+      orchestrator.assignTask(
+        'standard',
+        'implement user authentication with JWT tokens and database integration',
+      );
 
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       // All 4 sessions should have PreToolUse and PostToolUse hooks
       for (let i = 0; i < 4; i++) {
@@ -647,17 +686,20 @@ describe('PipelineOrchestrator', () => {
 
     it('uses per-instance effort levels from frontmatter', async () => {
       orchestrator.createTeam('standard', projectDir);
-      orchestrator.assignTask('standard', 'implement user authentication with JWT tokens and database integration');
+      orchestrator.assignTask(
+        'standard',
+        'implement user authentication with JWT tokens and database integration',
+      );
 
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       // Sessions: [0]=Security, [1]=Worker-1, [2]=Worker-2, [3]=Reviewer.
       // Worker-1 and Worker-2 now load separate prompt files and may carry
       // different effort levels in frontmatter (verifier needs less than implementer).
-      expect(mock.getSession(0).options.effort).toBe('low');    // Security
-      expect(mock.getSession(1).options.effort).toBe('high');   // Worker-1 (implementer)
+      expect(mock.getSession(0).options.effort).toBe('low'); // Security
+      expect(mock.getSession(1).options.effort).toBe('high'); // Worker-1 (implementer)
       expect(mock.getSession(2).options.effort).toBe('medium'); // Worker-2 (verifier)
-      expect(mock.getSession(3).options.effort).toBe('low');    // Reviewer
+      expect(mock.getSession(3).options.effort).toBe('low'); // Reviewer
     });
   });
 
@@ -665,21 +707,21 @@ describe('PipelineOrchestrator', () => {
 
   describe('error handling', () => {
     it('transitions to Errored on agent failure', async () => {
-      const errorPromise = new Promise<Error>((resolve) => {
+      const _errorPromise = new Promise<Error>((resolve) => {
         orchestrator.on('error', (_teamId, error) => resolve(error));
       });
 
       orchestrator.createTeam('failing', projectDir);
       orchestrator.assignTask('failing', 'fix a typo');
 
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       // Simulate worker failure by completing without responding
       mock.getSession(0).complete();
 
       // The consume loop will end without a result, which should error
       // Give it time to process
-      await new Promise(resolve => setTimeout(resolve, 200));
+      await new Promise((resolve) => setTimeout(resolve, 200));
 
       // The pipeline should eventually detect the issue
       const status = orchestrator.getTeamStatus('failing');
@@ -695,7 +737,7 @@ describe('PipelineOrchestrator', () => {
       orchestrator.createTeam('shutdown-test', projectDir);
       orchestrator.assignTask('shutdown-test', 'fix a typo');
 
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       await orchestrator.shutdown();
 
@@ -706,8 +748,7 @@ describe('PipelineOrchestrator', () => {
 
     it('prevents new teams after shutdown', async () => {
       await orchestrator.shutdown();
-      expect(() => orchestrator.createTeam('post-shutdown', projectDir))
-        .toThrow('shutting down');
+      expect(() => orchestrator.createTeam('post-shutdown', projectDir)).toThrow('shutting down');
     });
 
     it('prevents new tasks after shutdown', async () => {
@@ -720,8 +761,7 @@ describe('PipelineOrchestrator', () => {
         rolesDir,
       });
       await orch2.shutdown();
-      expect(() => orch2.createTeam('post', projectDir))
-        .toThrow('shutting down');
+      expect(() => orch2.createTeam('post', projectDir)).toThrow('shutting down');
     });
   });
 
@@ -780,7 +820,7 @@ describe('PipelineOrchestrator', () => {
       orch.createTeam('runtime-model', projectDir);
       orch.assignTask('runtime-model', 'fix a typo');
 
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       const workerSession = mock.getSession(mock.sessions.length - 1);
       expect(workerSession.options.model).toBe('claude-runtime-model');
@@ -790,27 +830,33 @@ describe('PipelineOrchestrator', () => {
     it('rejects Codex subscription runtime when API key env vars are set', () => {
       process.env.OPENAI_API_KEY = 'test-key';
 
-      expect(() => new PipelineOrchestrator({
-        registryPath: path.join(tmpDir, 'registry-codex-api-key.json'),
-        rolesDir,
-        agentRuntime: {
-          provider: 'codex',
-          auth: 'subscription',
-        },
-      })).toThrow('Codex subscription auth requested');
+      expect(
+        () =>
+          new PipelineOrchestrator({
+            registryPath: path.join(tmpDir, 'registry-codex-api-key.json'),
+            rolesDir,
+            agentRuntime: {
+              provider: 'codex',
+              auth: 'subscription',
+            },
+          }),
+      ).toThrow('Codex subscription auth requested');
     });
 
     it('rejects Claude subscription runtime when API key env vars are set', () => {
       process.env.ANTHROPIC_API_KEY = 'test-key';
 
-      expect(() => new PipelineOrchestrator({
-        registryPath: path.join(tmpDir, 'registry-claude-api-key.json'),
-        rolesDir,
-        agentRuntime: {
-          provider: 'claude',
-          auth: 'subscription',
-        },
-      })).toThrow('Claude subscription auth requested');
+      expect(
+        () =>
+          new PipelineOrchestrator({
+            registryPath: path.join(tmpDir, 'registry-claude-api-key.json'),
+            rolesDir,
+            agentRuntime: {
+              provider: 'claude',
+              auth: 'subscription',
+            },
+          }),
+      ).toThrow('Claude subscription auth requested');
     });
 
     it('respects model overrides', async () => {
@@ -824,7 +870,7 @@ describe('PipelineOrchestrator', () => {
       orch.createTeam('model-override', projectDir);
       orch.assignTask('model-override', 'fix a typo');
 
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       const workerSession = mock.getSession(mock.sessions.length - 1);
       expect(workerSession.options.model).toBe('claude-sonnet-4-6');
@@ -842,7 +888,7 @@ describe('PipelineOrchestrator', () => {
       orch.createTeam('effort-test', projectDir);
       orch.assignTask('effort-test', 'fix a typo');
 
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       const workerSession = mock.getSession(mock.sessions.length - 1);
       expect(workerSession.options.effort).toBe('high');
@@ -878,13 +924,15 @@ describe('PipelineOrchestrator', () => {
     });
 
     it('lists all teams', () => {
-      const pa = path.join(tmpDir, 'pa'); fs.mkdirSync(pa, { recursive: true });
-      const pb = path.join(tmpDir, 'pb'); fs.mkdirSync(pb, { recursive: true });
+      const pa = path.join(tmpDir, 'pa');
+      fs.mkdirSync(pa, { recursive: true });
+      const pb = path.join(tmpDir, 'pb');
+      fs.mkdirSync(pb, { recursive: true });
       orchestrator.createTeam('a', pa);
       orchestrator.createTeam('b', pb);
       const all = orchestrator.getAllTeams();
       expect(all.length).toBe(2);
-      expect(all.map(t => t.teamId).sort()).toEqual(['a', 'b']);
+      expect(all.map((t) => t.teamId).sort()).toEqual(['a', 'b']);
     });
   });
 
@@ -892,18 +940,18 @@ describe('PipelineOrchestrator', () => {
 
   describe('task assignment validation', () => {
     it('throws for unknown team', () => {
-      expect(() => orchestrator.assignTask('ghost', 'do something'))
-        .toThrow('not found');
+      expect(() => orchestrator.assignTask('ghost', 'do something')).toThrow('not found');
     });
 
     it('throws for team with active task', async () => {
       orchestrator.createTeam('busy', projectDir);
       orchestrator.assignTask('busy', 'fix a typo');
 
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
-      expect(() => orchestrator.assignTask('busy', 'another task'))
-        .toThrow('already has an active pipeline');
+      expect(() => orchestrator.assignTask('busy', 'another task')).toThrow(
+        'already has an active pipeline',
+      );
     });
   });
 
@@ -919,17 +967,17 @@ describe('PipelineOrchestrator', () => {
       orchestrator.createTeam('fb-simple', projectDir);
       orchestrator.assignTask('fb-simple', 'fix a typo');
 
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       // Simple pipeline: just Worker-1
       const worker = mock.getSession(0);
       worker.respond('Fixed the typo in README.');
       worker.complete();
 
-      await new Promise(resolve => setTimeout(resolve, 200));
+      await new Promise((resolve) => setTimeout(resolve, 200));
 
       // Should have a completion feedback
-      expect(feedbacks.some(f => f.title === 'Task Complete')).toBe(true);
+      expect(feedbacks.some((f) => f.title === 'Task Complete')).toBe(true);
     });
 
     it('emits feedback on pipeline error', async () => {
@@ -941,12 +989,12 @@ describe('PipelineOrchestrator', () => {
       orchestrator.createTeam('fb-error', projectDir);
       orchestrator.assignTask('fb-error', 'fix a typo');
 
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       // Complete without responding — triggers error
       mock.getSession(0).complete();
 
-      await new Promise(resolve => setTimeout(resolve, 200));
+      await new Promise((resolve) => setTimeout(resolve, 200));
 
       // Should have a failure feedback (may or may not fire depending on timing)
       const status = orchestrator.getTeamStatus('fb-error');
@@ -969,15 +1017,15 @@ describe('PipelineOrchestrator', () => {
       orchestrator.createTeam('ask-busy', projectDir);
       orchestrator.assignTask('ask-busy', 'fix a typo');
 
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
-      await expect(orchestrator.sendMessage('ask-busy', 'What did you do?'))
-        .rejects.toThrow('pipeline is running');
+      await expect(orchestrator.sendMessage('ask-busy', 'What did you do?')).rejects.toThrow(
+        'pipeline is running',
+      );
     });
 
     it('sendMessage throws for unknown team', async () => {
-      await expect(orchestrator.sendMessage('ghost', 'hello'))
-        .rejects.toThrow('not found');
+      await expect(orchestrator.sendMessage('ghost', 'hello')).rejects.toThrow('not found');
     });
 
     it('sessions stay alive after simple pipeline completion', async () => {
@@ -988,7 +1036,7 @@ describe('PipelineOrchestrator', () => {
       orchestrator.createTeam('warm', projectDir);
       orchestrator.assignTask('warm', 'fix a typo');
 
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       const worker = mock.getSession(0);
       worker.respond('Fixed the typo.');
@@ -1013,13 +1061,13 @@ describe('PipelineOrchestrator', () => {
       orchestrator.createTeam('fb-fields', projectDir);
       orchestrator.assignTask('fb-fields', 'fix a typo');
 
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       const worker = mock.getSession(0);
       worker.respond('Done.');
       worker.complete();
 
-      await new Promise(resolve => setTimeout(resolve, 200));
+      await new Promise((resolve) => setTimeout(resolve, 200));
 
       // Each feedback should have required fields
       for (const fb of feedbacks) {
@@ -1038,23 +1086,26 @@ describe('PipelineOrchestrator', () => {
   describe('completeness verification', () => {
     it('Worker-2 receives verification prompt with Worker-1 output', async () => {
       orchestrator.createTeam('verify', projectDir);
-      orchestrator.assignTask('verify', 'implement user authentication with JWT tokens and database integration');
+      orchestrator.assignTask(
+        'verify',
+        'implement user authentication with JWT tokens and database integration',
+      );
 
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       const security = mock.getSession(0);
       const worker1 = mock.getSession(1);
       const worker2 = mock.getSession(2);
 
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
       // Security scan
       security.respond('APPROVED — no issues.');
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
       // Worker-1 implements
       worker1.respond('Implemented JWT auth module.');
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
       // Worker-2 should receive a REQUIREMENTS VERIFICATION prompt
       expect(worker2.receivedMessages.length).toBeGreaterThanOrEqual(1);
@@ -1070,34 +1121,37 @@ describe('PipelineOrchestrator', () => {
       });
 
       orchestrator.createTeam('tasks', projectDir);
-      orchestrator.assignTask('tasks', 'implement user authentication with JWT tokens and database integration');
+      orchestrator.assignTask(
+        'tasks',
+        'implement user authentication with JWT tokens and database integration',
+      );
 
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       const security = mock.getSession(0);
       const worker1 = mock.getSession(1);
-      const worker2 = mock.getSession(2);
-      const reviewer = mock.getSession(3);
+      const _worker2 = mock.getSession(2);
+      const _reviewer = mock.getSession(3);
 
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 100));
       security.respond('APPROVED — no issues.');
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
       // Worker-1 should have emitted agent-task
-      expect(agentTasks.some(t => t.instance === 'Worker-1')).toBe(true);
+      expect(agentTasks.some((t) => t.instance === 'Worker-1')).toBe(true);
 
       worker1.respond('Implemented auth.');
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
       // Worker-2 should have emitted agent-task
-      expect(agentTasks.some(t => t.instance === 'Worker-2')).toBe(true);
+      expect(agentTasks.some((t) => t.instance === 'Worker-2')).toBe(true);
     });
 
     it('simple pipeline skips completeness verification', async () => {
       orchestrator.createTeam('simple-no-verify', projectDir);
       orchestrator.assignTask('simple-no-verify', 'fix a typo');
 
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       // Only 1 session (Worker-1), no Worker-2
       expect(mock.sessions.length).toBe(1);
@@ -1131,7 +1185,9 @@ describe('PipelineOrchestrator', () => {
     it('returns AMBIGUOUS when only a checklist is present without a verdict prefix', () => {
       // Old behavior scanned for `- [ ]` / `- [x]` lines and inferred verdict.
       // New behavior requires the prefix — the verifier prompt mandates it.
-      const result = parseVerifyVerdict('REQUIREMENTS CHECKLIST:\n- [x] Built the button\n- [x] Wired the click handler');
+      const result = parseVerifyVerdict(
+        'REQUIREMENTS CHECKLIST:\n- [x] Built the button\n- [x] Wired the click handler',
+      );
       expect(result.verdict).toBe('AMBIGUOUS');
     });
 
@@ -1230,8 +1286,8 @@ describe('PipelineOrchestrator', () => {
 
     it('retries once on AMBIGUOUS and succeeds on the corrective re-prompt', async () => {
       const { session, sendCalls } = makeFakeSession([
-        'I think the code looks fine to me',                  // ambiguous: no verdict prefix
-        'APPROVED — verified after retry',                    // succeeds on retry
+        'I think the code looks fine to me', // ambiguous: no verdict prefix
+        'APPROVED — verified after retry', // succeeds on retry
       ]);
       const responses: string[] = [];
       const malformed: string[] = [];
@@ -1298,7 +1354,7 @@ describe('PipelineOrchestrator', () => {
     it('MalformedVerdictError carries instance, expected tokens, and truncated raw output', async () => {
       const { session } = makeFakeSession([
         'first ambiguous',
-        'x'.repeat(500),  // >200 chars to verify the truncation in the error message
+        'x'.repeat(500), // >200 chars to verify the truncation in the error message
       ]);
 
       try {

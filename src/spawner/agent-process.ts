@@ -3,12 +3,17 @@
 //   - Test mode (spawnArgs set): uses child_process.spawn() with mock processes
 //   - SDK mode (production): uses @anthropic-ai/claude-agent-sdk query()
 
-import { spawn, type ChildProcess } from 'node:child_process';
+import { type ChildProcess, spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { readFileSync, existsSync, mkdirSync } from 'node:fs';
-import { query, type SDKMessage, type SDKUserMessage, type Query } from '@anthropic-ai/claude-agent-sdk';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import {
+  type Query,
+  query,
+  type SDKMessage,
+  type SDKUserMessage,
+} from '@anthropic-ai/claude-agent-sdk';
 import { buildGovernanceHooks } from '../hooks.js';
-import { Role, type RoleInstance } from '../roles/role-types.js';
+import type { Role, RoleInstance } from '../roles/role-types.js';
 import { parseFrontmatter } from './frontmatter-parser.js';
 
 // --- Message delimiter protocol ---
@@ -20,9 +25,7 @@ const MESSAGE_END = '---ORCHESTRA-MESSAGE-END---';
 // Messages are contradictory (same category) only when they represent
 // competing verdicts about the same decision. Two task-assignments to
 // different workers are NOT contradictory — they're independent.
-const REVIEW_VERDICT_FLAGS = new Set([
-  'review-approved', 'review-revise', 'review-rejected',
-]);
+const REVIEW_VERDICT_FLAGS = new Set(['review-approved', 'review-revise', 'review-rejected']);
 
 function getDecisionCategory(flag: string, targetInstance: string | null): string {
   // Review verdicts are always contradictory with each other
@@ -71,7 +74,10 @@ export interface AgentSpawnOptions {
   /** Effort level controlling reasoning depth (SDK mode) */
   effort?: 'low' | 'medium' | 'high' | 'max';
   /** Thinking/reasoning configuration (SDK mode) */
-  thinking?: { type: 'adaptive' } | { type: 'enabled'; budgetTokens?: number } | { type: 'disabled' };
+  thinking?:
+    | { type: 'adaptive' }
+    | { type: 'enabled'; budgetTokens?: number }
+    | { type: 'disabled' };
   /** Maximum budget in USD for this agent's query (SDK mode) */
   maxBudgetUsd?: number;
 }
@@ -181,6 +187,7 @@ export class AgentProcess extends EventEmitter<AgentProcessEvents> {
   private _exitCode: number | null = null;
   private _lastOutputAt: Date | null = null;
   private stdoutBuffer = '';
+  // biome-ignore lint/correctness/noUnusedPrivateClassMembers: written-to in stderr handler; kept for future stderr surfacing even though not currently read.
   private stderrBuffer = '';
   private spawnOptions: AgentSpawnOptions;
 
@@ -194,11 +201,21 @@ export class AgentProcess extends EventEmitter<AgentProcessEvents> {
 
   // --- Accessors ---
 
-  get state(): ProcessState { return this._state; }
-  get pid(): number | null { return this._pid; }
-  get exitCode(): number | null { return this._exitCode; }
-  get lastOutputAt(): Date | null { return this._lastOutputAt; }
-  get isAlive(): boolean { return this._state === ProcessState.Running; }
+  get state(): ProcessState {
+    return this._state;
+  }
+  get pid(): number | null {
+    return this._pid;
+  }
+  get exitCode(): number | null {
+    return this._exitCode;
+  }
+  get lastOutputAt(): Date | null {
+    return this._lastOutputAt;
+  }
+  get isAlive(): boolean {
+    return this._state === ProcessState.Running;
+  }
 
   // --- Spawn ---
 
@@ -319,7 +336,12 @@ export class AgentProcess extends EventEmitter<AgentProcessEvents> {
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
         allowedTools: this.spawnOptions.allowedTools ?? [
-          'Read', 'Edit', 'Write', 'Bash', 'Grep', 'Glob',
+          'Read',
+          'Edit',
+          'Write',
+          'Bash',
+          'Grep',
+          'Glob',
         ],
         maxTurns: this.spawnOptions.maxTurns,
         abortController: this.abortController,
@@ -560,7 +582,10 @@ export class AgentProcess extends EventEmitter<AgentProcessEvents> {
       this.stdoutBuffer = this.stdoutBuffer.substring(endIdx + MESSAGE_END.length);
     }
 
-    if (this.stdoutBuffer.length > 0 && !this.stdoutBuffer.includes(MESSAGE_START.substring(0, 3))) {
+    if (
+      this.stdoutBuffer.length > 0 &&
+      !this.stdoutBuffer.includes(MESSAGE_START.substring(0, 3))
+    ) {
       const remaining = this.stdoutBuffer.trim();
       if (remaining) this.emit('output', remaining);
       this.stdoutBuffer = '';

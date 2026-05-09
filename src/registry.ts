@@ -7,15 +7,15 @@
 // Atomic writes via temp-file + fs.renameSync() (same pattern as
 // StatePersistence).
 
+import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { randomUUID } from 'node:crypto';
 
 export interface RegistryEntry {
   teamId: string;
   teamName: string;
   projectPath: string;
-  createdAt: string;    // ISO-8601
+  createdAt: string; // ISO-8601
   lastActiveAt: string; // ISO-8601
 }
 

@@ -1,7 +1,7 @@
 // In-memory team state with validated transitions.
 // Matches the state.json schema from docs/state-machine.md.
 
-import { Role, type RoleInstance, ROLE_INSTANCES } from '../roles/role-types.js';
+import { ROLE_INSTANCES, type Role, type RoleInstance } from '../roles/role-types.js';
 import { AgentState } from '../types/index.js';
 
 // --- Team Phase (superset of workflow Phase — includes terminal states) ---
@@ -108,7 +108,13 @@ const VALID_PHASE_TRANSITIONS: Record<TeamPhase, readonly TeamPhase[]> = {
   [TeamPhase.PreWork]: [TeamPhase.Work, TeamPhase.Errored, TeamPhase.Cancelled],
   [TeamPhase.Work]: [TeamPhase.Handoff, TeamPhase.Done, TeamPhase.Errored, TeamPhase.Cancelled],
   [TeamPhase.Handoff]: [TeamPhase.Review, TeamPhase.Work, TeamPhase.Errored, TeamPhase.Cancelled],
-  [TeamPhase.Review]: [TeamPhase.Done, TeamPhase.Work, TeamPhase.PreWork, TeamPhase.Errored, TeamPhase.Cancelled],
+  [TeamPhase.Review]: [
+    TeamPhase.Done,
+    TeamPhase.Work,
+    TeamPhase.PreWork,
+    TeamPhase.Errored,
+    TeamPhase.Cancelled,
+  ],
   [TeamPhase.Done]: [TeamPhase.PreWork, TeamPhase.PrOpen],
   [TeamPhase.PrOpen]: [TeamPhase.Merged, TeamPhase.Done, TeamPhase.Cancelled],
   [TeamPhase.Merged]: [],
@@ -120,7 +126,13 @@ const VALID_PHASE_TRANSITIONS: Record<TeamPhase, readonly TeamPhase[]> = {
 
 const VALID_AGENT_TRANSITIONS: Record<AgentState, readonly AgentState[]> = {
   [AgentState.Spawning]: [AgentState.Active, AgentState.Errored],
-  [AgentState.Active]: [AgentState.Idle, AgentState.Blocked, AgentState.Waiting, AgentState.Done, AgentState.Errored],
+  [AgentState.Active]: [
+    AgentState.Idle,
+    AgentState.Blocked,
+    AgentState.Waiting,
+    AgentState.Done,
+    AgentState.Errored,
+  ],
   [AgentState.Idle]: [AgentState.Active, AgentState.Errored],
   [AgentState.Blocked]: [AgentState.Active, AgentState.Errored],
   [AgentState.Waiting]: [AgentState.Active, AgentState.Errored],
@@ -146,7 +158,7 @@ export class TeamState {
     teamId: string,
     teamName: string,
     projectPath: string,
-    limits: LoopLimits = DEFAULT_LOOP_LIMITS
+    limits: LoopLimits = DEFAULT_LOOP_LIMITS,
   ): TeamState {
     const now = new Date().toISOString();
     const agents: Record<string, AgentStatus> = {};
@@ -227,9 +239,7 @@ export class TeamState {
     const current = this.data.currentPhase;
 
     if (!VALID_PHASE_TRANSITIONS[current].includes(newPhase)) {
-      throw new TransitionError(
-        `Invalid phase transition: ${current} → ${newPhase}`
-      );
+      throw new TransitionError(`Invalid phase transition: ${current} → ${newPhase}`);
     }
 
     // Check loop limits for backward transitions
@@ -250,7 +260,7 @@ export class TeamState {
         this.touch();
         this.phaseTransitioned = true;
         throw new TransitionError(
-          `Maximum revision count (${this.limits.maxRevisions}) exceeded. Escalating to human.`
+          `Maximum revision count (${this.limits.maxRevisions}) exceeded. Escalating to human.`,
         );
       }
       if (this.data.counters.rejections > this.limits.maxRejections) {
@@ -258,7 +268,7 @@ export class TeamState {
         this.touch();
         this.phaseTransitioned = true;
         throw new TransitionError(
-          `Maximum rejection count (${this.limits.maxRejections}) exceeded. Escalating to human.`
+          `Maximum rejection count (${this.limits.maxRejections}) exceeded. Escalating to human.`,
         );
       }
       if (this.data.counters.totalBackwardTransitions > this.limits.maxTotalBackwardTransitions) {
@@ -266,7 +276,7 @@ export class TeamState {
         this.touch();
         this.phaseTransitioned = true;
         throw new TransitionError(
-          `Maximum total backward transitions (${this.limits.maxTotalBackwardTransitions}) exceeded. Escalating to human.`
+          `Maximum total backward transitions (${this.limits.maxTotalBackwardTransitions}) exceeded. Escalating to human.`,
         );
       }
     }
@@ -289,7 +299,7 @@ export class TeamState {
 
     if (!VALID_AGENT_TRANSITIONS[agent.state].includes(newState)) {
       throw new TransitionError(
-        `Invalid agent transition for ${instance}: ${agent.state} → ${newState}`
+        `Invalid agent transition for ${instance}: ${agent.state} → ${newState}`,
       );
     }
 

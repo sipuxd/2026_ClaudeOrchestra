@@ -6,10 +6,10 @@
 // target project's .claude-orchestra/teams/{teamId}/ directory,
 // not in a single global data/ directory.
 
+import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { randomUUID } from 'node:crypto';
-import { TeamState, type TeamStateData } from './team-state.js';
+import type { TeamState, TeamStateData } from './team-state.js';
 
 export interface PersistenceOptions {
   /** Debounce interval in ms (default: 1000) */
@@ -48,7 +48,9 @@ export class StatePersistence {
   private statePath(teamId: string): string {
     const dir = this.teamDirs.get(teamId);
     if (!dir) {
-      throw new Error(`No directory registered for team "${teamId}". Call registerTeamDir() first.`);
+      throw new Error(
+        `No directory registered for team "${teamId}". Call registerTeamDir() first.`,
+      );
     }
     return path.join(dir, 'state.json');
   }
@@ -57,7 +59,9 @@ export class StatePersistence {
   ensureTeamDir(teamId: string): void {
     const dir = this.teamDirs.get(teamId);
     if (!dir) {
-      throw new Error(`No directory registered for team "${teamId}". Call registerTeamDir() first.`);
+      throw new Error(
+        `No directory registered for team "${teamId}". Call registerTeamDir() first.`,
+      );
     }
     fs.mkdirSync(dir, { recursive: true });
   }
@@ -146,7 +150,9 @@ export class StatePersistence {
   private writeState(state: TeamState): void {
     const dir = this.teamDirs.get(state.teamId);
     if (!dir) {
-      throw new Error(`No directory registered for team "${state.teamId}". Call registerTeamDir() first.`);
+      throw new Error(
+        `No directory registered for team "${state.teamId}". Call registerTeamDir() first.`,
+      );
     }
     fs.mkdirSync(dir, { recursive: true });
 

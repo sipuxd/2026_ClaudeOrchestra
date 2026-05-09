@@ -1,17 +1,19 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { buildCodexSubscriptionEnv, normalizeProviderModel } from './auth.js';
-import { toCodexReasoningEffort } from './effort.js';
-import type { AgentInputImage, AgentSession, AgentSessionOptions } from './types.js';
 import {
   evaluateCodexStreamItem,
   formatGuardrailReport,
+  type GuardrailReport,
   GuardrailViolationError,
   hasBlockingFindings,
-  type GuardrailReport,
 } from '../guardrails.js';
+import { buildCodexSubscriptionEnv, normalizeProviderModel } from './auth.js';
+import { toCodexReasoningEffort } from './effort.js';
+import type { AgentInputImage, AgentSession, AgentSessionOptions } from './types.js';
 
-type CodexInput = string | Array<{ type: 'text'; text: string } | { type: 'local_image'; path: string }>;
+type CodexInput =
+  | string
+  | Array<{ type: 'text'; text: string } | { type: 'local_image'; path: string }>;
 
 export class CodexAgentSession implements AgentSession {
   readonly name: string;
@@ -63,7 +65,11 @@ export class CodexAgentSession implements AgentSession {
       });
 
       for await (const event of events) {
-        if (event.type === 'item.started' || event.type === 'item.completed' || event.type === 'item.updated') {
+        if (
+          event.type === 'item.started' ||
+          event.type === 'item.completed' ||
+          event.type === 'item.updated'
+        ) {
           this.enforceStreamGuardrails(event.item);
         }
 
@@ -110,9 +116,10 @@ export class CodexAgentSession implements AgentSession {
 
     const { Codex } = await import('@openai/codex-sdk');
     const model = normalizeProviderModel(this.opts.model ?? this.opts.runtime.model);
-    const isReadOnlyRole = this.opts.disallowedTools?.some(tool =>
-      tool === 'Write' || tool === 'Edit' || tool === 'Bash'
-    ) ?? false;
+    const isReadOnlyRole =
+      this.opts.disallowedTools?.some(
+        (tool) => tool === 'Write' || tool === 'Edit' || tool === 'Bash',
+      ) ?? false;
 
     this.codexClient = new Codex({
       env: buildCodexSubscriptionEnv(),
@@ -132,9 +139,7 @@ export class CodexAgentSession implements AgentSession {
   }
 
   private prepareInput(message: string, images?: AgentInputImage[]): CodexInput {
-    const prompt = this.systemPromptSent
-      ? message
-      : `${this.systemPrompt}\n\n---\n\n${message}`;
+    const prompt = this.systemPromptSent ? message : `${this.systemPrompt}\n\n---\n\n${message}`;
     this.systemPromptSent = true;
 
     if (!images || images.length === 0) return prompt;
@@ -167,7 +172,7 @@ export class CodexAgentSession implements AgentSession {
     if (findings.length === 0) return;
 
     const report: GuardrailReport = {
-      ok: !findings.some(finding => finding.severity === 'block'),
+      ok: !findings.some((finding) => finding.severity === 'block'),
       phase: `codex-stream:${this.name}`,
       checkedAt: new Date().toISOString(),
       findings,
@@ -182,7 +187,10 @@ export class CodexAgentSession implements AgentSession {
       this.opts.guardrails?.abortCodexOnForbiddenStreamEvent !== false
     ) {
       this.abortController?.abort();
-      throw new GuardrailViolationError('Codex stream guardrail blocked the turn after detecting a forbidden event.', report);
+      throw new GuardrailViolationError(
+        'Codex stream guardrail blocked the turn after detecting a forbidden event.',
+        report,
+      );
     }
   }
 }
@@ -196,16 +204,21 @@ function mediaTypeExtension(mediaType: string): string {
 
 function formatCodexProgressItem(item: any): string | null {
   if (!item || typeof item !== 'object') return null;
-  if (item.type === 'command_execution') return `Bash: ${String(item.command ?? '').substring(0, 120)}`;
+  if (item.type === 'command_execution')
+    return `Bash: ${String(item.command ?? '').substring(0, 120)}`;
   if (item.type === 'file_change') {
     const changes = Array.isArray(item.changes)
-      ? item.changes.map((change: any) => `${change.kind ?? 'update'} ${change.path ?? ''}`).join(', ')
+      ? item.changes
+          .map((change: any) => `${change.kind ?? 'update'} ${change.path ?? ''}`)
+          .join(', ')
       : 'files changed';
     return `Edit: ${changes}`;
   }
-  if (item.type === 'mcp_tool_call') return `MCP: ${item.server ?? 'server'}:${item.tool ?? 'tool'}`;
+  if (item.type === 'mcp_tool_call')
+    return `MCP: ${item.server ?? 'server'}:${item.tool ?? 'tool'}`;
   if (item.type === 'web_search') return `WebSearch: ${item.query ?? ''}`;
-  if (item.type === 'reasoning') return item.text ? `Reasoning: ${String(item.text).substring(0, 200)}` : null;
+  if (item.type === 'reasoning')
+    return item.text ? `Reasoning: ${String(item.text).substring(0, 200)}` : null;
   if (item.type === 'error') return `Error: ${item.message ?? 'unknown'}`;
   return null;
 }

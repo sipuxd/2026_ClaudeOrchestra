@@ -124,7 +124,10 @@ export class GitOps {
    * Checks out main, pulls latest (best-effort), creates branch.
    * Returns the final branch name (may have suffix if collision).
    */
-  static createTeamBranch(projectPath: string, branchName: string): GitResult & { branchName: string } {
+  static createTeamBranch(
+    projectPath: string,
+    branchName: string,
+  ): GitResult & { branchName: string } {
     // Start from main
     const checkoutMain = git(projectPath, ['checkout', 'main']);
     if (!checkoutMain.success) {
@@ -185,12 +188,13 @@ export class GitOps {
     projectPath: string,
     branchName: string,
     title: string,
-    body: string
+    body: string,
   ): GitResult & { prNumber?: number; prUrl?: string } {
     if (!GitOps.isGhAvailable()) {
       return {
         success: false,
-        output: 'GitHub CLI (gh) is not installed. Install it from https://cli.github.com/ to create PRs.',
+        output:
+          'GitHub CLI (gh) is not installed. Install it from https://cli.github.com/ to create PRs.',
       };
     }
 
@@ -205,7 +209,7 @@ export class GitOps {
       const output = execFileSync(
         'gh',
         ['pr', 'create', '--base', 'main', '--head', branchName, '--title', title, '--body', body],
-        { cwd: projectPath, encoding: 'utf-8', timeout: 30_000, stdio: ['pipe', 'pipe', 'pipe'] }
+        { cwd: projectPath, encoding: 'utf-8', timeout: 30_000, stdio: ['pipe', 'pipe', 'pipe'] },
       );
       // gh pr create outputs the PR URL
       const prUrl = output.trim();
@@ -222,13 +226,16 @@ export class GitOps {
    * Check the state of a GitHub PR.
    * Returns { state, merged } from `gh pr view`.
    */
-  static checkPrState(projectPath: string, prNumber: number): { state: string; merged: boolean } | null {
+  static checkPrState(
+    projectPath: string,
+    prNumber: number,
+  ): { state: string; merged: boolean } | null {
     if (!GitOps.isGhAvailable()) return null;
     try {
       const output = execFileSync(
         'gh',
         ['pr', 'view', String(prNumber), '--json', 'state,merged'],
-        { cwd: projectPath, encoding: 'utf-8', timeout: 15_000, stdio: ['pipe', 'pipe', 'pipe'] }
+        { cwd: projectPath, encoding: 'utf-8', timeout: 15_000, stdio: ['pipe', 'pipe', 'pipe'] },
       );
       const data = JSON.parse(output.trim());
       return { state: data.state ?? 'UNKNOWN', merged: data.merged ?? false };

@@ -1,5 +1,5 @@
 import type { AgentProvider } from './agent-runtime/types.js';
-import { GuardrailViolationError, type GuardrailReport } from './guardrails.js';
+import { type GuardrailReport, GuardrailViolationError } from './guardrails.js';
 
 export type RuntimeErrorCategory =
   | 'guardrail'
@@ -37,14 +37,17 @@ export function normalizeRuntimeError(
   if (err instanceof NormalizedRuntimeError) return err;
 
   if (err instanceof GuardrailViolationError) {
-    return new NormalizedRuntimeError({
-      provider: context.provider,
-      phase: context.phase,
-      category: 'guardrail',
-      retryable: false,
-      message: err.message,
-      evidence: summarizeGuardrailReport(err.report),
-    }, err);
+    return new NormalizedRuntimeError(
+      {
+        provider: context.provider,
+        phase: context.phase,
+        category: 'guardrail',
+        retryable: false,
+        message: err.message,
+        evidence: summarizeGuardrailReport(err.report),
+      },
+      err,
+    );
   }
 
   const message = err instanceof Error ? err.message : String(err);
@@ -67,20 +70,23 @@ export function normalizeRuntimeError(
             ? 'unknown'
             : 'provider';
 
-  return new NormalizedRuntimeError({
-    provider: context.provider,
-    phase: context.phase,
-    category,
-    retryable,
-    message,
-  }, err);
+  return new NormalizedRuntimeError(
+    {
+      provider: context.provider,
+      phase: context.phase,
+      category,
+      retryable,
+      message,
+    },
+    err,
+  );
 }
 
 function summarizeGuardrailReport(report: GuardrailReport): unknown {
   return {
     phase: report.phase,
     checkedAt: report.checkedAt,
-    findings: report.findings.map(finding => ({
+    findings: report.findings.map((finding) => ({
       kind: finding.kind,
       severity: finding.severity,
       message: finding.message,

@@ -3,8 +3,7 @@
 // Replaces the legacy sidebar-based layout with a portfolio grid.
 
 export function buildDashboardHTML(): string {
-
-const CSS = `
+  const CSS = `
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
   --bg:#0d1117;--surface:#161b22;--border:#30363d;
@@ -402,7 +401,7 @@ a:hover{text-decoration:underline}
   max-height:200px;overflow-y:auto;color:var(--text-secondary);margin-top:8px}
 `;
 
-const JS = `
+  const JS = `
 (function(){
 'use strict';
 
@@ -1839,7 +1838,7 @@ setTimeout(function() {
 })();
 `;
 
-return `<!DOCTYPE html>
+  return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">

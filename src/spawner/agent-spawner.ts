@@ -5,10 +5,10 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { Role, type RoleInstance, ROLE_INSTANCES } from '../roles/role-types.js';
-import { AgentProcess, type AgentSpawnOptions, ProcessState } from './agent-process.js';
-import { parseFrontmatter } from './frontmatter-parser.js';
+import { ROLE_INSTANCES, type Role, type RoleInstance } from '../roles/role-types.js';
 import { INSTANCE_AGENT_FILES } from './agent-files.js';
+import { AgentProcess, type AgentSpawnOptions } from './agent-process.js';
+import { parseFrontmatter } from './frontmatter-parser.js';
 
 // --- Fallback defaults (used when frontmatter is missing a field) ---
 
@@ -92,7 +92,7 @@ export class AgentSpawner {
     teamId: string,
     projectPath: string,
     roles: Role[],
-    limitInstances?: RoleInstance[]
+    limitInstances?: RoleInstance[],
   ): AgentProcess[] {
     if (this.teams.has(teamId)) {
       throw new Error(`Team ${teamId} already has spawned agents`);
@@ -126,7 +126,12 @@ export class AgentSpawner {
   /**
    * Spawn a single agent for a team.
    */
-  spawnAgent(teamId: string, role: Role, instance: RoleInstance, projectPath: string): AgentProcess {
+  spawnAgent(
+    teamId: string,
+    role: Role,
+    instance: RoleInstance,
+    projectPath: string,
+  ): AgentProcess {
     let teamMap = this.teams.get(teamId);
     if (!teamMap) {
       teamMap = new Map();
@@ -224,7 +229,7 @@ export class AgentSpawner {
       'The orchestrator is shutting down. Please finish your current operation and save your progress. You will be terminated shortly.';
 
     const terminatePromises = Array.from(teamMap.values()).map((agent) =>
-      agent.terminate({ shutdownPrompt, gracePeriodMs: 5000 })
+      agent.terminate({ shutdownPrompt, gracePeriodMs: 5000 }),
     );
 
     await Promise.all(terminatePromises);
@@ -274,7 +279,7 @@ export class AgentSpawner {
     teamId: string,
     role: Role,
     instance: RoleInstance,
-    projectPath: string
+    projectPath: string,
   ): AgentProcess {
     const agentFilePath = path.join(this.options.rolesDir, INSTANCE_AGENT_FILES[instance]);
 
@@ -292,7 +297,7 @@ export class AgentSpawner {
       if (frontmatter.effort) frontmatterEffort = frontmatter.effort as any;
       if (frontmatter.maxTurns) frontmatterMaxTurns = parseInt(frontmatter.maxTurns, 10);
       if (frontmatter.disallowedTools) {
-        frontmatterDisallowed = frontmatter.disallowedTools.split(',').map(t => t.trim());
+        frontmatterDisallowed = frontmatter.disallowedTools.split(',').map((t) => t.trim());
       }
     } catch {
       // If file can't be read, agent-process.ts will handle the error at spawn time

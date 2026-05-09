@@ -4,20 +4,20 @@
 
 import { execSync } from 'node:child_process';
 import type {
-  HookEvent,
   HookCallbackMatcher,
+  HookEvent,
   HookInput,
   HookJSONOutput,
-  PreToolUseHookInput,
   PostToolUseHookInput,
+  PreToolUseHookInput,
 } from '@anthropic-ai/claude-agent-sdk';
 import {
   evaluateCommand,
   evaluatePathAccess,
   formatGuardrailReport,
-  hasBlockingFindings,
-  type GuardrailRuntimeConfig,
   type GuardrailReport,
+  type GuardrailRuntimeConfig,
+  hasBlockingFindings,
 } from './guardrails.js';
 
 /**
@@ -37,7 +37,7 @@ export async function blockTraversal(
     ...(pi.tool_name === 'Bash' ? evaluateCommand(command) : []),
   ];
   const report: GuardrailReport = {
-    ok: !findings.some(finding => finding.severity === 'block'),
+    ok: !findings.some((finding) => finding.severity === 'block'),
     phase: 'claude-pre-tool-use',
     checkedAt: new Date().toISOString(),
     findings,

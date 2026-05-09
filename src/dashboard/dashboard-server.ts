@@ -4,14 +4,13 @@
 // orchestrator events via SSE. Uses Node.js built-in http module
 // (no Express or WebSocket dependencies).
 
-import * as http from 'node:http';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
 import { execFile } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as http from 'node:http';
+import * as path from 'node:path';
 import type { PipelineOrchestrator } from '../pipeline-orchestrator.js';
-import type { RoleInstance } from '../roles/role-types.js';
-import { buildDashboardHTML } from './dashboard-ui.js';
 import { CodeServerManager } from './code-server-manager.js';
+import { buildDashboardHTML } from './dashboard-ui.js';
 
 export interface DashboardServerOptions {
   orchestrator: PipelineOrchestrator;
@@ -49,7 +48,9 @@ export class DashboardServer {
     // Detect code-server in the background — non-blocking. The Code tab
     // checks status before lazy-spawning, so we just want to know whether
     // the binary exists by the time the user clicks the tab.
-    this.codeServer.detect().catch(() => { /* recorded in status */ });
+    this.codeServer.detect().catch(() => {
+      /* recorded in status */
+    });
 
     return new Promise<void>((resolve, reject) => {
       this.server = http.createServer((req, res) => {
@@ -70,7 +71,11 @@ export class DashboardServer {
   async close(): Promise<void> {
     // Close all SSE connections
     for (const client of this.sseClients) {
-      try { client.end(); } catch { /* best effort */ }
+      try {
+        client.end();
+      } catch {
+        /* best effort */
+      }
     }
     this.sseClients.clear();
 
@@ -79,7 +84,10 @@ export class DashboardServer {
 
     // Close HTTP server
     return new Promise<void>((resolve) => {
-      if (!this.server) { resolve(); return; }
+      if (!this.server) {
+        resolve();
+        return;
+      }
       this.server.close(() => resolve());
     });
   }
@@ -105,7 +113,10 @@ export class DashboardServer {
 
     this.orchestrator.on('phase-transition', (teamId, from, to, trigger) => {
       this.broadcast('phase-transition', {
-        teamId, from, to, trigger,
+        teamId,
+        from,
+        to,
+        trigger,
         timestamp: new Date().toISOString(),
       });
     });
@@ -159,7 +170,11 @@ export class DashboardServer {
     this.orchestrator.on('shutdown', () => {
       this.broadcast('shutdown', {});
       for (const client of this.sseClients) {
-        try { client.end(); } catch { /* best effort */ }
+        try {
+          client.end();
+        } catch {
+          /* best effort */
+        }
       }
       this.sseClients.clear();
     });
@@ -198,19 +213,49 @@ export class DashboardServer {
     }
 
     // Route matching
-    if (method === 'GET' && pathname === '/') return this.serveHTML(res);
-    if (method === 'GET' && pathname === '/events') return this.serveSSE(req, res);
-    if (method === 'GET' && pathname === '/api/teams') return this.handleGetTeams(res);
-    if (method === 'GET' && pathname === '/api/runtime') return this.handleGetRuntime(res);
-    if (method === 'GET' && pathname === '/api/registry') return this.handleGetRegistry(res);
-    if (method === 'POST' && pathname === '/api/pick-directory') { this.handlePickDirectory(res); return; }
-    if (method === 'POST' && pathname === '/api/resolve-directory') { this.handleResolveDirectory(req, res); return; }
-    if (method === 'GET' && pathname === '/api/code-server/status') { this.handleCodeServerStatus(res); return; }
-    if (method === 'POST' && pathname === '/api/code-server/start') { this.handleCodeServerStart(res); return; }
+    if (method === 'GET' && pathname === '/') {
+      this.serveHTML(res);
+      return;
+    }
+    if (method === 'GET' && pathname === '/events') {
+      this.serveSSE(req, res);
+      return;
+    }
+    if (method === 'GET' && pathname === '/api/teams') {
+      this.handleGetTeams(res);
+      return;
+    }
+    if (method === 'GET' && pathname === '/api/runtime') {
+      this.handleGetRuntime(res);
+      return;
+    }
+    if (method === 'GET' && pathname === '/api/registry') {
+      this.handleGetRegistry(res);
+      return;
+    }
+    if (method === 'POST' && pathname === '/api/pick-directory') {
+      this.handlePickDirectory(res);
+      return;
+    }
+    if (method === 'POST' && pathname === '/api/resolve-directory') {
+      this.handleResolveDirectory(req, res);
+      return;
+    }
+    if (method === 'GET' && pathname === '/api/code-server/status') {
+      this.handleCodeServerStatus(res);
+      return;
+    }
+    if (method === 'POST' && pathname === '/api/code-server/start') {
+      this.handleCodeServerStart(res);
+      return;
+    }
 
     // /api/teams/:id patterns — decode URI component for team names with spaces/special chars
     const teamMatch = pathname.match(/^\/api\/teams\/([^/]+)$/);
-    if (teamMatch && method === 'GET') return this.handleGetTeam(decodeURIComponent(teamMatch[1]), res);
+    if (teamMatch && method === 'GET') {
+      this.handleGetTeam(decodeURIComponent(teamMatch[1]), res);
+      return;
+    }
 
     const taskMatch = pathname.match(/^\/api\/teams\/([^/]+)\/task$/);
     if (taskMatch && method === 'POST') {
@@ -286,11 +331,11 @@ export class DashboardServer {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
+      Connection: 'keep-alive',
     });
 
     // Send initial state dump (enriched with projectHasPreview, same as REST)
-    const teams = this.orchestrator.getAllTeams().map(t => ({
+    const teams = this.orchestrator.getAllTeams().map((t) => ({
       ...t,
       projectHasPreview: this.checkProjectHasPreview(t.projectPath),
     }));
@@ -306,7 +351,10 @@ export class DashboardServer {
 
   private handleGetTeams(res: http.ServerResponse): void {
     const teams = this.orchestrator.getAllTeams();
-    this.sendJSON(res, teams.map(t => ({ ...t, projectHasPreview: this.checkProjectHasPreview(t.projectPath) })));
+    this.sendJSON(
+      res,
+      teams.map((t) => ({ ...t, projectHasPreview: this.checkProjectHasPreview(t.projectPath) })),
+    );
   }
 
   // Cache project-has-preview flags so we don't hit the disk on every poll/render.
@@ -326,7 +374,7 @@ export class DashboardServer {
       const dir = sub ? path.join(projectPath, sub) : projectPath;
       try {
         const entries = fs.readdirSync(dir, { withFileTypes: true });
-        if (entries.some(e => e.isFile() && e.name.toLowerCase().endsWith('.html'))) {
+        if (entries.some((e) => e.isFile() && e.name.toLowerCase().endsWith('.html'))) {
           has = true;
           break;
         }
@@ -348,12 +396,15 @@ export class DashboardServer {
       this.sendJSON(res, { error: `Team "${teamId}" not found` }, 404);
       return;
     }
-    this.sendJSON(res, { ...status, projectHasPreview: this.checkProjectHasPreview(status.projectPath) });
+    this.sendJSON(res, {
+      ...status,
+      projectHasPreview: this.checkProjectHasPreview(status.projectPath),
+    });
   }
 
   private async handleCreateTeam(
     req: http.IncomingMessage,
-    res: http.ServerResponse
+    res: http.ServerResponse,
   ): Promise<void> {
     try {
       const body = JSON.parse(await this.readBody(req));
@@ -379,7 +430,7 @@ export class DashboardServer {
   private async handleAssignTask(
     teamId: string,
     req: http.IncomingMessage,
-    res: http.ServerResponse
+    res: http.ServerResponse,
   ): Promise<void> {
     try {
       const body = JSON.parse(await this.readBody(req));
@@ -397,10 +448,7 @@ export class DashboardServer {
     }
   }
 
-  private async handleStopTeam(
-    teamId: string,
-    res: http.ServerResponse
-  ): Promise<void> {
+  private async handleStopTeam(teamId: string, res: http.ServerResponse): Promise<void> {
     try {
       await this.orchestrator.terminateTeam(teamId);
       this.sendJSON(res, { ok: true });
@@ -414,10 +462,7 @@ export class DashboardServer {
     this.sendJSON(res, entries);
   }
 
-  private handleCreatePr(
-    teamId: string,
-    res: http.ServerResponse
-  ): void {
+  private handleCreatePr(teamId: string, res: http.ServerResponse): void {
     try {
       const status = this.orchestrator.getTeamStatus(teamId);
       if (!status) {
@@ -432,10 +477,7 @@ export class DashboardServer {
     }
   }
 
-  private handlePushMerge(
-    teamId: string,
-    res: http.ServerResponse
-  ): void {
+  private handlePushMerge(teamId: string, res: http.ServerResponse): void {
     try {
       const status = this.orchestrator.getTeamStatus(teamId);
       if (!status) {
@@ -453,7 +495,7 @@ export class DashboardServer {
   private async handleFeedbackResponse(
     teamId: string,
     req: http.IncomingMessage,
-    res: http.ServerResponse
+    res: http.ServerResponse,
   ): Promise<void> {
     try {
       const body = JSON.parse(await this.readBody(req));
@@ -474,7 +516,7 @@ export class DashboardServer {
   private async handleAskAgent(
     teamId: string,
     req: http.IncomingMessage,
-    res: http.ServerResponse
+    res: http.ServerResponse,
   ): Promise<void> {
     try {
       const body = JSON.parse(await this.readBody(req));
@@ -495,10 +537,7 @@ export class DashboardServer {
     }
   }
 
-  private handleSecurityReview(
-    teamId: string,
-    res: http.ServerResponse
-  ): void {
+  private handleSecurityReview(teamId: string, res: http.ServerResponse): void {
     try {
       const status = this.orchestrator.getTeamStatus(teamId);
       if (!status) {
@@ -519,7 +558,7 @@ export class DashboardServer {
   private handlePreviewBrowser(
     teamId: string,
     res: http.ServerResponse,
-    forceBrowse: boolean = false
+    forceBrowse: boolean = false,
   ): void {
     const status = this.orchestrator.getTeamStatus(teamId);
     if (!status) {
@@ -552,19 +591,25 @@ export class DashboardServer {
     if (!forceBrowse && htmlFiles.length > 0) {
       htmlFiles.sort((a, b) => b.mtime - a.mtime);
       const newest = htmlFiles[0].name;
-      res.writeHead(302, { Location: `/preview/${encodeURIComponent(teamId)}/${encodeURIComponent(newest)}` });
+      res.writeHead(302, {
+        Location: `/preview/${encodeURIComponent(teamId)}/${encodeURIComponent(newest)}`,
+      });
       res.end();
       return;
     }
 
     // File browser (fallback or explicit ?browse)
     htmlFiles.sort((a, b) => a.name.localeCompare(b.name));
-    const fileListHtml = htmlFiles.length > 0
-      ? htmlFiles.map(f =>
-          `<a href="/preview/${encodeURIComponent(teamId)}/${encodeURIComponent(f.name)}" class="file-link">`
-          + `<span class="file-icon">&#128196;</span> ${this.escapeHTML(f.name)}</a>`
-        ).join('\n')
-      : '<p class="empty">No HTML files found in project root.</p>';
+    const fileListHtml =
+      htmlFiles.length > 0
+        ? htmlFiles
+            .map(
+              (f) =>
+                `<a href="/preview/${encodeURIComponent(teamId)}/${encodeURIComponent(f.name)}" class="file-link">` +
+                `<span class="file-icon">&#128196;</span> ${this.escapeHTML(f.name)}</a>`,
+            )
+            .join('\n')
+        : '<p class="empty">No HTML files found in project root.</p>';
 
     const html = `<!DOCTYPE html>
 <html lang="en"><head>
@@ -595,14 +640,14 @@ ${fileListHtml}
   }
 
   private escapeHTML(str: string): string {
-    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    return str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
   }
 
-  private handlePreview(
-    teamId: string,
-    filePath: string,
-    res: http.ServerResponse
-  ): void {
+  private handlePreview(teamId: string, filePath: string, res: http.ServerResponse): void {
     const status = this.orchestrator.getTeamStatus(teamId);
     if (!status) {
       this.sendJSON(res, { error: `Team "${teamId}" not found` }, 404);
@@ -652,15 +697,20 @@ ${fileListHtml}
 
   private handlePickDirectory(res: http.ServerResponse): void {
     if (this.directoryPickerInFlight) {
-      this.sendJSON(res, {
-        error: 'Folder picker is already opening. Finish or cancel the current picker before opening another.',
-      }, 409);
+      this.sendJSON(
+        res,
+        {
+          error:
+            'Folder picker is already opening. Finish or cancel the current picker before opening another.',
+        },
+        409,
+      );
       return;
     }
 
     this.directoryPickerInFlight = true;
     const startedAt = Date.now();
-    this.pickDirectoryNative((err, selected, unsupported) => {
+    this.pickDirectoryNative((_err, selected, unsupported) => {
       this.directoryPickerInFlight = false;
       const durationMs = Date.now() - startedAt;
 
@@ -671,12 +721,16 @@ ${fileListHtml}
       }
 
       if (unsupported) {
-        this.sendJSON(res, {
-          cancelled: true,
-          path: null,
-          error: unsupported,
-          durationMs,
-        }, 501);
+        this.sendJSON(
+          res,
+          {
+            cancelled: true,
+            path: null,
+            error: unsupported,
+            durationMs,
+          },
+          501,
+        );
         return;
       }
 
@@ -691,7 +745,10 @@ ${fileListHtml}
   // first file's webkitRelativePath). Spotlight (mdfind) then locates the
   // matching directory on disk in ~50-200ms. Result: same instant native
   // picker as Phone-test's file-upload pattern, with no subprocess-spawn cost.
-  private async handleResolveDirectory(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  private async handleResolveDirectory(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
     try {
       const body = JSON.parse(await this.readBody(req));
       const name = typeof body?.name === 'string' ? body.name.trim() : '';
@@ -704,15 +761,18 @@ ${fileListHtml}
       const query = `kMDItemFSName == "${safeName}"`;
       execFile('mdfind', [query], { timeout: 8000 }, (err, stdout) => {
         if (err) {
-          this.sendJSON(res, { paths: [], error: 'Spotlight search failed; paste the path manually.' });
+          this.sendJSON(res, {
+            paths: [],
+            error: 'Spotlight search failed; paste the path manually.',
+          });
           return;
         }
         const candidates = stdout
           .split('\n')
-          .map(p => p.trim())
+          .map((p) => p.trim())
           .filter(Boolean);
         // Filter to existing directories only (mdfind returns files too)
-        const dirs = candidates.filter(p => {
+        const dirs = candidates.filter((p) => {
           try {
             return fs.statSync(p).isDirectory();
           } catch {
@@ -746,7 +806,7 @@ ${fileListHtml}
   }
 
   private pickDirectoryNative(
-    callback: (err: Error | null, selected: string | null, unsupported?: string) => void
+    callback: (err: Error | null, selected: string | null, unsupported?: string) => void,
   ): void {
     if (process.platform === 'darwin') {
       // Spawn the precompiled `pick-folder` Swift binary that opens
@@ -778,39 +838,55 @@ ${fileListHtml}
         '}',
         'exit 1',
       ].join('; ');
-      execFile('powershell.exe', [
-        '-NoProfile',
-        '-STA',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-Command',
-        script,
-      ], { timeout: 60000 }, (err, stdout) => {
-        callback(err, stdout.trim() || null);
-      });
+      execFile(
+        'powershell.exe',
+        ['-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-Command', script],
+        { timeout: 60000 },
+        (err, stdout) => {
+          callback(err, stdout.trim() || null);
+        },
+      );
       return;
     }
 
     const runKdialog = () => {
-      execFile('kdialog', ['--getexistingdirectory', process.env.HOME ?? '.'], { timeout: 60000 }, (err, stdout) => {
-        const enoent = (err as NodeJS.ErrnoException | null)?.code === 'ENOENT';
-        callback(err, stdout.trim() || null, enoent ? 'No supported Linux folder picker found. Install zenity or kdialog, or paste the path manually.' : undefined);
-      });
+      execFile(
+        'kdialog',
+        ['--getexistingdirectory', process.env.HOME ?? '.'],
+        { timeout: 60000 },
+        (err, stdout) => {
+          const enoent = (err as NodeJS.ErrnoException | null)?.code === 'ENOENT';
+          callback(
+            err,
+            stdout.trim() || null,
+            enoent
+              ? 'No supported Linux folder picker found. Install zenity or kdialog, or paste the path manually.'
+              : undefined,
+          );
+        },
+      );
     };
 
-    execFile('zenity', ['--file-selection', '--directory', '--title=Select project folder'], { timeout: 60000 }, (err, stdout) => {
-      if ((err as NodeJS.ErrnoException | null)?.code === 'ENOENT') {
-        runKdialog();
-        return;
-      }
-      callback(err, stdout.trim() || null);
-    });
+    execFile(
+      'zenity',
+      ['--file-selection', '--directory', '--title=Select project folder'],
+      { timeout: 60000 },
+      (err, stdout) => {
+        if ((err as NodeJS.ErrnoException | null)?.code === 'ENOENT') {
+          runKdialog();
+          return;
+        }
+        callback(err, stdout.trim() || null);
+      },
+    );
   }
 
   private readBody(req: http.IncomingMessage): Promise<string> {
     return new Promise<string>((resolve, reject) => {
       let data = '';
-      req.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+      req.on('data', (chunk: Buffer) => {
+        data += chunk.toString();
+      });
       req.on('end', () => resolve(data));
       req.on('error', reject);
     });

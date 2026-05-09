@@ -12,33 +12,49 @@
 // Each agent gets its own provider-backed session. The pipeline talks to a
 // small AgentSession interface; provider adapters own SDK-specific behavior.
 
+import { randomUUID } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { EventEmitter } from 'node:events';
-import { Role, type RoleInstance } from './roles/role-types.js';
-import { INSTANCE_AGENT_FILES, INSTANCE_TO_ROLE, ALL_INSTANCES } from './spawner/agent-files.js';
-import { AgentState } from './types/index.js';
-import { TeamState, TeamPhase, type TeamStateData, type LoopLimits, DEFAULT_LOOP_LIMITS } from './state/team-state.js';
-import { StatePersistence } from './state/persistence.js';
-import { Registry } from './registry.js';
-import { GitOps } from './git.js';
-import { classifyComplexity } from './router/complexity-router.js';
-import { parseFrontmatter } from './spawner/frontmatter-parser.js';
-import { createAgentSession, normalizeAgentRuntime, normalizeProviderModel, validateAgentRuntime } from './agent-runtime/index.js';
 import type { AgentRuntimeConfig, AgentSession, EffortLevel } from './agent-runtime/index.js';
-import { randomUUID } from 'node:crypto';
+import {
+  createAgentSession,
+  normalizeAgentRuntime,
+  normalizeProviderModel,
+  validateAgentRuntime,
+} from './agent-runtime/index.js';
+import { GitOps } from './git.js';
 import {
   auditProjectChanges,
   formatGuardrailReport,
+  type GuardrailReport,
+  type GuardrailRuntimeConfig,
   GuardrailViolationError,
   hasBlockingFindings,
   normalizeGuardrails,
-  type GuardrailReport,
-  type GuardrailRuntimeConfig,
 } from './guardrails.js';
+import { Registry } from './registry.js';
+import { Role, type RoleInstance } from './roles/role-types.js';
+import { classifyComplexity } from './router/complexity-router.js';
 import { normalizeRuntimeError } from './runtime-errors.js';
+import { ALL_INSTANCES, INSTANCE_AGENT_FILES, INSTANCE_TO_ROLE } from './spawner/agent-files.js';
+import { parseFrontmatter } from './spawner/frontmatter-parser.js';
+import { StatePersistence } from './state/persistence.js';
+import {
+  DEFAULT_LOOP_LIMITS,
+  type LoopLimits,
+  TeamPhase,
+  TeamState,
+  type TeamStateData,
+} from './state/team-state.js';
+import { AgentState } from './types/index.js';
 
-export type { AgentAuthMode, AgentProvider, AgentRuntimeConfig, EffortLevel } from './agent-runtime/index.js';
+export type {
+  AgentAuthMode,
+  AgentProvider,
+  AgentRuntimeConfig,
+  EffortLevel,
+} from './agent-runtime/index.js';
 
 // --- Orchestrator events (shared interface for all event consumers) ---
 
@@ -55,16 +71,16 @@ export interface OrchestratorEvents {
   'agent-respawned': [teamId: string, instance: RoleInstance];
   'malformed-output': [teamId: string, instance: RoleInstance, raw: string];
   'deadlock-detected': [teamId: string];
-  'error': [teamId: string, error: Error];
-  'feedback': [teamId: string, feedback: FeedbackPayload];
+  error: [teamId: string, error: Error];
+  feedback: [teamId: string, feedback: FeedbackPayload];
   'feedback-response': [teamId: string, feedbackId: string, value: string];
   'agent-task': [teamId: string, instance: RoleInstance, subtask: string];
-  'tick': [teamId: string];
+  tick: [teamId: string];
   'security-review': [teamId: string, data: { status: string; result?: string }];
   'pr-created': [teamId: string, prNumber: number, prUrl: string];
   'team-archived': [teamId: string, prUrl: string];
   'team-deleted': [teamId: string];
-  'shutdown': [];
+  shutdown: [];
 }
 
 export interface FeedbackPayload {
@@ -117,8 +133,8 @@ export class MalformedVerdictError extends Error {
   ) {
     super(
       `Agent ${instance} emitted an unparseable verdict twice. ` +
-      `Expected response to begin with one of: ${expected.join(', ')}. ` +
-      `Raw output (last attempt, truncated to 200 chars): ${raw.slice(0, 200)}`,
+        `Expected response to begin with one of: ${expected.join(', ')}. ` +
+        `Raw output (last attempt, truncated to 200 chars): ${raw.slice(0, 200)}`,
     );
     this.name = 'MalformedVerdictError';
   }
@@ -210,6 +226,7 @@ export async function sendWithVerdict<V extends string>(
 
   hooks.onMalformed(first);
 
+  // biome-ignore lint/correctness/noUnreachable: loop body always returns or throws on the first iteration; the loop form is kept so VERDICT_RETRY_LIMIT can be raised later without restructuring.
   for (let attempt = 0; attempt < VERDICT_RETRY_LIMIT; attempt++) {
     const retryPrompt = formatVerdictRetryPrompt(expected, first);
     const retry = await session.send(retryPrompt);
@@ -332,9 +349,10 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
     // Filter out undefined values so they don't overwrite defaults
     const cleanConfig = Object.fromEntries(
-      Object.entries(config).filter(([, v]) => v !== undefined)
+      Object.entries(config).filter(([, v]) => v !== undefined),
     );
-    this.config = { ...DEFAULT_PIPELINE_CONFIG, ...cleanConfig } as PipelineOrchestraConfig & typeof DEFAULT_PIPELINE_CONFIG;
+    this.config = { ...DEFAULT_PIPELINE_CONFIG, ...cleanConfig } as PipelineOrchestraConfig &
+      typeof DEFAULT_PIPELINE_CONFIG;
     this.agentRuntime = normalizeAgentRuntime(config.agentRuntime);
     validateAgentRuntime(this.agentRuntime);
     this.guardrails = normalizeGuardrails(config.guardrails);
@@ -355,7 +373,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       const role = INSTANCE_TO_ROLE[instance];
       this.models[instance] = config.models?.[role] ?? fmDefaults.models[instance];
       this.efforts[instance] = config.efforts?.[role] ?? fmDefaults.efforts[instance];
-      this.disallowedTools[instance] = config.disallowedTools?.[role] ?? fmDefaults.disallowedTools[instance];
+      this.disallowedTools[instance] =
+        config.disallowedTools?.[role] ?? fmDefaults.disallowedTools[instance];
       this.maxTurnsPerInstance[instance] = config.maxTurns?.[role] ?? fmDefaults.maxTurns[instance];
     }
   }
@@ -388,7 +407,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     }
     if (teamsInThisProject >= this.config.maxConcurrentTeams) {
       throw new Error(
-        `Maximum concurrent teams (${this.config.maxConcurrentTeams}) reached for this project. Terminate an existing team in this project first, or use a different project.`
+        `Maximum concurrent teams (${this.config.maxConcurrentTeams}) reached for this project. Terminate an existing team in this project first, or use a different project.`,
       );
     }
 
@@ -457,9 +476,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
         continue;
       }
 
-      const teamDir = path.join(
-        entry.projectPath, '.claude-orchestra', 'teams', entry.teamId
-      );
+      const teamDir = path.join(entry.projectPath, '.claude-orchestra', 'teams', entry.teamId);
       const data = this.persistence.loadFromDir(teamDir);
       if (!data) continue;
 
@@ -491,7 +508,11 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
   // --- Task Assignment ---
 
-  assignTask(teamId: string, taskDescription: string, images?: Array<{ media_type: string; data: string }>): void {
+  assignTask(
+    teamId: string,
+    taskDescription: string,
+    images?: Array<{ media_type: string; data: string }>,
+  ): void {
     if (this.shuttingDown) {
       throw new Error('Orchestrator is shutting down');
     }
@@ -551,7 +572,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     ctx: PipelineTeamContext,
     task: string,
     complexity: 'simple' | 'standard' | 'complex',
-    images?: Array<{ media_type: string; data: string }>
+    images?: Array<{ media_type: string; data: string }>,
   ): Promise<void> {
     if (complexity === 'simple') {
       this.runSimplePipeline(teamId, ctx, task, images);
@@ -567,7 +588,11 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     try {
       // Extract requirements from the task prompt
       this.emit('agent-output', teamId, 'Worker-1' as any, '[Pipeline] Extracting requirements...');
-      const requirements = await this.extractRequirements(ctx.state.snapshot.projectPath, task, images);
+      const requirements = await this.extractRequirements(
+        ctx.state.snapshot.projectPath,
+        task,
+        images,
+      );
 
       if (requirements) {
         // Short-circuit: extraction emitted only a clarification-flagging line —
@@ -585,7 +610,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
             'warning',
             'Task too vague',
             'Requirements extraction could not derive a verifiable requirement from the task description. ' +
-              'Please reassign the task with more specific outcome criteria.'
+              'Please reassign the task with more specific outcome criteria.',
           );
           ctx.pipelineRunning = false;
           // Stay in PreWork awaiting a new task.
@@ -597,7 +622,10 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
           teamId,
           'Requirements Checklist',
           `Review the extracted requirements before agents start:\n\n${requirements}`,
-          [{ label: 'Approve', value: 'approve' }, { label: 'Skip', value: 'skip' }]
+          [
+            { label: 'Approve', value: 'approve' },
+            { label: 'Skip', value: 'skip' },
+          ],
         );
 
         if (response === 'approve') {
@@ -608,8 +636,12 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       }
     } catch (err: any) {
       // Extraction failed — proceed without requirements
-      this.notifyUser(teamId, 'warning', 'Requirements extraction skipped',
-        'Could not extract requirements: ' + (err.message || 'Unknown error'));
+      this.notifyUser(
+        teamId,
+        'warning',
+        'Requirements extraction skipped',
+        'Could not extract requirements: ' + (err.message || 'Unknown error'),
+      );
     }
 
     // Start the pipeline
@@ -737,7 +769,10 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
     const { snapshot } = ctx.state;
     if (snapshot.currentPhase !== TeamPhase.Done) {
-      return { success: false, output: `Team is in "${snapshot.currentPhase}" phase, must be "done" to create PR` };
+      return {
+        success: false,
+        output: `Team is in "${snapshot.currentPhase}" phase, must be "done" to create PR`,
+      };
     }
 
     const branchName = snapshot.branchName;
@@ -853,7 +888,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
     // Stop polling if no teams are in PrOpen
     const anyPrOpen = [...this.teams.values()].some(
-      ctx => ctx.state.snapshot.currentPhase === TeamPhase.PrOpen
+      (ctx) => ctx.state.snapshot.currentPhase === TeamPhase.PrOpen,
     );
     if (!anyPrOpen) {
       this.stopPrPolling();
@@ -870,7 +905,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   async runSecurityReview(teamId: string): Promise<void> {
     const ctx = this.teams.get(teamId);
     if (!ctx) throw new Error(`Team "${teamId}" not found`);
-    if (ctx.pipelineRunning) throw new Error('Cannot run security review while pipeline is running');
+    if (ctx.pipelineRunning)
+      throw new Error('Cannot run security review while pipeline is running');
 
     // Close any previous security review session
     if (ctx.securityReviewSession && !ctx.securityReviewSession.closed) {
@@ -882,16 +918,27 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     // Get the full branch diff
     const diffResult = GitOps.diff(cwd);
     if (!diffResult.success) {
-      this.emit('security-review', teamId, { status: 'concerns', result: `Failed to get diff: ${diffResult.output}` });
+      this.emit('security-review', teamId, {
+        status: 'concerns',
+        result: `Failed to get diff: ${diffResult.output}`,
+      });
       return;
     }
     if (!diffResult.output.trim()) {
-      this.emit('security-review', teamId, { status: 'passed', result: 'No changes to review — branch is identical to main.' });
+      this.emit('security-review', teamId, {
+        status: 'passed',
+        result: 'No changes to review — branch is identical to main.',
+      });
       return;
     }
 
     this.emit('security-review', teamId, { status: 'running' });
-    this.emit('agent-output', teamId, 'Security-1' as any, '[Security Review] Starting comprehensive review...');
+    this.emit(
+      'agent-output',
+      teamId,
+      'Security-1' as any,
+      '[Security Review] Starting comprehensive review...',
+    );
 
     try {
       const systemPrompt = this.loadRolePrompt('security-review.agent.md');
@@ -911,12 +958,13 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       const MAX_DIFF_CHARS = 80_000;
       let diffText = diffResult.output;
       if (diffText.length > MAX_DIFF_CHARS) {
-        diffText = diffText.substring(0, MAX_DIFF_CHARS) +
+        diffText =
+          diffText.substring(0, MAX_DIFF_CHARS) +
           '\n\n[DIFF TRUNCATED — use `git diff main...HEAD` via Bash to see the full diff]';
       }
 
       const response = await session.send(
-        'Review the following git diff for security concerns. Analyze every change.\n\n' + diffText
+        'Review the following git diff for security concerns. Analyze every change.\n\n' + diffText,
       );
 
       // Parse verdict from response
@@ -953,7 +1001,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     if (fs.existsSync(gitignorePath)) {
       content = fs.readFileSync(gitignorePath, 'utf-8');
       // Check if already present
-      if (content.split('\n').some(line => line.trim() === entry)) {
+      if (content.split('\n').some((line) => line.trim() === entry)) {
         return;
       }
     }
@@ -995,7 +1043,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   private createSession(
     name: RoleInstance,
     cwd: string,
-    onProgress?: (accumulated: string) => void
+    onProgress?: (accumulated: string) => void,
   ): AgentSession {
     const systemPrompt = this.loadRolePrompt(INSTANCE_AGENT_FILES[name]);
 
@@ -1004,9 +1052,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       model: this.getModelForInstance(name),
       cwd,
       effort: this.efforts[name],
-      disallowedTools: this.disallowedTools[name].length > 0
-        ? this.disallowedTools[name]
-        : undefined,
+      disallowedTools:
+        this.disallowedTools[name].length > 0 ? this.disallowedTools[name] : undefined,
       maxTurns: this.maxTurnsPerInstance[name],
       guardrails: this.guardrails,
       onProgress,
@@ -1019,18 +1066,25 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     teamId: string,
     ctx: PipelineTeamContext,
     task: string,
-    images?: Array<{ media_type: string; data: string }>
+    images?: Array<{ media_type: string; data: string }>,
   ): Promise<void> {
     const startTime = Date.now();
 
     try {
       // Phase: Work
       const fromPhase = ctx.state.currentPhase;
-      this.tryTransitionPhase(ctx.state, teamId, fromPhase, TeamPhase.Work, 'simple pipeline start');
+      this.tryTransitionPhase(
+        ctx.state,
+        teamId,
+        fromPhase,
+        TeamPhase.Work,
+        'simple pipeline start',
+      );
 
       // Create Worker-1 session
-      const worker = this.createSession('Worker-1', ctx.state.snapshot.projectPath,
-        (text) => this.emit('agent-progress', teamId, 'Worker-1' as any, text));
+      const worker = this.createSession('Worker-1', ctx.state.snapshot.projectPath, (text) =>
+        this.emit('agent-progress', teamId, 'Worker-1' as any, text),
+      );
       ctx.sessions.push(worker);
 
       ctx.state.setAgentJob('Worker-1' as any, 'Implementing task (simple)');
@@ -1039,9 +1093,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
       // Send task to worker (with approved requirements if present)
       const requirements = ctx.state.snapshot.currentTask?.requirements;
-      const fullPrompt = requirements
-        ? `${task}\n\nAPPROVED REQUIREMENTS:\n${requirements}`
-        : task;
+      const fullPrompt = requirements ? `${task}\n\nAPPROVED REQUIREMENTS:\n${requirements}` : task;
       const result = await worker.send(fullPrompt, images);
       const simpleDisplay = result.trim() || worker.lastActivityLog || '(no text output)';
       this.emit('agent-output', teamId, 'Worker-1' as any, simpleDisplay);
@@ -1061,25 +1113,27 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     teamId: string,
     ctx: PipelineTeamContext,
     task: string,
-    images?: Array<{ media_type: string; data: string }>
+    images?: Array<{ media_type: string; data: string }>,
   ): Promise<void> {
     const startTime = Date.now();
     const cwd = ctx.state.snapshot.projectPath;
     const requirements = ctx.state.snapshot.currentTask?.requirements;
-    const requirementsBlock = requirements
-      ? `\nAPPROVED REQUIREMENTS:\n${requirements}\n`
-      : '';
+    const requirementsBlock = requirements ? `\nAPPROVED REQUIREMENTS:\n${requirements}\n` : '';
 
     try {
       // Create all 4 agent sessions in parallel (cold starts happen simultaneously)
-      const security = this.createSession('Security-1', cwd,
-        (text) => this.emit('agent-progress', teamId, 'Security-1' as any, text));
-      const worker1 = this.createSession('Worker-1', cwd,
-        (text) => this.emit('agent-progress', teamId, 'Worker-1' as any, text));
-      const worker2 = this.createSession('Worker-2', cwd,
-        (text) => this.emit('agent-progress', teamId, 'Worker-2' as any, text));
-      const reviewer = this.createSession('Reviewer-1', cwd,
-        (text) => this.emit('agent-progress', teamId, 'Reviewer-1' as any, text));
+      const security = this.createSession('Security-1', cwd, (text) =>
+        this.emit('agent-progress', teamId, 'Security-1' as any, text),
+      );
+      const worker1 = this.createSession('Worker-1', cwd, (text) =>
+        this.emit('agent-progress', teamId, 'Worker-1' as any, text),
+      );
+      const worker2 = this.createSession('Worker-2', cwd, (text) =>
+        this.emit('agent-progress', teamId, 'Worker-2' as any, text),
+      );
+      const reviewer = this.createSession('Reviewer-1', cwd, (text) =>
+        this.emit('agent-progress', teamId, 'Reviewer-1' as any, text),
+      );
       ctx.sessions = [security, worker1, worker2, reviewer];
 
       // Outer loop: handles REJECTED verdicts (restart from scan)
@@ -1091,15 +1145,19 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
           this.tryTransitionPhase(ctx.state, teamId, fromPhase, TeamPhase.PreWork, 'security scan');
           this.persistence.persist(ctx.state);
 
-          this.emit('agent-output', teamId, 'Security-1' as any,
-            `[Pipeline] Security scan starting...`);
+          this.emit(
+            'agent-output',
+            teamId,
+            'Security-1' as any,
+            `[Pipeline] Security scan starting...`,
+          );
 
           scanResult = await security.send(
             `PRE-WORK SCAN REQUEST\n\n` +
-            `Task: ${task}\n` +
-            requirementsBlock +
-            `Project path: ${cwd}\n\n` +
-            `Scan all files in the task scope and produce a clearance report.`
+              `Task: ${task}\n` +
+              requirementsBlock +
+              `Project path: ${cwd}\n\n` +
+              `Scan all files in the task scope and produce a clearance report.`,
           );
 
           this.emit('agent-output', teamId, 'Security-1' as any, scanResult);
@@ -1121,23 +1179,34 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
             this.emit('task-classified', teamId, 'simple', 1);
             this.persistence.persist(ctx.state);
 
-            this.emit('agent-output', teamId, 'Security-1' as any,
-              `[Pipeline] Security classified task as SIMPLE — running Worker-1 only.`);
+            this.emit(
+              'agent-output',
+              teamId,
+              'Security-1' as any,
+              `[Pipeline] Security classified task as SIMPLE — running Worker-1 only.`,
+            );
 
             // Run Worker-1 with scan clearance included
             const fromPhase2 = ctx.state.currentPhase;
-            this.tryTransitionPhase(ctx.state, teamId, fromPhase2, TeamPhase.Work, 'simple pipeline (reclassified)');
+            this.tryTransitionPhase(
+              ctx.state,
+              teamId,
+              fromPhase2,
+              TeamPhase.Work,
+              'simple pipeline (reclassified)',
+            );
             this.persistence.persist(ctx.state);
 
             this.emit('agent-task', teamId, 'Worker-1' as any, 'Implementing task (simple)');
             const simpleResult = await worker1.send(
               `TASK: ${task}\n\n` +
-              requirementsBlock +
-              `SECURITY CLEARANCE:\n${scanResult}\n\n` +
-              `Implement the assigned work within the cleared scope.`,
-              images
+                requirementsBlock +
+                `SECURITY CLEARANCE:\n${scanResult}\n\n` +
+                `Implement the assigned work within the cleared scope.`,
+              images,
             );
-            const simpleDisplay = simpleResult.trim() || worker1.lastActivityLog || '(no text output)';
+            const simpleDisplay =
+              simpleResult.trim() || worker1.lastActivityLog || '(no text output)';
             this.emit('agent-output', teamId, 'Worker-1' as any, simpleDisplay);
             this.runGuardrailAudit(teamId, ctx, 'simple-work-reclassified');
 
@@ -1153,7 +1222,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
         // Inner loop: handles REVISION_NEEDED and BLOCKED verdicts
         let workerResults: { w1: string; w2: string } = { w1: '', w2: '' };
-        innerLoop: while (true) {
+        while (true) {
           // --- Step 2: Worker-1 implements, Worker-2 verifies ---
           {
             const fromPhase = ctx.state.currentPhase;
@@ -1165,18 +1234,21 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
               `TASK: ${task}\n\n` +
               requirementsBlock +
               `SECURITY CLEARANCE:\n${scanResult}\n\n` +
-              (revisionCount > 0 ? `REVISION ATTEMPT ${revisionCount + 1}:\nPrevious work needs revision. Address any feedback and fix issues.\n\n` : '') +
+              (revisionCount > 0
+                ? `REVISION ATTEMPT ${revisionCount + 1}:\nPrevious work needs revision. Address any feedback and fix issues.\n\n`
+                : '') +
               `Implement the assigned work within the cleared scope.`;
 
             // --- Worker-1: Implement ---
             this.emit('agent-task', teamId, 'Worker-1' as any, 'Implementing full task');
-            this.emit('agent-output', teamId, 'Worker-1' as any,
-              `[Pipeline] Worker-1 implementing...`);
-
-            const w1Result = await worker1.send(
-              `You are Worker-1. ${workerInstruction}`,
-              images
+            this.emit(
+              'agent-output',
+              teamId,
+              'Worker-1' as any,
+              `[Pipeline] Worker-1 implementing...`,
             );
+
+            const w1Result = await worker1.send(`You are Worker-1. ${workerInstruction}`, images);
             // Use activity log as fallback display when text result is empty (most work is tool_use)
             const w1Display = w1Result.trim() || worker1.lastActivityLog || '(no text output)';
             this.emit('agent-output', teamId, 'Worker-1' as any, w1Display);
@@ -1188,41 +1260,45 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
             while (verifyPass < MAX_VERIFY_PASSES) {
               verifyPass++;
-              const verifyLabel = verifyPass === 1
-                ? 'Verifying completeness'
-                : `Re-verifying completeness (pass ${verifyPass})`;
+              const verifyLabel =
+                verifyPass === 1
+                  ? 'Verifying completeness'
+                  : `Re-verifying completeness (pass ${verifyPass})`;
 
               this.emit('agent-task', teamId, 'Worker-2' as any, verifyLabel);
-              this.emit('agent-output', teamId, 'Worker-2' as any,
-                `[Pipeline] Worker-2 ${verifyLabel.toLowerCase()}...`);
+              this.emit(
+                'agent-output',
+                teamId,
+                'Worker-2' as any,
+                `[Pipeline] Worker-2 ${verifyLabel.toLowerCase()}...`,
+              );
 
               const verifyVerdict = await sendWithVerdict(
                 worker2,
                 `REQUIREMENTS VERIFICATION\n\n` +
-                `You are Worker-2, acting as an engineering manager. Your ONLY job is to verify ` +
-                `that Worker-1 built what the user asked for. Do NOT modify any code.\n\n` +
-                `DEFINITION OF A GAP: A specific requirement from the approved requirements list ` +
-                `that is NOT implemented in the code. Do NOT flag code quality, style, ` +
-                `performance, or things not in the requirements.\n\n` +
-                `ORIGINAL TASK: ${task}\n\n` +
-                (requirements
-                  ? `APPROVED REQUIREMENTS:\n${requirements}\n\n`
-                  : '') +
-                `WORKER-1 OUTPUT:\n${currentW1Result.substring(0, 3000)}\n\n` +
-                `INSTRUCTIONS:\n` +
-                `1. Begin your response on the FIRST line with one of:\n` +
-                `   COMPLETE — if every approved requirement is implemented\n` +
-                `   GAPS_FOUND — if any requirement is missing\n` +
-                `2. Below the verdict, output a checklist in this format:\n\n` +
-                `REQUIREMENTS CHECKLIST:\n` +
-                `- [x] Requirement description — implemented\n` +
-                `- [ ] Requirement description — NOT implemented (explain what is missing)\n\n` +
-                `Only flag gaps for requirements in the approved list. Nothing else.`,
+                  `You are Worker-2, acting as an engineering manager. Your ONLY job is to verify ` +
+                  `that Worker-1 built what the user asked for. Do NOT modify any code.\n\n` +
+                  `DEFINITION OF A GAP: A specific requirement from the approved requirements list ` +
+                  `that is NOT implemented in the code. Do NOT flag code quality, style, ` +
+                  `performance, or things not in the requirements.\n\n` +
+                  `ORIGINAL TASK: ${task}\n\n` +
+                  (requirements ? `APPROVED REQUIREMENTS:\n${requirements}\n\n` : '') +
+                  `WORKER-1 OUTPUT:\n${currentW1Result.substring(0, 3000)}\n\n` +
+                  `INSTRUCTIONS:\n` +
+                  `1. Begin your response on the FIRST line with one of:\n` +
+                  `   COMPLETE — if every approved requirement is implemented\n` +
+                  `   GAPS_FOUND — if any requirement is missing\n` +
+                  `2. Below the verdict, output a checklist in this format:\n\n` +
+                  `REQUIREMENTS CHECKLIST:\n` +
+                  `- [x] Requirement description — implemented\n` +
+                  `- [ ] Requirement description — NOT implemented (explain what is missing)\n\n` +
+                  `Only flag gaps for requirements in the approved list. Nothing else.`,
                 parseVerifyVerdict,
                 ['COMPLETE', 'GAPS_FOUND'] as const,
                 {
                   onResponse: (raw) => this.emit('agent-output', teamId, 'Worker-2' as any, raw),
-                  onMalformed: (raw) => this.emit('malformed-output', teamId, 'Worker-2' as any, raw),
+                  onMalformed: (raw) =>
+                    this.emit('malformed-output', teamId, 'Worker-2' as any, raw),
                 },
                 'Worker-2',
               );
@@ -1234,27 +1310,44 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
               }
 
               // GAPS_FOUND — extract only unmet requirements for the detail modal
-              const unmetLines = w2Result.split('\n')
-                .filter(line => /- \[ \]/.test(line))
+              const unmetLines = w2Result
+                .split('\n')
+                .filter((line) => /- \[ \]/.test(line))
                 .join('\n');
               const gapDetail = unmetLines || w2Result.substring(0, 4000);
 
-              this.notifyUser(teamId, 'info', 'Requirements Gap',
+              this.notifyUser(
+                teamId,
+                'info',
+                'Requirements Gap',
                 `Worker-2 found unmet requirements (pass ${verifyPass}) — Worker-1 is fixing them.`,
-                undefined, undefined, gapDetail);
+                undefined,
+                undefined,
+                gapDetail,
+              );
 
-              this.emit('agent-task', teamId, 'Worker-1' as any, `Fixing gaps (attempt ${verifyPass})`);
-              this.emit('agent-output', teamId, 'Worker-1' as any,
-                `[Pipeline] Worker-1 fixing gaps (attempt ${verifyPass})...`);
+              this.emit(
+                'agent-task',
+                teamId,
+                'Worker-1' as any,
+                `Fixing gaps (attempt ${verifyPass})`,
+              );
+              this.emit(
+                'agent-output',
+                teamId,
+                'Worker-1' as any,
+                `[Pipeline] Worker-1 fixing gaps (attempt ${verifyPass})...`,
+              );
 
               currentW1Result = await worker1.send(
                 `REQUIREMENTS GAPS — FIX REQUIRED (attempt ${verifyPass})\n\n` +
-                `Worker-2 checked your implementation against the original task requirements ` +
-                `and found unmet requirements (marked [ ] in the checklist below):\n\n` +
-                `${w2Result.substring(0, 3000)}\n\n` +
-                `Implement ONLY the unchecked [ ] requirements. Do not re-implement what already works.`
+                  `Worker-2 checked your implementation against the original task requirements ` +
+                  `and found unmet requirements (marked [ ] in the checklist below):\n\n` +
+                  `${w2Result.substring(0, 3000)}\n\n` +
+                  `Implement ONLY the unchecked [ ] requirements. Do not re-implement what already works.`,
               );
-              const fixDisplay = currentW1Result.trim() || worker1.lastActivityLog || '(no text output)';
+              const fixDisplay =
+                currentW1Result.trim() || worker1.lastActivityLog || '(no text output)';
               this.emit('agent-output', teamId, 'Worker-1' as any, fixDisplay);
             }
 
@@ -1269,42 +1362,69 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
           // --- Step 3: Security Sweep ---
           {
             const fromPhase = ctx.state.currentPhase;
-            this.tryTransitionPhase(ctx.state, teamId, fromPhase, TeamPhase.Handoff, 'security sweep');
+            this.tryTransitionPhase(
+              ctx.state,
+              teamId,
+              fromPhase,
+              TeamPhase.Handoff,
+              'security sweep',
+            );
             this.persistence.persist(ctx.state);
 
-            this.emit('agent-output', teamId, 'Security-1' as any,
-              `[Pipeline] Security sweep starting...`);
+            this.emit(
+              'agent-output',
+              teamId,
+              'Security-1' as any,
+              `[Pipeline] Security sweep starting...`,
+            );
 
             const sweepVerdict = await sendWithVerdict(
               security,
               `POST-WORK SWEEP REQUEST\n\n` +
-              `Task: ${task}\n` +
-              requirementsBlock + `\n` +
-              `Worker-1 summary:\n${workerResults.w1.substring(0, 2000)}\n\n` +
-              `Worker-2 summary:\n${workerResults.w2.substring(0, 2000)}\n\n` +
-              `Sweep all changes made by Workers. Check for introduced vulnerabilities, ` +
-              `leaked secrets, and scope violations. Begin your response with APPROVED, FLAGGED, or BLOCKED.`,
+                `Task: ${task}\n` +
+                requirementsBlock +
+                `\n` +
+                `Worker-1 summary:\n${workerResults.w1.substring(0, 2000)}\n\n` +
+                `Worker-2 summary:\n${workerResults.w2.substring(0, 2000)}\n\n` +
+                `Sweep all changes made by Workers. Check for introduced vulnerabilities, ` +
+                `leaked secrets, and scope violations. Begin your response with APPROVED, FLAGGED, or BLOCKED.`,
               parseSecurityVerdict,
               ['APPROVED', 'FLAGGED', 'BLOCKED'] as const,
               {
                 onResponse: (raw) => this.emit('agent-output', teamId, 'Security-1' as any, raw),
-                onMalformed: (raw) => this.emit('malformed-output', teamId, 'Security-1' as any, raw),
+                onMalformed: (raw) =>
+                  this.emit('malformed-output', teamId, 'Security-1' as any, raw),
               },
               'Security-1',
             );
 
             if (sweepVerdict.verdict === 'BLOCKED') {
-              this.emit('agent-output', teamId, 'Security-1' as any,
-                `[Pipeline] Security BLOCKED — retrying workers...`);
-              this.notifyUser(teamId, 'warning', 'Security Blocked',
+              this.emit(
+                'agent-output',
+                teamId,
+                'Security-1' as any,
+                `[Pipeline] Security BLOCKED — retrying workers...`,
+              );
+              this.notifyUser(
+                teamId,
+                'warning',
+                'Security Blocked',
                 'Security sweep found issues — retrying workers with updated constraints.',
-                'Security-1', ['blocked', 'issue', 'vulnerability', 'hardcoded', 'secret', 'injection']);
+                'Security-1',
+                ['blocked', 'issue', 'vulnerability', 'hardcoded', 'secret', 'injection'],
+              );
               // Backward transition: Handoff → Work (auto-increments counters, checks limits)
               const fromPhase2 = ctx.state.currentPhase;
               ctx.state.transitionPhase(TeamPhase.Work);
-              this.emit('phase-transition', teamId, fromPhase2, TeamPhase.Work, 'security blocked — retry');
+              this.emit(
+                'phase-transition',
+                teamId,
+                fromPhase2,
+                TeamPhase.Work,
+                'security blocked — retry',
+              );
               this.persistence.persist(ctx.state);
-              continue innerLoop;
+              continue;
             }
 
             // APPROVED or FLAGGED — proceed to review
@@ -1319,24 +1439,27 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
             this.tryTransitionPhase(ctx.state, teamId, fromPhase, TeamPhase.Review, 'review');
             this.persistence.persist(ctx.state);
 
-            this.emit('agent-output', teamId, 'Reviewer-1' as any,
-              `[Pipeline] Review starting...`);
+            this.emit('agent-output', teamId, 'Reviewer-1' as any, `[Pipeline] Review starting...`);
 
             const reviewVerdict = await sendWithVerdict(
               reviewer,
               `REVIEW REQUEST\n\n` +
-              `Task: ${task}\n` +
-              requirementsBlock + `\n` +
-              `Worker-1 summary:\n${workerResults.w1.substring(0, 2000)}\n\n` +
-              `Worker-2 summary:\n${workerResults.w2.substring(0, 2000)}\n\n` +
-              `Evaluate the quality and correctness of this work. ` +
-              (ctx.isComplex ? `This is a COMPLEX task — apply strict review criteria for backward compatibility, data integrity, and security. ` : '') +
-              `Begin your response with APPROVED, REVISION_NEEDED, or REJECTED.`,
+                `Task: ${task}\n` +
+                requirementsBlock +
+                `\n` +
+                `Worker-1 summary:\n${workerResults.w1.substring(0, 2000)}\n\n` +
+                `Worker-2 summary:\n${workerResults.w2.substring(0, 2000)}\n\n` +
+                `Evaluate the quality and correctness of this work. ` +
+                (ctx.isComplex
+                  ? `This is a COMPLEX task — apply strict review criteria for backward compatibility, data integrity, and security. `
+                  : '') +
+                `Begin your response with APPROVED, REVISION_NEEDED, or REJECTED.`,
               parseReviewVerdict,
               ['APPROVED', 'REVISION_NEEDED', 'REJECTED'] as const,
               {
                 onResponse: (raw) => this.emit('agent-output', teamId, 'Reviewer-1' as any, raw),
-                onMalformed: (raw) => this.emit('malformed-output', teamId, 'Reviewer-1' as any, raw),
+                onMalformed: (raw) =>
+                  this.emit('malformed-output', teamId, 'Reviewer-1' as any, raw),
               },
               'Reviewer-1',
             );
@@ -1347,34 +1470,56 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
             }
 
             if (reviewVerdict.verdict === 'REVISION_NEEDED') {
-              this.emit('agent-output', teamId, 'Reviewer-1' as any,
-                `[Pipeline] REVISION_NEEDED — retrying workers with feedback...`);
-              this.notifyUser(teamId, 'info', 'Revision Requested',
-                'Reviewer requested changes — sending feedback to workers for another pass.');
+              this.emit(
+                'agent-output',
+                teamId,
+                'Reviewer-1' as any,
+                `[Pipeline] REVISION_NEEDED — retrying workers with feedback...`,
+              );
+              this.notifyUser(
+                teamId,
+                'info',
+                'Revision Requested',
+                'Reviewer requested changes — sending feedback to workers for another pass.',
+              );
               // Backward transition: Review → Work (auto-increments revisions + total)
               const fromPhase2 = ctx.state.currentPhase;
               ctx.state.transitionPhase(TeamPhase.Work);
               this.emit('phase-transition', teamId, fromPhase2, TeamPhase.Work, 'revision needed');
               this.persistence.persist(ctx.state);
-              continue innerLoop;
+              continue;
             }
 
             if (reviewVerdict.verdict === 'REJECTED') {
-              this.emit('agent-output', teamId, 'Reviewer-1' as any,
-                `[Pipeline] REJECTED — restarting from security scan...`);
-              this.notifyUser(teamId, 'warning', 'Work Rejected',
-                'Reviewer rejected the work — restarting pipeline from security scan.');
+              this.emit(
+                'agent-output',
+                teamId,
+                'Reviewer-1' as any,
+                `[Pipeline] REJECTED — restarting from security scan...`,
+              );
+              this.notifyUser(
+                teamId,
+                'warning',
+                'Work Rejected',
+                'Reviewer rejected the work — restarting pipeline from security scan.',
+              );
               // Backward transition: Review → PreWork (auto-increments rejections + total)
               const fromPhase2 = ctx.state.currentPhase;
               ctx.state.transitionPhase(TeamPhase.PreWork);
-              this.emit('phase-transition', teamId, fromPhase2, TeamPhase.PreWork, 'rejected — restart');
+              this.emit(
+                'phase-transition',
+                teamId,
+                fromPhase2,
+                TeamPhase.PreWork,
+                'rejected — restart',
+              );
               this.persistence.persist(ctx.state);
               continue outerLoop;
             }
           }
 
           // Default: break inner loop (shouldn't reach here)
-          break innerLoop;
+          break;
         }
       }
 
@@ -1393,7 +1538,11 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
   // --- Private: Guardrails ---
 
-  private runGuardrailAudit(teamId: string, ctx: PipelineTeamContext, phase: string): GuardrailReport {
+  private runGuardrailAudit(
+    teamId: string,
+    ctx: PipelineTeamContext,
+    phase: string,
+  ): GuardrailReport {
     if (!this.guardrails.enabled) {
       return {
         ok: true,
@@ -1409,8 +1558,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       ok: report.ok,
       checkedAt: report.checkedAt,
       findingCount: report.findings.length,
-      blockingCount: report.findings.filter(finding => finding.severity === 'block').length,
-      warningCount: report.findings.filter(finding => finding.severity === 'warn').length,
+      blockingCount: report.findings.filter((finding) => finding.severity === 'block').length,
+      warningCount: report.findings.filter((finding) => finding.severity === 'warn').length,
     });
     this.persistence.persist(ctx.state);
 
@@ -1430,7 +1579,10 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     }
 
     if (hasBlockingFindings(report)) {
-      throw new GuardrailViolationError('Guardrail audit blocked the pipeline before committing changes.', report);
+      throw new GuardrailViolationError(
+        'Guardrail audit blocked the pipeline before committing changes.',
+        report,
+      );
     }
 
     return report;
@@ -1447,7 +1599,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     sourceAgent?: string,
     highlightTerms?: string[],
     detail?: string,
-    metadata?: Record<string, unknown>
+    metadata?: Record<string, unknown>,
   ): void {
     this.emit('feedback', teamId, {
       id: randomUUID(),
@@ -1468,7 +1620,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     teamId: string,
     title: string,
     message: string,
-    actions: Array<{ label: string; value: string }>
+    actions: Array<{ label: string; value: string }>,
   ): Promise<string> {
     const ctx = this.teams.get(teamId);
     if (!ctx) return Promise.resolve('');
@@ -1504,18 +1656,26 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   // --- User Q&A ---
 
   /** Send a user question to a warm agent session and emit the response as feedback */
-  async sendMessage(teamId: string, message: string, images?: Array<{ media_type: string; data: string }>): Promise<void> {
+  async sendMessage(
+    teamId: string,
+    message: string,
+    images?: Array<{ media_type: string; data: string }>,
+  ): Promise<void> {
     const ctx = this.teams.get(teamId);
     if (!ctx) throw new Error(`Team "${teamId}" not found`);
     if (ctx.pipelineRunning) throw new Error('Cannot ask while pipeline is running');
 
     // Find a live session
-    const liveSession = ctx.sessions.find(s => !s.closed);
+    const liveSession = ctx.sessions.find((s) => !s.closed);
     if (!liveSession) throw new Error('No active agent sessions — start a new task first');
 
-    const instance = (liveSession.name === 'Reviewer' ? 'Reviewer-1'
-      : liveSession.name === 'Worker-1' ? 'Worker-1'
-      : liveSession.name + '-1') as any;
+    const instance = (
+      liveSession.name === 'Reviewer'
+        ? 'Reviewer-1'
+        : liveSession.name === 'Worker-1'
+          ? 'Worker-1'
+          : liveSession.name + '-1'
+    ) as any;
 
     // Show user's question in feedback bar
     this.emit('feedback', teamId, {
@@ -1528,13 +1688,12 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     });
 
     // Stream progress while agent is thinking
-    this.emit('agent-output', teamId, instance,
-      `[Q&A] Processing your question...`);
+    this.emit('agent-output', teamId, instance, `[Q&A] Processing your question...`);
 
     const response = await liveSession.send(
       `USER QUESTION (not a new task — just answer this question about ` +
-      `the work you just completed):\n\n${message}`,
-      images
+        `the work you just completed):\n\n${message}`,
+      images,
     );
 
     this.emit('agent-output', teamId, instance, response);
@@ -1565,8 +1724,12 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
     const durationMs = Date.now() - startTime;
     this.emit('task-complete', teamId, TeamPhase.Done, durationMs);
-    this.notifyUser(teamId, 'info', 'Task Complete',
-      `Pipeline finished in ${(durationMs / 1000).toFixed(1)}s — ready for push & merge.`);
+    this.notifyUser(
+      teamId,
+      'info',
+      'Task Complete',
+      `Pipeline finished in ${(durationMs / 1000).toFixed(1)}s — ready for push & merge.`,
+    );
     this.persistence.persistNow(ctx.state);
   }
 
@@ -1589,7 +1752,12 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     }
   }
 
-  private failPipeline(teamId: string, ctx: PipelineTeamContext, err: any, startTime: number): void {
+  private failPipeline(
+    teamId: string,
+    ctx: PipelineTeamContext,
+    err: any,
+    startTime: number,
+  ): void {
     if (this.shuttingDown) return;
 
     const error = normalizeRuntimeError(err, {
@@ -1598,15 +1766,25 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     });
     ctx.state.recordRuntimeError(error.data);
     this.emit('error', teamId, error);
-    this.notifyUser(teamId, 'warning', 'Pipeline Failed',
+    this.notifyUser(
+      teamId,
+      'warning',
+      'Pipeline Failed',
       `Error: ${error.message}`,
       undefined,
       undefined,
       JSON.stringify(error.data, null, 2),
-      { runtimeError: error.data });
+      { runtimeError: error.data },
+    );
 
     const fromPhase = ctx.state.currentPhase;
-    this.tryTransitionPhase(ctx.state, teamId, fromPhase, TeamPhase.Errored, `pipeline error: ${error.message}`);
+    this.tryTransitionPhase(
+      ctx.state,
+      teamId,
+      fromPhase,
+      TeamPhase.Errored,
+      `pipeline error: ${error.message}`,
+    );
     ctx.pipelineRunning = false;
 
     const durationMs = Date.now() - startTime;
@@ -1621,7 +1799,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     teamId: string,
     fromPhase: TeamPhase,
     toPhase: TeamPhase,
-    trigger: string
+    trigger: string,
   ): void {
     try {
       state.transitionPhase(toPhase);
@@ -1636,7 +1814,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   private async extractRequirements(
     cwd: string,
     taskDescription: string,
-    images?: Array<{ media_type: string; data: string }>
+    images?: Array<{ media_type: string; data: string }>,
   ): Promise<string> {
     const systemPrompt = this.loadRolePrompt('requirements.agent.md');
 
@@ -1679,7 +1857,9 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
         models[instance] = frontmatter.model ?? FALLBACK_MODEL;
         efforts[instance] = (frontmatter.effort as EffortLevel) ?? FALLBACK_EFFORT;
-        maxTurns[instance] = frontmatter.maxTurns ? parseInt(frontmatter.maxTurns, 10) : FALLBACK_MAX_TURNS;
+        maxTurns[instance] = frontmatter.maxTurns
+          ? parseInt(frontmatter.maxTurns, 10)
+          : FALLBACK_MAX_TURNS;
         disallowedTools[instance] = frontmatter.disallowedTools
           ? frontmatter.disallowedTools.split(',').map((t: string) => t.trim())
           : [];
@@ -1718,9 +1898,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     const runtimeModel = normalizeProviderModel(this.agentRuntime.model);
     if (runtimeModel) return runtimeModel;
     if (this.agentRuntime.provider === 'codex') return undefined;
-    const proxyInstance = ALL_INSTANCES.find(
-      (i) => INSTANCE_TO_ROLE[i] === role
-    );
+    const proxyInstance = ALL_INSTANCES.find((i) => INSTANCE_TO_ROLE[i] === role);
     return proxyInstance ? this.models[proxyInstance] : undefined;
   }
 }

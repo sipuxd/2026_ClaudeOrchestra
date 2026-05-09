@@ -14,10 +14,7 @@ export type WorkerInstance = 'Worker-1' | 'Worker-2';
 export type SecurityInstance = 'Security-1';
 export type ReviewerInstance = 'Reviewer-1';
 
-export type RoleInstance =
-  | WorkerInstance
-  | SecurityInstance
-  | ReviewerInstance;
+export type RoleInstance = WorkerInstance | SecurityInstance | ReviewerInstance;
 
 // All valid instance identifiers
 export const VALID_INSTANCES: readonly RoleInstance[] = [

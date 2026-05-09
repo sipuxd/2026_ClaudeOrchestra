@@ -43,7 +43,10 @@ export function parseFrontmatter(content: string): ParsedAgentFile {
   }
 
   // Everything after the closing --- is the body
-  const body = lines.slice(closingIndex + 1).join('\n').replace(/^\n+/, '');
+  const body = lines
+    .slice(closingIndex + 1)
+    .join('\n')
+    .replace(/^\n+/, '');
 
   return { frontmatter, body };
 }

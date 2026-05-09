@@ -1,6 +1,6 @@
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { execFileSync } from 'node:child_process';
 
 export type GuardrailSeverity = 'block' | 'warn';
 
@@ -61,10 +61,16 @@ export class GuardrailViolationError extends Error {
 
 const PROTECTED_PATH_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   { pattern: /(^|\/)\.env(?:$|[./-])/i, reason: 'environment files may contain secrets' },
-  { pattern: /(^|\/)(id_rsa|id_dsa|id_ecdsa|id_ed25519)$/i, reason: 'private key material is protected' },
+  {
+    pattern: /(^|\/)(id_rsa|id_dsa|id_ecdsa|id_ed25519)$/i,
+    reason: 'private key material is protected',
+  },
   { pattern: /\.(pem|p12|pfx|key)$/i, reason: 'key/certificate files are protected' },
   { pattern: /(^|\/)\.git(\/|$)/i, reason: 'git internals are protected' },
-  { pattern: /(^|\/)\.claude-orchestra\/teams(\/|$)/i, reason: 'orchestrator team state is engine-owned' },
+  {
+    pattern: /(^|\/)\.claude-orchestra\/teams(\/|$)/i,
+    reason: 'orchestrator team state is engine-owned',
+  },
 ];
 
 const DEPENDENCY_PATH_PATTERNS = [
@@ -89,7 +95,8 @@ const SECRET_LINE_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
     label: 'private key block',
   },
   {
-    pattern: /\b(?:api[_-]?key|secret|token|password|passwd|pwd)\b\s*[:=]\s*["']?[A-Za-z0-9_./+=:@-]{20,}/i,
+    pattern:
+      /\b(?:api[_-]?key|secret|token|password|passwd|pwd)\b\s*[:=]\s*["']?[A-Za-z0-9_./+=:@-]{20,}/i,
     label: 'credential-looking assignment',
   },
   {
@@ -104,9 +111,18 @@ const SECRET_LINE_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
 
 const FORBIDDEN_COMMAND_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   { pattern: /\bsudo\b/, reason: 'sudo is outside the agent safety envelope' },
-  { pattern: /\brm\s+(-[^\s]*r[^\s]*f|-?[^\s]*f[^\s]*r)\s+(?:\/|~|\.\.)(?:\s|$)/, reason: 'destructive recursive removal outside the project is blocked' },
-  { pattern: /\b(?:curl|wget)\b[\s\S]{0,200}\|\s*(?:sh|bash|zsh|python|node)\b/, reason: 'piped remote script execution is blocked' },
-  { pattern: /\b(?:cat|less|more|grep|rg)\b[\s\S]{0,120}(?:^|\s)\.env(?:\s|$|[./-])/, reason: 'reading environment secret files is blocked' },
+  {
+    pattern: /\brm\s+(-[^\s]*r[^\s]*f|-?[^\s]*f[^\s]*r)\s+(?:\/|~|\.\.)(?:\s|$)/,
+    reason: 'destructive recursive removal outside the project is blocked',
+  },
+  {
+    pattern: /\b(?:curl|wget)\b[\s\S]{0,200}\|\s*(?:sh|bash|zsh|python|node)\b/,
+    reason: 'piped remote script execution is blocked',
+  },
+  {
+    pattern: /\b(?:cat|less|more|grep|rg)\b[\s\S]{0,120}(?:^|\s)\.env(?:\s|$|[./-])/,
+    reason: 'reading environment secret files is blocked',
+  },
   { pattern: /\bgit\s+reset\s+--hard\b/, reason: 'destructive git reset is blocked' },
   { pattern: /\bchmod\s+-R\s+777\b/, reason: 'broad world-writable permissions are blocked' },
 ];
@@ -146,7 +162,7 @@ export function evaluateChangedPath(filePath: string): GuardrailFinding[] {
   const findings = evaluatePathAccess(filePath);
   if (!normalized) return findings;
 
-  if (DEPENDENCY_PATH_PATTERNS.some(pattern => pattern.test(normalized))) {
+  if (DEPENDENCY_PATH_PATTERNS.some((pattern) => pattern.test(normalized))) {
     findings.push({
       kind: 'dependency_change',
       severity: 'warn',
@@ -156,7 +172,7 @@ export function evaluateChangedPath(filePath: string): GuardrailFinding[] {
     });
   }
 
-  if (RUNTIME_CONFIG_PATH_PATTERNS.some(pattern => pattern.test(normalized))) {
+  if (RUNTIME_CONFIG_PATH_PATTERNS.some((pattern) => pattern.test(normalized))) {
     findings.push({
       kind: 'runtime_config_change',
       severity: 'warn',
@@ -224,21 +240,25 @@ export function evaluateCodexStreamItem(item: unknown): GuardrailFinding[] {
   if (typed.type === 'mcp_tool_call' && typed.status === 'failed') {
     const server = String(typed.server ?? 'unknown');
     const tool = String(typed.tool ?? 'unknown');
-    return [{
-      kind: 'mcp_tool_error',
-      severity: 'warn',
-      message: 'MCP tool call failed during Codex turn.',
-      evidence: `${server}:${tool}`,
-    }];
+    return [
+      {
+        kind: 'mcp_tool_error',
+        severity: 'warn',
+        message: 'MCP tool call failed during Codex turn.',
+        evidence: `${server}:${tool}`,
+      },
+    ];
   }
 
   if (typed.type === 'error') {
-    return [{
-      kind: 'stream_error',
-      severity: 'warn',
-      message: 'Codex stream item reported a non-fatal error.',
-      evidence: String(typed.message ?? 'unknown error'),
-    }];
+    return [
+      {
+        kind: 'stream_error',
+        severity: 'warn',
+        message: 'Codex stream item reported a non-fatal error.',
+        evidence: String(typed.message ?? 'unknown error'),
+      },
+    ];
   }
 
   return [];
@@ -275,7 +295,7 @@ export function formatGuardrailReport(report: GuardrailReport): string {
     return `Guardrail audit passed for ${report.phase}.`;
   }
   return report.findings
-    .map(finding => {
+    .map((finding) => {
       const scope = finding.path ? ` (${finding.path})` : '';
       return `${finding.severity.toUpperCase()} ${finding.kind}${scope}: ${finding.message}\nEvidence: ${finding.evidence}`;
     })
@@ -283,12 +303,12 @@ export function formatGuardrailReport(report: GuardrailReport): string {
 }
 
 export function hasBlockingFindings(report: GuardrailReport): boolean {
-  return report.findings.some(finding => finding.severity === 'block');
+  return report.findings.some((finding) => finding.severity === 'block');
 }
 
 function makeReport(phase: string, findings: GuardrailFinding[]): GuardrailReport {
   return {
-    ok: !findings.some(finding => finding.severity === 'block'),
+    ok: !findings.some((finding) => finding.severity === 'block'),
     phase,
     checkedAt: new Date().toISOString(),
     findings,
@@ -300,7 +320,7 @@ function normalizePathForPolicy(filePath: string): string {
 }
 
 function hasTraversal(filePath: string): boolean {
-  return filePath.split('/').some(part => part === '..');
+  return filePath.split('/').some((part) => part === '..');
 }
 
 function isGitRepository(projectPath: string): boolean {
@@ -333,7 +353,7 @@ function gitOutput(projectPath: string, args: string[]): string {
 function gitLines(projectPath: string, args: string[]): string[] {
   return gitOutput(projectPath, args)
     .split('\n')
-    .map(line => line.trim())
+    .map((line) => line.trim())
     .filter(Boolean);
 }
 

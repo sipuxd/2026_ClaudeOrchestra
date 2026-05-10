@@ -144,6 +144,9 @@ vite.config.ts.timestamp-*
 # Engine registry (team pointers, not committed)
 registry.json
 
+# Project-local code-server data (user-data-dir + extensions-dir for embedded code-view)
+.code-server-data/
+
 # Auto-generated project context (per-session, not source code)
 .claude/project-context.md
 .claude/context-history/

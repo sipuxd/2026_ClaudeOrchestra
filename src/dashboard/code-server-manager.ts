@@ -11,7 +11,9 @@
 // so we never need per-project spawning.
 
 import { type ChildProcess, execFile, spawn } from 'node:child_process';
+import * as fs from 'node:fs';
 import * as http from 'node:http';
+import * as path from 'node:path';
 
 export type CodeServerState =
   | 'unavailable' // binary not installed
@@ -38,6 +40,14 @@ const HEALTH_POLL_INTERVAL_MS = 300;
 // untracked conversations the orchestrator can't see. Language servers,
 // linters, and Git UI are intentionally NOT in this list — code-view should
 // still be a fully usable read/edit surface.
+//
+// Mechanism: code-server is spawned with EXTENSIONS_GALLERY pointing at an
+// invalid serviceUrl, which makes the marketplace return "Cannot connect" for
+// every search/install. We also pin --user-data-dir and --extensions-dir to
+// a project-local path so any user-installed VSIX stays scoped (and the wipe
+// is a single rm). The list below is documentation — the gallery shutoff
+// blocks all extensions, not just these.
+// biome-ignore lint/correctness/noUnusedVariables: documentation of which extensions the gallery shutoff is intended to block; referenced by name in the comment block above.
 const AI_CODING_EXTENSIONS: readonly string[] = [
   'anthropic.claude-code',
   'github.copilot',
@@ -45,6 +55,29 @@ const AI_CODING_EXTENSIONS: readonly string[] = [
   'cursor.cursor',
   'continue.continue',
 ];
+
+// Project-local code-server state dir. Keeps the user's global
+// ~/.local/share/code-server install untouched and makes wipes scoped:
+// rm -rf .code-server-data/ resets the embedded code-view entirely.
+const PROJECT_DATA_DIR = path.resolve(process.cwd(), '.code-server-data');
+const PROJECT_USER_DIR = path.join(PROJECT_DATA_DIR, 'User');
+const PROJECT_EXT_DIR = path.join(PROJECT_DATA_DIR, 'extensions');
+const PROJECT_SETTINGS_FILE = path.join(PROJECT_USER_DIR, 'settings.json');
+
+// Settings written into the project-local user-data-dir on first spawn.
+// Belt-and-suspenders alongside the EXTENSIONS_GALLERY env override.
+const DEFAULT_USER_SETTINGS = {
+  'extensions.autoCheckUpdates': false,
+  'extensions.autoUpdate': false,
+} as const;
+
+function ensureProjectDataDir(): void {
+  fs.mkdirSync(PROJECT_USER_DIR, { recursive: true });
+  fs.mkdirSync(PROJECT_EXT_DIR, { recursive: true });
+  if (!fs.existsSync(PROJECT_SETTINGS_FILE)) {
+    fs.writeFileSync(PROJECT_SETTINGS_FILE, `${JSON.stringify(DEFAULT_USER_SETTINGS, null, 2)}\n`);
+  }
+}
 
 export class CodeServerManager {
   private state: CodeServerState = 'idle';
@@ -140,20 +173,33 @@ export class CodeServerManager {
     this.state = 'starting';
     this.lastError = null;
 
+    ensureProjectDataDir();
+
     const args = [
       '--auth=none',
       `--bind-addr=127.0.0.1:${this.port}`,
       '--disable-telemetry',
       '--disable-update-check',
+      `--user-data-dir=${PROJECT_DATA_DIR}`,
+      `--extensions-dir=${PROJECT_EXT_DIR}`,
       // Don't open a workspace by default — the iframe URL drives folder selection.
-      // Block AI coding extensions; see AI_CODING_EXTENSIONS comment above.
-      ...AI_CODING_EXTENSIONS.flatMap((id) => ['--disable-extension', id]),
     ];
 
     try {
       this.process = spawn(this.binaryPath, args, {
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: false,
+        env: {
+          ...process.env,
+          // Override the extensions marketplace gallery with empty endpoints
+          // so search/install round-trips fail with "Cannot connect to
+          // marketplace" — the actual lockdown for AI_CODING_EXTENSIONS.
+          EXTENSIONS_GALLERY: JSON.stringify({
+            serviceUrl: '',
+            itemUrl: '',
+            cacheUrl: '',
+          }),
+        },
       });
     } catch (err) {
       this.state = 'error';

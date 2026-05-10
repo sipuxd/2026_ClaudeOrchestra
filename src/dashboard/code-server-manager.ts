@@ -65,10 +65,30 @@ const PROJECT_EXT_DIR = path.join(PROJECT_DATA_DIR, 'extensions');
 const PROJECT_SETTINGS_FILE = path.join(PROJECT_USER_DIR, 'settings.json');
 
 // Settings written into the project-local user-data-dir on first spawn.
-// Belt-and-suspenders alongside the EXTENSIONS_GALLERY env override.
+// Three groups:
+//   1. Extension auto-update suppression (belt-and-suspenders alongside the
+//      EXTENSIONS_GALLERY env override that kills the marketplace).
+//   2. UI lockdown — hide the activity bar (icon column) and secondary side
+//      bar so the embedded view is just file tree + editor. The primary
+//      side bar with the file tree stays visible.
+//   3. Welcome / chat suppression — no welcome page on startup, no
+//      walkthrough popups, AI/chat features disabled (the agent panel
+//      is a built-in code-server feature, not an extension, so the
+//      marketplace shutoff doesn't catch it).
 const DEFAULT_USER_SETTINGS = {
   'extensions.autoCheckUpdates': false,
   'extensions.autoUpdate': false,
+  'workbench.activityBar.location': 'hidden',
+  'workbench.secondarySideBar.defaultVisibility': 'hidden',
+  'workbench.startupEditor': 'none',
+  'workbench.welcomePage.walkthroughs.openOnInstall': false,
+  'chat.disableAIFeatures': true,
+  'chat.commandCenter.enabled': false,
+  'chat.agent.enabled': false,
+  'chat.tips.enabled': false,
+  'chat.viewProgressBadge.enabled': false,
+  'chat.restoreLastPanelSession': false,
+  'chat.detectParticipant.enabled': false,
 } as const;
 
 function ensureProjectDataDir(): void {

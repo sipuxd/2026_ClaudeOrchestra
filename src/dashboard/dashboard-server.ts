@@ -245,6 +245,10 @@ export class DashboardServer {
       this.handleResolveDirectory(req, res);
       return;
     }
+    if (method === 'POST' && pathname === '/api/projects/clear-done') {
+      this.handleClearDoneTeams(req, res);
+      return;
+    }
     if (method === 'GET' && pathname === '/api/code-server/status') {
       this.handleCodeServerStatus(res);
       return;
@@ -469,6 +473,24 @@ export class DashboardServer {
     try {
       await this.orchestrator.terminateTeam(teamId);
       this.sendJSON(res, { ok: true });
+    } catch (err: any) {
+      this.sendJSON(res, { error: err.message }, 400);
+    }
+  }
+
+  private async handleClearDoneTeams(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    try {
+      const body = JSON.parse(await this.readBody(req));
+      const projectPath = body.projectPath;
+      if (!projectPath || typeof projectPath !== 'string') {
+        this.sendJSON(res, { error: 'projectPath is required' }, 400);
+        return;
+      }
+      const cleared = await this.orchestrator.clearDoneTeams(projectPath);
+      this.sendJSON(res, { cleared });
     } catch (err: any) {
       this.sendJSON(res, { error: err.message }, 400);
     }

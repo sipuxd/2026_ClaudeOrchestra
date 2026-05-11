@@ -645,6 +645,10 @@ function getTeamPhaseCategory(team) {
   return 'active';
 }
 
+function isTerminalPhase(phase) {
+  return phase === 'done' || phase === 'merged' || phase === 'cancelled' || phase === 'errored';
+}
+
 function getStats() {
   const stats = { active:0, review:0, done:0, pr:0, attention:0 };
   for (const tid in state.teams) {
@@ -861,6 +865,11 @@ function renderDashboardView() {
       var firstTeamId = teamIds[0];
       html += '<button class="btn btn-sm btn-green" onclick="event.stopPropagation();window.open(\\'/preview/' + esc(firstTeamId) + '\\',\\'_blank\\')">Preview</button>';
     }
+    // "Clear done" button — terminal teams (done/merged/cancelled/errored).
+    var doneCount = pStats.done + pStats.attention;
+    if (doneCount > 0) {
+      html += '<button class="btn btn-sm btn-secondary" onclick="event.stopPropagation();window.__modal.clearDoneTeams(\\'' + esc(p).replace(/'/g,"\\\\'") + '\\')">Clear done (' + doneCount + ')</button>';
+    }
     html += '</div>';
     html += '</div>';
     html += '<div class="team-grid">';
@@ -887,7 +896,12 @@ function renderProjectDetailView() {
   var pStats = getProjectStats(p);
   var html = '<div class="project-detail-header">';
   html += '<button class="back-btn" onclick="window.__nav.goToDashboard()">&#8249;</button>';
-  html += '<h1>' + esc(proj.name) + '</h1></div>';
+  html += '<h1>' + esc(proj.name) + '</h1>';
+  var doneCountDetail = pStats.done + pStats.attention;
+  if (doneCountDetail > 0) {
+    html += '<button class="btn btn-sm btn-secondary" style="margin-left:auto" onclick="window.__modal.clearDoneTeams(\\'' + esc(p).replace(/'/g,"\\\\'") + '\\')">Clear done (' + doneCountDetail + ')</button>';
+  }
+  html += '</div>';
   html += '<div class="project-detail-path">' + esc(p) + '</div>';
   html += '<div class="stat-pills" id="projectStatPills"></div>';
 
@@ -1483,6 +1497,34 @@ window.__modal = {
       .then(function(r) {
         if (!r.ok) return r.json().then(function(d){ throw new Error(d.error || 'Failed to delete'); });
         showToast('Team "' + teamName + '" deleted');
+      })
+      .catch(function(e) { showToast(e.message, 'error'); });
+  },
+  clearDoneTeams: function(projectPath) {
+    var proj = state.projects[projectPath];
+    var projName = proj ? proj.name : projectPath;
+    var teamIds = proj ? Array.from(proj.teams) : [];
+    var doneCount = 0;
+    for (var i = 0; i < teamIds.length; i++) {
+      var t = state.teams[teamIds[i]];
+      if (t && isTerminalPhase(t.currentPhase)) doneCount++;
+    }
+    if (doneCount === 0) {
+      showToast('No finished teams to clear in ' + projName, 'info');
+      return;
+    }
+    if (!confirm('Delete ' + doneCount + ' finished team' + (doneCount !== 1 ? 's' : '') + ' from "' + projName + '"? Their on-disk team data will be removed. Project files on disk are not touched.')) return;
+    fetch('/api/projects/clear-done', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectPath: projectPath })
+    })
+      .then(function(r) {
+        if (!r.ok) return r.json().then(function(d){ throw new Error(d.error || 'Failed to clear'); });
+        return r.json();
+      })
+      .then(function(d) {
+        showToast('Cleared ' + d.cleared + ' team' + (d.cleared !== 1 ? 's' : '') + ' from ' + projName);
       })
       .catch(function(e) { showToast(e.message, 'error'); });
   },

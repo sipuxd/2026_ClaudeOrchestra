@@ -920,6 +920,26 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     this.emit('team-deleted', teamId);
   }
 
+  /**
+   * Bulk-delete all terminal-phase teams (Done, Merged, Cancelled, Errored) for
+   * a given project. Reuses terminateTeam so each removal emits the same
+   * 'team-deleted' SSE event the dashboard already handles per-team.
+   * Returns the number of teams cleared.
+   */
+  async clearDoneTeams(projectPath: string): Promise<number> {
+    const resolvedPath = path.resolve(projectPath);
+    const toDelete: string[] = [];
+    for (const [teamId, ctx] of this.teams) {
+      if (ctx.state.snapshot.projectPath === resolvedPath && ctx.state.isTerminal) {
+        toDelete.push(teamId);
+      }
+    }
+    for (const teamId of toDelete) {
+      await this.terminateTeam(teamId);
+    }
+    return toDelete.length;
+  }
+
   async shutdown(): Promise<void> {
     this.shuttingDown = true;
     this.stopPrPolling();

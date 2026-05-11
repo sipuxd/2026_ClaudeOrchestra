@@ -739,6 +739,98 @@ describe('PipelineOrchestrator', () => {
 
   // --- Shutdown ---
 
+  describe('clearDoneTeams', () => {
+    it('returns 0 when no terminal teams exist', async () => {
+      orchestrator.createTeam('active-1', projectDir);
+      const cleared = await orchestrator.clearDoneTeams(projectDir);
+      expect(cleared).toBe(0);
+      // Active team still exists
+      expect(orchestrator.getTeamStatus('active-1')).toBeDefined();
+    });
+
+    it('clears only terminal teams, leaves active ones', async () => {
+      // Manually create teams and drive one to Cancelled via terminate
+      orchestrator.createTeam('to-cancel', projectDir);
+      orchestrator.createTeam('still-active', projectDir);
+      await orchestrator.terminateTeam('to-cancel'); // Already removes it from teams Map
+
+      // After terminate, 'to-cancel' is already gone (terminateTeam removes from teams Map).
+      // To exercise clearDoneTeams, create a team that's already in a terminal state
+      // via direct phase transition.
+      orchestrator.createTeam('done-team', projectDir);
+      const teams = (
+        orchestrator as unknown as {
+          teams: Map<string, { state: { transitionPhase: (p: TeamPhase) => void } }>;
+        }
+      ).teams;
+      const doneCtx = teams.get('done-team');
+      if (doneCtx) {
+        // Drive through valid phase progression to terminal
+        doneCtx.state.transitionPhase(TeamPhase.Work);
+        doneCtx.state.transitionPhase(TeamPhase.Handoff);
+        doneCtx.state.transitionPhase(TeamPhase.Review);
+        doneCtx.state.transitionPhase(TeamPhase.Done);
+      }
+
+      const cleared = await orchestrator.clearDoneTeams(projectDir);
+      expect(cleared).toBe(1);
+      expect(orchestrator.getTeamStatus('done-team')).toBeUndefined();
+      expect(orchestrator.getTeamStatus('still-active')).toBeDefined();
+    });
+
+    it('is scoped to the right project — does not touch other projects', async () => {
+      const pA = path.join(tmpDir, 'pA');
+      const pB = path.join(tmpDir, 'pB');
+      fs.mkdirSync(pA, { recursive: true });
+      fs.mkdirSync(pB, { recursive: true });
+
+      orchestrator.createTeam('done-in-A', pA);
+      orchestrator.createTeam('done-in-B', pB);
+
+      const teams = (
+        orchestrator as unknown as {
+          teams: Map<string, { state: { transitionPhase: (p: TeamPhase) => void } }>;
+        }
+      ).teams;
+      for (const id of ['done-in-A', 'done-in-B']) {
+        const ctx = teams.get(id);
+        if (ctx) {
+          ctx.state.transitionPhase(TeamPhase.Work);
+          ctx.state.transitionPhase(TeamPhase.Handoff);
+          ctx.state.transitionPhase(TeamPhase.Review);
+          ctx.state.transitionPhase(TeamPhase.Done);
+        }
+      }
+
+      const cleared = await orchestrator.clearDoneTeams(pA);
+      expect(cleared).toBe(1);
+      expect(orchestrator.getTeamStatus('done-in-A')).toBeUndefined();
+      expect(orchestrator.getTeamStatus('done-in-B')).toBeDefined();
+    });
+
+    it('emits team-deleted event per cleared team', async () => {
+      orchestrator.createTeam('done-event-test', projectDir);
+      const teams = (
+        orchestrator as unknown as {
+          teams: Map<string, { state: { transitionPhase: (p: TeamPhase) => void } }>;
+        }
+      ).teams;
+      const ctx = teams.get('done-event-test');
+      if (ctx) {
+        ctx.state.transitionPhase(TeamPhase.Work);
+        ctx.state.transitionPhase(TeamPhase.Handoff);
+        ctx.state.transitionPhase(TeamPhase.Review);
+        ctx.state.transitionPhase(TeamPhase.Done);
+      }
+
+      const deletedTeams: string[] = [];
+      orchestrator.on('team-deleted', (teamId) => deletedTeams.push(teamId));
+
+      await orchestrator.clearDoneTeams(projectDir);
+      expect(deletedTeams).toContain('done-event-test');
+    });
+  });
+
   describe('shutdown', () => {
     it('closes all sessions on shutdown', async () => {
       orchestrator.createTeam('shutdown-test', projectDir);

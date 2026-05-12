@@ -1513,7 +1513,14 @@ window.__modal = {
       showToast('No finished teams to clear in ' + projName, 'info');
       return;
     }
-    if (!confirm('Delete ' + doneCount + ' finished team' + (doneCount !== 1 ? 's' : '') + ' from "' + projName + '"? Their on-disk team data will be removed. Project files on disk are not touched.')) return;
+    var totalInProject = teamIds.length;
+    var willEmptyProject = doneCount === totalInProject;
+    var message = 'Delete ' + doneCount + ' finished team' + (doneCount !== 1 ? 's' : '') + ' from "' + projName + '"?';
+    if (willEmptyProject) {
+      message += '\\n\\nThis is the last team' + (doneCount !== 1 ? 's' : '') + ' in the project — the project will disappear from the dashboard until you create a new team in it.';
+    }
+    message += '\\n\\nTheir on-disk team data will be removed. Project files on disk are not touched.';
+    if (!confirm(message)) return;
     fetch('/api/projects/clear-done', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

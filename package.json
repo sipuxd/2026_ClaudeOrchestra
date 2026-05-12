@@ -15,7 +15,8 @@
     "test:stress": "vitest run --config vitest.stress.config.ts",
     "dashboard": "node dist/index.js dashboard --mode pipeline",
     "lint": "biome check .",
-    "format": "biome format --write ."
+    "format": "biome format --write .",
+    "build:picker": "swiftc -O -o tools/pick-folder tools/pick-folder.swift"
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.15",

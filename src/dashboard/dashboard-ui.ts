@@ -845,17 +845,23 @@ function renderDashboardView() {
   var runtimeLabel = rt.provider
     ? rt.provider + ' / ' + (rt.auth || 'subscription') + ' / ' + (rt.model || 'default')
     : 'runtime loading';
+  var paths = Object.keys(state.projects).sort();
+  var hasProjects = paths.length > 0;
   var html = '<div class="dashboard-header"><div class="dashboard-heading-row"><h1>Portfolio</h1>';
   html += '<span class="runtime-pill">' + esc(runtimeLabel) + '</span>';
-  html += '<button class="btn btn-sm btn-primary" style="margin-left:auto" onclick="window.__modal.addProject()">+ Add Project</button></div>';
+  // Hide the top-right + Add Project button when the empty state is showing
+  // (the empty-state CTA below is the primary affordance in that case).
+  if (hasProjects) {
+    html += '<button class="btn btn-sm btn-primary" style="margin-left:auto" onclick="window.__modal.addProject()">+ Add Project</button>';
+  }
+  html += '</div>';
   html += '<p class="dashboard-subtitle">' + Object.keys(state.teams).length + ' teams across ' + Object.keys(state.projects).length + ' projects</p></div>';
   html += '<div class="stat-pills" id="globalStatPills"></div>';
 
-  var paths = Object.keys(state.projects).sort();
-  if (paths.length === 0) {
+  if (!hasProjects) {
     html += '<div class="empty-state"><div class="empty-state-icon">&#9654;</div>';
-    html += '<h3>No teams yet</h3><p>Create a team to get started.</p>';
-    html += '<button class="btn btn-primary" onclick="window.__modal.createTeam()">+ New Team</button></div>';
+    html += '<h3>No projects yet</h3><p>Add a project to get started. Teams live inside projects.</p>';
+    html += '<button class="btn btn-primary" onclick="window.__modal.addProject()">+ Add Project</button></div>';
   }
 
   for (var i = 0; i < paths.length; i++) {
@@ -1513,27 +1519,53 @@ window.__modal = {
     }
   },
   addProject: function() {
-    // Use the native folder picker via /api/pick-directory (already wired for createTeam).
-    fetch('/api/pick-directory', { method: 'POST' })
-      .then(function(r) { return r.json(); })
-      .then(function(picked) {
-        if (!picked || !picked.path) return; // user cancelled
-        return fetch('/api/portfolio', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ projectPath: picked.path })
-        }).then(function(r) {
+    // Native macOS Finder folder-picker via /api/pick-directory, which
+    // spawns the precompiled Swift binary at tools/pick-folder. Same
+    // NSOpenPanel GitHub Desktop opens. Manual path entry only kicks in
+    // on hard failure (binary missing, permission denied, etc).
+    var promptForPath = function() {
+      var p = window.prompt('Type the absolute path to the project folder:', '');
+      if (!p || !p.trim()) return;
+      postPath(p.trim());
+    };
+    var postPath = function(projectPath) {
+      fetch('/api/portfolio', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectPath: projectPath })
+      })
+        .then(function(r) {
           if (!r.ok) return r.json().then(function(d){ throw new Error(d.error || 'Failed to add project'); });
           return r.json();
-        });
+        })
+        .then(function(project) {
+          addPortfolioProject(project);
+          showToast('Added "' + (project.displayName || project.projectPath) + '" to portfolio');
+          renderCurrentView();
+        })
+        .catch(function(e) { showToast(e.message, 'error'); });
+    };
+    showToast('Opening folder picker — check your Mac if it does not appear within a few seconds.', 'info');
+    fetch('/api/pick-directory', { method: 'POST' })
+      .then(function(r) {
+        return r.json().then(function(d){ return { ok: r.ok, status: r.status, body: d }; });
       })
-      .then(function(project) {
-        if (!project) return; // cancelled
-        addPortfolioProject(project);
-        showToast('Added "' + (project.displayName || project.projectPath) + '" to portfolio');
-        renderCurrentView();
+      .then(function(resp) {
+        if (resp.ok && resp.body && resp.body.path) {
+          postPath(resp.body.path);
+          return;
+        }
+        if (resp.body && resp.body.cancelled) {
+          return; // user cancelled, no error
+        }
+        // Hard failure — binary missing, unsupported platform, etc.
+        showToast('Could not open the folder picker. Paste a path instead.', 'error');
+        promptForPath();
       })
-      .catch(function(e) { showToast(e.message, 'error'); });
+      .catch(function() {
+        showToast('Could not open the folder picker. Paste a path instead.', 'error');
+        promptForPath();
+      });
   },
   removeProject: function(projectPath) {
     var proj = state.projects[projectPath];

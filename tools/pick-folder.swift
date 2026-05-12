@@ -27,6 +27,24 @@ panel.prompt = "Select"
 panel.level = .modalPanel
 panel.makeKeyAndOrderFront(nil)
 
+// Multi-monitor: NSOpenPanel defaults to the menu-bar screen, which is not
+// necessarily the one the user is looking at. The mouse just moved to click
+// the dashboard button, so its current screen is the best proxy for "where
+// the user is." Center the panel there.
+let mouseLoc = NSEvent.mouseLocation
+let targetScreen = NSScreen.screens.first(where: { NSMouseInRect(mouseLoc, $0.frame, false) })
+    ?? NSScreen.main
+    ?? NSScreen.screens.first
+if let screen = targetScreen {
+    let visible = screen.visibleFrame
+    let panelSize = panel.frame.size
+    let origin = NSPoint(
+        x: visible.midX - panelSize.width / 2,
+        y: visible.midY - panelSize.height / 2
+    )
+    panel.setFrameOrigin(origin)
+}
+
 if panel.runModal() == .OK, let url = panel.urls.first {
     print(url.path)
 }

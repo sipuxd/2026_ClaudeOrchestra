@@ -224,6 +224,7 @@ describe('PipelineOrchestrator', () => {
 
     orchestrator = new PipelineOrchestrator({
       registryPath: path.join(tmpDir, 'registry.json'),
+      portfolioPath: path.join(tmpDir, 'projects.json'),
       rolesDir,
       maxConcurrentTeams: 3,
       skipRequirements: true,
@@ -734,6 +735,67 @@ describe('PipelineOrchestrator', () => {
       const status = orchestrator.getTeamStatus('failing');
       // May be errored or done depending on timing
       expect(status).toBeDefined();
+    });
+  });
+
+  // --- Portfolio ---
+
+  describe('Portfolio integration', () => {
+    it('auto-registers a project when createTeam is called', () => {
+      orchestrator.createTeam('first-team', projectDir);
+      const portfolio = orchestrator.getPortfolio();
+      expect(portfolio.length).toBe(1);
+      expect(portfolio[0].projectPath).toBe(path.resolve(projectDir));
+      expect(portfolio[0].displayName).toBe(path.basename(projectDir));
+    });
+
+    it('does not duplicate the project on second createTeam call for same path', () => {
+      orchestrator.createTeam('team-a', projectDir);
+      orchestrator.createTeam('team-b', projectDir);
+      expect(orchestrator.getPortfolio().length).toBe(1);
+    });
+
+    it('addProjectToPortfolio adds a project without any teams', () => {
+      const pX = path.join(tmpDir, 'pX');
+      fs.mkdirSync(pX, { recursive: true });
+      const project = orchestrator.addProjectToPortfolio({ projectPath: pX });
+      expect(project.projectPath).toBe(path.resolve(pX));
+      expect(project.displayName).toBe('pX');
+      expect(orchestrator.getPortfolio().length).toBe(1);
+    });
+
+    it('addProjectToPortfolio is idempotent on repeated calls', () => {
+      const pX = path.join(tmpDir, 'pX');
+      fs.mkdirSync(pX, { recursive: true });
+      orchestrator.addProjectToPortfolio({ projectPath: pX });
+      orchestrator.addProjectToPortfolio({ projectPath: pX });
+      expect(orchestrator.getPortfolio().length).toBe(1);
+    });
+
+    it('addProjectToPortfolio throws on a path that does not exist on disk', () => {
+      const missing = path.join(tmpDir, 'does-not-exist');
+      expect(() => orchestrator.addProjectToPortfolio({ projectPath: missing })).toThrow(
+        /does not exist/,
+      );
+    });
+
+    it('removeProjectFromPortfolio works when no teams exist for the project', () => {
+      const pX = path.join(tmpDir, 'pX');
+      fs.mkdirSync(pX, { recursive: true });
+      orchestrator.addProjectToPortfolio({ projectPath: pX });
+      orchestrator.removeProjectFromPortfolio(pX);
+      expect(orchestrator.getPortfolio().length).toBe(0);
+    });
+
+    it('removeProjectFromPortfolio throws if teams exist for the project', () => {
+      orchestrator.createTeam('blocking-team', projectDir);
+      expect(() => orchestrator.removeProjectFromPortfolio(projectDir)).toThrow(/has 1 team/);
+    });
+
+    it('removeProjectFromPortfolio throws if project not in portfolio', () => {
+      const missing = path.join(tmpDir, 'never-added');
+      fs.mkdirSync(missing, { recursive: true });
+      expect(() => orchestrator.removeProjectFromPortfolio(missing)).toThrow(/not in portfolio/);
     });
   });
 

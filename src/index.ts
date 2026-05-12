@@ -3,11 +3,14 @@
 // CLI entry point for ClaudeOrchestra.
 // Commands: create-team, assign-task, status, list, dashboard
 
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { applyCliOverrides, buildPipelineConfig, loadConfig, resolveConfigPath } from './config.js';
 import { DashboardServer } from './dashboard/index.js';
 import { Logger } from './logger/logger.js';
 import { type PipelineOrchestraConfig, PipelineOrchestrator } from './pipeline-orchestrator.js';
+import { Portfolio } from './portfolio.js';
+import { Registry } from './registry.js';
 import { TeamPhase } from './state/team-state.js';
 
 // --- CLI Argument Parsing ---
@@ -175,6 +178,41 @@ function recoverTeams(orchestrator: PipelineOrchestrator): string[] {
   return orchestrator.recover();
 }
 
+/**
+ * One-time migration: build projects.json from the unique projectPath values
+ * already in registry.json. No-op if projects.json already exists. Logs a single
+ * line on the migration so the user can see it happened.
+ */
+function migratePortfolioFromRegistry(registryPath: string, portfolioPath: string): void {
+  if (fs.existsSync(portfolioPath)) return; // Already migrated or fresh-built later by Portfolio.
+  if (!fs.existsSync(registryPath)) return; // Nothing to migrate from.
+
+  const registry = new Registry(registryPath);
+  const portfolio = new Portfolio(portfolioPath);
+  const entries = registry.load();
+  if (entries.length === 0) return;
+
+  // Group by projectPath, take oldest createdAt per path as the addedAt.
+  const byPath = new Map<string, { displayName: string; addedAt: string }>();
+  for (const e of entries) {
+    const existing = byPath.get(e.projectPath);
+    if (!existing || e.createdAt < existing.addedAt) {
+      byPath.set(e.projectPath, {
+        displayName: path.basename(e.projectPath),
+        addedAt: e.createdAt,
+      });
+    }
+  }
+
+  for (const [projectPath, meta] of byPath) {
+    portfolio.add({ projectPath, displayName: meta.displayName, addedAt: meta.addedAt });
+  }
+
+  console.log(
+    `${colors.dim}[migration] Built portfolio from registry: ${byPath.size} project${byPath.size !== 1 ? 's' : ''} → ${portfolioPath}${colors.reset}`,
+  );
+}
+
 // --- Main ---
 
 async function main(): Promise<void> {
@@ -191,6 +229,13 @@ async function main(): Promise<void> {
   const fileConfig = loadConfig(configPath);
   const config: Partial<PipelineOrchestraConfig> = applyCliOverrides(fileConfig, parsed.flags);
   const orchestratorConfig = buildPipelineConfig(config);
+
+  // One-time migration: build projects.json from existing registry.json if missing.
+  // Idempotent — does nothing on subsequent runs.
+  migratePortfolioFromRegistry(
+    orchestratorConfig.registryPath ?? './registry.json',
+    orchestratorConfig.portfolioPath ?? './projects.json',
+  );
 
   // Create pipeline orchestrator
   const orchestrator = new PipelineOrchestrator(orchestratorConfig);

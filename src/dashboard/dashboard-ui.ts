@@ -429,7 +429,7 @@ a:hover{text-decoration:underline}
 // ---- State ----
 const state = {
   teams: {},           // teamId -> team data
-  projects: {},        // projectPath -> { name, teams: Set }
+  projects: {},        // projectPath -> { name, teams: Set, inPortfolio: bool }
   feedbacks: {},       // teamId -> [ feedback objects ]
   liveOutput: {},      // teamId -> [ { agent, text, type } ]
   chatMessages: {},    // teamId -> [ { role, content, timestamp, verdict? } ]
@@ -621,9 +621,25 @@ function addOrUpdateTeam(teamId, data) {
   const t = state.teams[teamId];
   const projPath = t.projectPath || 'Unknown';
   if (!state.projects[projPath]) {
-    state.projects[projPath] = { name: projPath.split('/').filter(Boolean).pop() || projPath, teams: new Set() };
+    state.projects[projPath] = { name: projPath.split('/').filter(Boolean).pop() || projPath, teams: new Set(), inPortfolio: false };
   }
   state.projects[projPath].teams.add(teamId);
+}
+
+// Add a portfolio entry to local state (called from SSE init + after Add Project API call).
+// Creates the project shell if absent, marks inPortfolio=true. Preserves existing teams.
+function addPortfolioProject(p) {
+  if (!p || !p.projectPath) return;
+  if (!state.projects[p.projectPath]) {
+    state.projects[p.projectPath] = {
+      name: p.displayName || p.projectPath.split('/').filter(Boolean).pop() || p.projectPath,
+      teams: new Set(),
+      inPortfolio: true,
+    };
+  } else {
+    state.projects[p.projectPath].inPortfolio = true;
+    if (p.displayName) state.projects[p.projectPath].name = p.displayName;
+  }
   if (!state.feedbacks[teamId]) state.feedbacks[teamId] = [];
   if (!state.liveOutput[teamId]) state.liveOutput[teamId] = [];
   // Seed chat history from the team payload if present (init / team-created).
@@ -830,7 +846,8 @@ function renderDashboardView() {
     ? rt.provider + ' / ' + (rt.auth || 'subscription') + ' / ' + (rt.model || 'default')
     : 'runtime loading';
   var html = '<div class="dashboard-header"><div class="dashboard-heading-row"><h1>Portfolio</h1>';
-  html += '<span class="runtime-pill">' + esc(runtimeLabel) + '</span></div>';
+  html += '<span class="runtime-pill">' + esc(runtimeLabel) + '</span>';
+  html += '<button class="btn btn-sm btn-primary" style="margin-left:auto" onclick="window.__modal.addProject()">+ Add Project</button></div>';
   html += '<p class="dashboard-subtitle">' + Object.keys(state.teams).length + ' teams across ' + Object.keys(state.projects).length + ' projects</p></div>';
   html += '<div class="stat-pills" id="globalStatPills"></div>';
 
@@ -870,14 +887,28 @@ function renderDashboardView() {
     if (doneCount > 0) {
       html += '<button class="btn btn-sm btn-secondary" onclick="event.stopPropagation();window.__modal.clearDoneTeams(\\'' + esc(p).replace(/'/g,"\\\\'") + '\\')">Clear done (' + doneCount + ')</button>';
     }
+    // "Remove from portfolio" — only enabled when the project has zero teams.
+    // Backend blocks the removal if teams exist anyway; the UI just keeps the
+    // affordance hidden in the common case to reduce destructive-click anxiety.
+    if (proj.inPortfolio && teamIds.length === 0) {
+      html += '<button class="btn btn-sm btn-danger" onclick="event.stopPropagation();window.__modal.removeProject(\\'' + esc(p).replace(/'/g,"\\\\'") + '\\')">Remove from portfolio</button>';
+    }
     html += '</div>';
     html += '</div>';
     html += '<div class="team-grid">';
-    for (var j = 0; j < filtered.length; j++) {
-      html += renderTeamCard(filtered[j], false);
-    }
-    if (filtered.length === 0) {
-      html += '<div style="color:var(--text-muted);font-size:.8125rem;padding:8px">No teams match filter</div>';
+    if (teamIds.length === 0) {
+      // Empty-portfolio-project state: no teams yet. Offer a quick "+ Create team" CTA.
+      html += '<div style="grid-column:1/-1;padding:24px;text-align:center;border:1px dashed var(--border);border-radius:8px;color:var(--text-muted)">';
+      html += '<p style="margin-bottom:12px">No teams yet in ' + esc(proj.name) + '.</p>';
+      html += '<button class="btn btn-sm btn-primary" onclick="window.__modal.createTeam(\\'' + esc(p).replace(/'/g,"\\\\'") + '\\')">+ Create team</button>';
+      html += '</div>';
+    } else {
+      for (var j = 0; j < filtered.length; j++) {
+        html += renderTeamCard(filtered[j], false);
+      }
+      if (filtered.length === 0) {
+        html += '<div style="color:var(--text-muted);font-size:.8125rem;padding:8px">No teams match filter</div>';
+      }
     }
     html += '</div></div>';
   }
@@ -1436,7 +1467,7 @@ document.addEventListener('paste', function(e) {
 });
 
 window.__modal = {
-  createTeam: function() {
+  createTeam: function(presetPath) {
     openModal('createTeamModal');
     $('ctName').value = '';
     $('ctPath').value = '';
@@ -1447,9 +1478,11 @@ window.__modal = {
     var sel = $('ctProject');
     sel.innerHTML = '';
     var paths = Object.keys(state.projects).sort();
-    var preselected = state.currentProject && state.projects[state.currentProject]
-      ? state.currentProject
-      : (paths.length > 0 ? paths[0] : '__new__');
+    var preselected = (presetPath && state.projects[presetPath])
+      ? presetPath
+      : (state.currentProject && state.projects[state.currentProject]
+          ? state.currentProject
+          : (paths.length > 0 ? paths[0] : '__new__'));
     for (var i = 0; i < paths.length; i++) {
       var p = paths[i];
       var proj = state.projects[p];
@@ -1478,6 +1511,50 @@ window.__modal = {
     } else {
       pathGroup.style.display = 'none';
     }
+  },
+  addProject: function() {
+    // Use the native folder picker via /api/pick-directory (already wired for createTeam).
+    fetch('/api/pick-directory', { method: 'POST' })
+      .then(function(r) { return r.json(); })
+      .then(function(picked) {
+        if (!picked || !picked.path) return; // user cancelled
+        return fetch('/api/portfolio', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ projectPath: picked.path })
+        }).then(function(r) {
+          if (!r.ok) return r.json().then(function(d){ throw new Error(d.error || 'Failed to add project'); });
+          return r.json();
+        });
+      })
+      .then(function(project) {
+        if (!project) return; // cancelled
+        addPortfolioProject(project);
+        showToast('Added "' + (project.displayName || project.projectPath) + '" to portfolio');
+        renderCurrentView();
+      })
+      .catch(function(e) { showToast(e.message, 'error'); });
+  },
+  removeProject: function(projectPath) {
+    var proj = state.projects[projectPath];
+    var projName = proj ? proj.name : projectPath;
+    if (!confirm('Remove "' + projName + '" from the portfolio? Project files on disk are not touched. You can add it back later.')) return;
+    fetch('/api/portfolio/' + encodeURIComponent(projectPath), { method: 'DELETE' })
+      .then(function(r) {
+        if (!r.ok) return r.json().then(function(d){ throw new Error(d.error || 'Failed to remove project'); });
+      })
+      .then(function() {
+        if (state.projects[projectPath]) {
+          state.projects[projectPath].inPortfolio = false;
+          // If no teams remain, drop the project from view entirely (matches legacy auto-inferred behavior).
+          if (state.projects[projectPath].teams.size === 0) {
+            delete state.projects[projectPath];
+          }
+        }
+        showToast('Removed "' + projName + '" from portfolio');
+        renderCurrentView();
+      })
+      .catch(function(e) { showToast(e.message, 'error'); });
   },
   assignTask: function(teamId) {
     openModal('assignTaskModal');
@@ -1766,6 +1843,12 @@ function connectSSE() {
       var data = JSON.parse(e.data);
       state.sseConnected = true;
       if (data.runtime) state.runtime = data.runtime;
+      // Seed portfolio FIRST so even projects with zero teams show up in the dashboard.
+      if (Array.isArray(data.portfolio)) {
+        for (var p = 0; p < data.portfolio.length; p++) {
+          addPortfolioProject(data.portfolio[p]);
+        }
+      }
       if (data.teams) {
         for (var i = 0; i < data.teams.length; i++) {
           var t = data.teams[i];
@@ -1927,12 +2010,14 @@ function connectSSE() {
     var data = JSON.parse(e.data);
     var t = state.teams[data.teamId];
     if (t) {
-      // Drop from per-project index too so the project disappears when its
-      // last team is deleted.
+      // Drop the team from the per-project index. If the project is in the
+      // portfolio (Phase 3), keep the project visible with its empty state.
+      // Otherwise (legacy auto-inferred project), drop it once the last team
+      // leaves so the dashboard stays clean.
       var projPath = t.projectPath;
       if (projPath && state.projects[projPath]) {
         state.projects[projPath].teams.delete(data.teamId);
-        if (state.projects[projPath].teams.size === 0) {
+        if (state.projects[projPath].teams.size === 0 && !state.projects[projPath].inPortfolio) {
           delete state.projects[projPath];
         }
       }

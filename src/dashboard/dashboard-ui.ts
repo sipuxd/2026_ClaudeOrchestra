@@ -431,6 +431,7 @@ const state = {
   teams: {},           // teamId -> team data
   projects: {},        // projectPath -> { name, teams: Set, inPortfolio: bool }
   recentlyAddedProjects: new Set(), // projectPaths added via + Add Project this session
+  runners: {},          // projectPath -> { state, framework, url, lastError, stdoutTail }
   feedbacks: {},       // teamId -> [ feedback objects ]
   liveOutput: {},      // teamId -> [ { agent, text, type } ]
   chatMessages: {},    // teamId -> [ { role, content, timestamp, verdict? } ]
@@ -686,17 +687,30 @@ function getProjectStats(projPath) {
   return stats;
 }
 
-// True if any team in this project has projectHasPreview=true (server detected
-// at least one *.html file in the project root or a known build output dir).
-// Server caches the disk check; client just reads the flag.
-function projectHasPreview(projPath) {
-  var proj = state.projects[projPath];
-  if (!proj) return false;
-  for (var tid of proj.teams) {
-    var t = state.teams[tid];
-    if (t && t.projectHasPreview) return true;
+// Render the per-project Run / Open / Stop button cluster (Phase 4).
+// Reads state.runners[projPath]; gracefully degrades to a Run button if no
+// status is known yet.
+function renderRunnerControls(projPath) {
+  var r = state.runners[projPath];
+  var st = r && r.state ? r.state : 'idle';
+  var encPath = esc(projPath).replace(/'/g,"\\\\'");
+  var run = '<button class="btn btn-sm btn-green" onclick="event.stopPropagation();window.__runner.run(\\'' + encPath + '\\')">Run</button>';
+  var stop = '<button class="btn btn-sm btn-secondary" onclick="event.stopPropagation();window.__runner.stop(\\'' + encPath + '\\')">Stop</button>';
+  if (st === 'starting') {
+    var fwLabel = r && r.framework ? esc(r.framework) : 'dev server';
+    return '<span class="mini-pill pill-active">Starting ' + fwLabel + '…</span>' + stop;
   }
-  return false;
+  if (st === 'ready' && r && r.url) {
+    var open = '<button class="btn btn-sm btn-green" onclick="event.stopPropagation();window.open(\\'' + esc(r.url) + '\\',\\'_blank\\')">Open</button>';
+    var runningPill = '<span class="mini-pill pill-active" title="' + esc(r.url) + '">Running</span>';
+    return runningPill + open + stop;
+  }
+  if (st === 'error') {
+    var errPill = '<span class="mini-pill pill-error" onclick="event.stopPropagation();window.__runner.showError(\\'' + encPath + '\\')" style="cursor:pointer" title="Click for details">Run failed</span>';
+    var retry = '<button class="btn btn-sm btn-secondary" onclick="event.stopPropagation();window.__runner.run(\\'' + encPath + '\\')">Try again</button>';
+    return errPill + retry;
+  }
+  return run;
 }
 
 function filterTeams(teams, filter) {
@@ -881,12 +895,10 @@ function renderDashboardView() {
     if (pStats.review > 0) html += '<span class="mini-pill pill-review">' + pStats.review + ' review</span>';
     if (pStats.pr > 0) html += '<span class="mini-pill pill-pr">' + pStats.pr + ' PR open</span>';
     if (pStats.done > 0) html += '<span class="mini-pill pill-done">' + pStats.done + ' done</span>';
-    if (projectHasPreview(p)) {
-      // event.stopPropagation() so the click on Preview doesn't bubble to
-      // the project-section-header which navigates into the project view.
-      var firstTeamId = teamIds[0];
-      html += '<button class="btn btn-sm btn-green" onclick="event.stopPropagation();window.open(\\'/preview/' + esc(firstTeamId) + '\\',\\'_blank\\')">Preview</button>';
-    }
+    // Run / Open / Stop cluster (Phase 4: Run in Browser). The button state
+    // mirrors state.runners[p].state. event.stopPropagation() everywhere so
+    // clicks don't bubble to the section header and navigate away.
+    html += renderRunnerControls(p);
     // "Clear done" button — terminal teams (done/merged/cancelled/errored).
     var doneCount = pStats.done + pStats.attention;
     if (doneCount > 0) {
@@ -945,12 +957,14 @@ function renderProjectDetailView() {
   var html = '<div class="project-detail-header">';
   html += '<button class="back-btn" onclick="window.__nav.goToDashboard()">&#8249;</button>';
   html += '<h1>' + esc(proj.name) + '</h1>';
-  html += '<button class="btn btn-sm btn-primary" style="margin-left:auto" onclick="window.__modal.createTeam(\\'' + esc(p).replace(/'/g,"\\\\'") + '\\')">+ Add Team</button>';
+  html += '<div style="margin-left:auto;display:flex;gap:6px;align-items:center">';
+  html += renderRunnerControls(p);
+  html += '<button class="btn btn-sm btn-primary" onclick="window.__modal.createTeam(\\'' + esc(p).replace(/'/g,"\\\\'") + '\\')">+ Add Team</button>';
   var doneCountDetail = pStats.done + pStats.attention;
   if (doneCountDetail > 0) {
     html += '<button class="btn btn-sm btn-secondary" onclick="window.__modal.clearDoneTeams(\\'' + esc(p).replace(/'/g,"\\\\'") + '\\')">Clear done (' + doneCountDetail + ')</button>';
   }
-  html += '</div>';
+  html += '</div></div>';
   html += '<div class="project-detail-path">' + esc(p) + '</div>';
   html += '<div class="stat-pills" id="projectStatPills"></div>';
 
@@ -1344,6 +1358,54 @@ function refreshCodeFrame() {
   empty.style.display = 'none';
   frame.style.display = 'block';
 }
+
+// ---- Run in Browser (Phase 4) ----
+window.__runner = {
+  run: function(projectPath) {
+    // Optimistic update so the UI flips to "Starting…" before the network
+    // round-trip; runner-starting SSE will overwrite this with the real
+    // framework + command.
+    state.runners[projectPath] = { state: 'starting', framework: null, url: null, lastError: null, stdoutTail: [] };
+    renderCurrentView();
+    fetch('/api/projects/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectPath: projectPath })
+    })
+      .then(function(r) {
+        if (!r.ok) return r.json().then(function(d){ throw new Error(d.error || 'Failed to start'); });
+        return r.json();
+      })
+      .then(function(status) {
+        state.runners[projectPath] = status;
+        renderCurrentView();
+      })
+      .catch(function(e) {
+        state.runners[projectPath] = { state: 'error', framework: null, url: null, lastError: e.message, stdoutTail: [] };
+        showToast(e.message, 'error');
+        renderCurrentView();
+      });
+  },
+  stop: function(projectPath) {
+    fetch('/api/projects/stop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ projectPath: projectPath })
+    })
+      .then(function(r) {
+        if (!r.ok) return r.json().then(function(d){ throw new Error(d.error || 'Failed to stop'); });
+      })
+      .catch(function(e) { showToast(e.message, 'error'); });
+  },
+  showError: function(projectPath) {
+    var r = state.runners[projectPath];
+    if (!r) return;
+    var tail = (r.stdoutTail || []).join('\\n') || '(no output captured)';
+    var msg = (r.lastError || 'Dev server failed') + '\\n\\nLast lines:\\n' + tail;
+    // alert() is plain but the error tail can be long — keep it simple.
+    window.alert(msg);
+  }
+};
 
 // ---- Navigation ----
 window.__nav = {
@@ -1900,10 +1962,61 @@ function connectSSE() {
           addOrUpdateTeam(t.teamId || t.teamName, t);
         }
       }
+      // Seed any in-flight project runners so a dashboard reload doesn't
+      // forget about already-running dev servers spawned by + Run.
+      if (Array.isArray(data.runners)) {
+        for (var k = 0; k < data.runners.length; k++) {
+          var rs = data.runners[k];
+          state.runners[rs.projectPath] = rs;
+        }
+      }
       renderCurrentView();
     } catch(err) {
       console.error('[SSE init] Error:', err);
     }
+  });
+
+  // Project runner lifecycle (Phase 4)
+  es.addEventListener('runner-starting', function(e) {
+    var d = JSON.parse(e.data);
+    var existing = state.runners[d.projectPath] || {};
+    state.runners[d.projectPath] = Object.assign({}, existing, {
+      projectPath: d.projectPath,
+      state: 'starting',
+      framework: d.framework,
+      command: d.command,
+      url: null,
+      lastError: null
+    });
+    renderCurrentView();
+  });
+  es.addEventListener('runner-ready', function(e) {
+    var d = JSON.parse(e.data);
+    var existing = state.runners[d.projectPath] || {};
+    state.runners[d.projectPath] = Object.assign({}, existing, {
+      projectPath: d.projectPath,
+      state: 'ready',
+      url: d.url
+    });
+    showToast('Dev server ready: ' + d.url);
+    renderCurrentView();
+  });
+  es.addEventListener('runner-error', function(e) {
+    var d = JSON.parse(e.data);
+    var existing = state.runners[d.projectPath] || {};
+    state.runners[d.projectPath] = Object.assign({}, existing, {
+      projectPath: d.projectPath,
+      state: 'error',
+      lastError: d.reason,
+      stdoutTail: d.stdoutTail || []
+    });
+    showToast(d.reason, 'error');
+    renderCurrentView();
+  });
+  es.addEventListener('runner-stopped', function(e) {
+    var d = JSON.parse(e.data);
+    delete state.runners[d.projectPath];
+    renderCurrentView();
   });
 
   es.addEventListener('team-created', function(e) {

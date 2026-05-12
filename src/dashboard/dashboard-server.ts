@@ -11,6 +11,7 @@ import * as path from 'node:path';
 import type { PipelineOrchestrator } from '../pipeline-orchestrator.js';
 import { CodeServerManager } from './code-server-manager.js';
 import { buildDashboardHTML } from './dashboard-ui.js';
+import { ProjectRunnerManager } from './project-runner.js';
 
 export interface DashboardServerOptions {
   orchestrator: PipelineOrchestrator;
@@ -27,6 +28,7 @@ export class DashboardServer {
   private cachedHTML: string | null = null;
   private directoryPickerInFlight = false;
   private codeServer: CodeServerManager = new CodeServerManager();
+  private projectRunner: ProjectRunnerManager = new ProjectRunnerManager();
 
   // Throttle agent-progress events to avoid flooding SSE clients
   private progressThrottles: Map<string, number> = new Map();
@@ -81,6 +83,9 @@ export class DashboardServer {
 
     // Stop the embedded code-server if it was spawned.
     await this.codeServer.stop();
+
+    // Stop all project dev servers spawned via Run.
+    await this.projectRunner.stopAll();
 
     // Close HTTP server
     return new Promise<void>((resolve) => {
@@ -182,6 +187,21 @@ export class DashboardServer {
       }
       this.sseClients.clear();
     });
+
+    // ProjectRunner lifecycle — broadcast over the same SSE channel as
+    // team events so the dashboard updates the Run/Open/Stop button live.
+    this.projectRunner.on('runner-starting', (payload) => {
+      this.broadcast('runner-starting', payload);
+    });
+    this.projectRunner.on('runner-ready', (payload) => {
+      this.broadcast('runner-ready', payload);
+    });
+    this.projectRunner.on('runner-error', (payload) => {
+      this.broadcast('runner-error', payload);
+    });
+    this.projectRunner.on('runner-stopped', (payload) => {
+      this.broadcast('runner-stopped', payload);
+    });
   }
 
   // --- SSE Broadcasting ---
@@ -260,6 +280,19 @@ export class DashboardServer {
     const removePortfolioMatch = pathname.match(/^\/api\/portfolio\/(.+)$/);
     if (removePortfolioMatch && method === 'DELETE') {
       this.handleRemoveProject(decodeURIComponent(removePortfolioMatch[1]), res);
+      return;
+    }
+    if (method === 'POST' && pathname === '/api/projects/run') {
+      this.handleProjectRun(req, res);
+      return;
+    }
+    if (method === 'POST' && pathname === '/api/projects/stop') {
+      this.handleProjectStop(req, res);
+      return;
+    }
+    if (method === 'GET' && pathname === '/api/projects/run/status') {
+      const projectPath = url.searchParams.get('projectPath') ?? '';
+      this.handleProjectRunStatus(projectPath, res);
       return;
     }
     if (method === 'GET' && pathname === '/api/code-server/status') {
@@ -375,7 +408,8 @@ export class DashboardServer {
     }));
     const runtime = this.orchestrator.getAgentRuntime();
     const portfolio = this.orchestrator.getPortfolio();
-    res.write(`event: init\ndata: ${JSON.stringify({ teams, runtime, portfolio })}\n\n`);
+    const runners = this.projectRunner.getAllStatuses();
+    res.write(`event: init\ndata: ${JSON.stringify({ teams, runtime, portfolio, runners })}\n\n`);
 
     this.sseClients.add(res);
 
@@ -918,6 +952,54 @@ ${fileListHtml}
     } catch (err: any) {
       this.sendJSON(res, { error: err.message }, 400);
     }
+  }
+
+  // --- ProjectRunner (Run in Browser) ---
+
+  private async handleProjectRun(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    try {
+      const body = JSON.parse(await this.readBody(req));
+      const projectPath = typeof body?.projectPath === 'string' ? body.projectPath.trim() : '';
+      if (!projectPath) {
+        this.sendJSON(res, { error: 'projectPath is required' }, 400);
+        return;
+      }
+      // Start returns immediately with state='starting'; the runner-ready or
+      // runner-error SSE event drives the UI from there.
+      const status = await this.projectRunner.start(projectPath);
+      this.sendJSON(res, status);
+    } catch (err: any) {
+      this.sendJSON(res, { error: err.message }, 400);
+    }
+  }
+
+  private async handleProjectStop(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    try {
+      const body = JSON.parse(await this.readBody(req));
+      const projectPath = typeof body?.projectPath === 'string' ? body.projectPath.trim() : '';
+      if (!projectPath) {
+        this.sendJSON(res, { error: 'projectPath is required' }, 400);
+        return;
+      }
+      await this.projectRunner.stop(projectPath);
+      this.sendJSON(res, { stopped: true, projectPath });
+    } catch (err: any) {
+      this.sendJSON(res, { error: err.message }, 400);
+    }
+  }
+
+  private handleProjectRunStatus(projectPath: string, res: http.ServerResponse): void {
+    if (!projectPath) {
+      this.sendJSON(res, { error: 'projectPath query param is required' }, 400);
+      return;
+    }
+    this.sendJSON(res, this.projectRunner.getStatus(projectPath));
   }
 
   // Cheap status read for the Code tab — no spawn side-effects.

@@ -33,6 +33,7 @@ import {
   hasBlockingFindings,
   normalizeGuardrails,
 } from './guardrails.js';
+import { Portfolio, type Project } from './portfolio.js';
 import { Registry } from './registry.js';
 import { Role, type RoleInstance } from './roles/role-types.js';
 import { classifyComplexity } from './router/complexity-router.js';
@@ -288,6 +289,8 @@ export function postProcessRequirements(raw: string): string {
 
 export interface PipelineOrchestraConfig {
   registryPath: string;
+  /** Path to projects.json (the portfolio registry — projects as first-class entities). */
+  portfolioPath: string;
   logDirectory: string;
   /** Directory containing role prompt files (reuses subagent prompts) */
   rolesDir: string;
@@ -328,6 +331,7 @@ export interface PipelineOrchestraConfig {
 
 const DEFAULT_PIPELINE_CONFIG = {
   registryPath: './registry.json',
+  portfolioPath: './projects.json',
   logDirectory: './logs',
   rolesDir: './agents',
   maxConcurrentTeams: 5,
@@ -364,6 +368,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   private readonly agentRuntime: AgentRuntimeConfig;
   private readonly persistence: StatePersistence;
   private readonly registry: Registry;
+  private readonly portfolio: Portfolio;
   private readonly models: Record<RoleInstance, string>;
   private readonly efforts: Record<RoleInstance, EffortLevel>;
   private readonly disallowedTools: Record<RoleInstance, string[]>;
@@ -388,6 +393,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
     this.persistence = new StatePersistence();
     this.registry = new Registry(this.config.registryPath);
+    this.portfolio = new Portfolio(this.config.portfolioPath);
 
     // Build per-instance defaults from each instance's frontmatter, then
     // apply role-level config overrides on top. Config stays role-keyed for
@@ -477,6 +483,17 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       createdAt: new Date().toISOString(),
       lastActiveAt: new Date().toISOString(),
     });
+
+    // Auto-register the project in the portfolio if not already there.
+    // Preserves the "just give me a path and go" UX while populating projects.json
+    // for the first-class project model.
+    if (!this.portfolio.has(resolvedProjectPath)) {
+      this.portfolio.add({
+        projectPath: resolvedProjectPath,
+        displayName: path.basename(resolvedProjectPath),
+        addedAt: new Date().toISOString(),
+      });
+    }
 
     const ctx: PipelineTeamContext = {
       state,
@@ -986,6 +1003,61 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
   getRegistryEntries(): import('./registry.js').RegistryEntry[] {
     return this.registry.load();
+  }
+
+  // --- Portfolio Management (projects as first-class entities) ---
+
+  /**
+   * List every project in the portfolio. Projects exist independently of teams —
+   * a project may have zero teams and still appear here.
+   */
+  getPortfolio(): Project[] {
+    return this.portfolio.load();
+  }
+
+  /**
+   * Add a project to the portfolio. Validates that the path exists on disk.
+   * Idempotent — adding the same path twice is a no-op.
+   * Returns the project record.
+   */
+  addProjectToPortfolio(input: { projectPath: string; displayName?: string }): Project {
+    const resolved = path.resolve(input.projectPath);
+    if (!fs.existsSync(resolved)) {
+      throw new Error(`Project path does not exist: ${resolved}`);
+    }
+    const existing = this.portfolio.get(resolved);
+    if (existing) return existing;
+    const project: Project = {
+      projectPath: resolved,
+      displayName: input.displayName ?? path.basename(resolved),
+      addedAt: new Date().toISOString(),
+    };
+    this.portfolio.add(project);
+    return project;
+  }
+
+  /**
+   * Remove a project from the portfolio. Blocked if any teams in the orchestrator's
+   * working set still reference this project — the user must delete or terminate
+   * those teams first. Returns nothing on success.
+   */
+  removeProjectFromPortfolio(projectPath: string): void {
+    const resolved = path.resolve(projectPath);
+    if (!this.portfolio.has(resolved)) {
+      throw new Error(`Project not in portfolio: ${resolved}`);
+    }
+    let teamCount = 0;
+    for (const ctx of this.teams.values()) {
+      if (ctx.state.snapshot.projectPath === resolved) {
+        teamCount++;
+      }
+    }
+    if (teamCount > 0) {
+      throw new Error(
+        `Project has ${teamCount} team${teamCount !== 1 ? 's' : ''}. Delete or terminate them before removing the project from the portfolio.`,
+      );
+    }
+    this.portfolio.remove(resolved);
   }
 
   // --- Git Operations (user-initiated) ---

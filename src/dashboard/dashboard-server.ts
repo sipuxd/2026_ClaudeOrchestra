@@ -249,6 +249,19 @@ export class DashboardServer {
       this.handleClearDoneTeams(req, res);
       return;
     }
+    if (method === 'GET' && pathname === '/api/portfolio') {
+      this.handleGetPortfolio(res);
+      return;
+    }
+    if (method === 'POST' && pathname === '/api/portfolio') {
+      this.handleAddProject(req, res);
+      return;
+    }
+    const removePortfolioMatch = pathname.match(/^\/api\/portfolio\/(.+)$/);
+    if (removePortfolioMatch && method === 'DELETE') {
+      this.handleRemoveProject(decodeURIComponent(removePortfolioMatch[1]), res);
+      return;
+    }
     if (method === 'GET' && pathname === '/api/code-server/status') {
       this.handleCodeServerStatus(res);
       return;
@@ -361,7 +374,8 @@ export class DashboardServer {
       projectHasPreview: this.checkProjectHasPreview(t.projectPath),
     }));
     const runtime = this.orchestrator.getAgentRuntime();
-    res.write(`event: init\ndata: ${JSON.stringify({ teams, runtime })}\n\n`);
+    const portfolio = this.orchestrator.getPortfolio();
+    res.write(`event: init\ndata: ${JSON.stringify({ teams, runtime, portfolio })}\n\n`);
 
     this.sseClients.add(res);
 
@@ -493,6 +507,41 @@ export class DashboardServer {
       this.sendJSON(res, { cleared });
     } catch (err: any) {
       this.sendJSON(res, { error: err.message }, 400);
+    }
+  }
+
+  private handleGetPortfolio(res: http.ServerResponse): void {
+    this.sendJSON(res, this.orchestrator.getPortfolio());
+  }
+
+  private async handleAddProject(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+  ): Promise<void> {
+    try {
+      const body = JSON.parse(await this.readBody(req));
+      if (!body.projectPath || typeof body.projectPath !== 'string') {
+        this.sendJSON(res, { error: 'projectPath is required' }, 400);
+        return;
+      }
+      const project = this.orchestrator.addProjectToPortfolio({
+        projectPath: body.projectPath,
+        displayName: body.displayName,
+      });
+      this.sendJSON(res, project);
+    } catch (err: any) {
+      this.sendJSON(res, { error: err.message }, 400);
+    }
+  }
+
+  private handleRemoveProject(projectPath: string, res: http.ServerResponse): void {
+    try {
+      this.orchestrator.removeProjectFromPortfolio(projectPath);
+      this.sendJSON(res, { ok: true });
+    } catch (err: any) {
+      // 409 (Conflict) if the project still has teams; 404 if not in portfolio
+      const status = err.message?.includes('not in portfolio') ? 404 : 409;
+      this.sendJSON(res, { error: err.message }, status);
     }
   }
 

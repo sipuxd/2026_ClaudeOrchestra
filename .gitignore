@@ -144,6 +144,9 @@ vite.config.ts.timestamp-*
 # Engine registry (team pointers, not committed)
 registry.json
 
+# Engine portfolio (project pointers, not committed — like registry.json)
+projects.json
+
 # Project-local code-server data (user-data-dir + extensions-dir for embedded code-view)
 .code-server-data/
 

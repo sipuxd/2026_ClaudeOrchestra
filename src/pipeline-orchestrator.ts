@@ -387,6 +387,16 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     );
     this.config = { ...DEFAULT_PIPELINE_CONFIG, ...cleanConfig } as PipelineOrchestraConfig &
       typeof DEFAULT_PIPELINE_CONFIG;
+    // If portfolioPath wasn't explicitly provided but registryPath was, place
+    // projects.json next to registry.json. This keeps tests that isolate
+    // registryPath into a tmpDir from polluting the engine repo's real
+    // ./projects.json via auto-register-on-createTeam.
+    if (cleanConfig.portfolioPath === undefined && cleanConfig.registryPath !== undefined) {
+      this.config.portfolioPath = path.join(
+        path.dirname(this.config.registryPath),
+        'projects.json',
+      );
+    }
     this.agentRuntime = normalizeAgentRuntime(config.agentRuntime);
     validateAgentRuntime(this.agentRuntime);
     this.guardrails = normalizeGuardrails(config.guardrails);

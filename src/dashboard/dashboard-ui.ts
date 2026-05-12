@@ -430,6 +430,7 @@ a:hover{text-decoration:underline}
 const state = {
   teams: {},           // teamId -> team data
   projects: {},        // projectPath -> { name, teams: Set, inPortfolio: bool }
+  recentlyAddedProjects: new Set(), // projectPaths added via + Add Project this session
   feedbacks: {},       // teamId -> [ feedback objects ]
   liveOutput: {},      // teamId -> [ { agent, text, type } ]
   chatMessages: {},    // teamId -> [ { role, content, timestamp, verdict? } ]
@@ -640,15 +641,6 @@ function addPortfolioProject(p) {
     state.projects[p.projectPath].inPortfolio = true;
     if (p.displayName) state.projects[p.projectPath].name = p.displayName;
   }
-  if (!state.feedbacks[teamId]) state.feedbacks[teamId] = [];
-  if (!state.liveOutput[teamId]) state.liveOutput[teamId] = [];
-  // Seed chat history from the team payload if present (init / team-created).
-  // After that, chat-message SSE events append; we don't overwrite from later
-  // payloads that lack chatHistory.
-  if (Array.isArray(data && data.chatHistory) && !state.chatMessages[teamId]) {
-    state.chatMessages[teamId] = data.chatHistory.slice();
-  }
-  if (!state.chatMessages[teamId]) state.chatMessages[teamId] = [];
 }
 
 function getTeamPhaseCategory(team) {
@@ -845,7 +837,14 @@ function renderDashboardView() {
   var runtimeLabel = rt.provider
     ? rt.provider + ' / ' + (rt.auth || 'subscription') + ' / ' + (rt.model || 'default')
     : 'runtime loading';
-  var paths = Object.keys(state.projects).sort();
+  // Sort: projects added this session float to the top so the new entry is
+  // visible without scrolling; the rest stay alphabetical.
+  var paths = Object.keys(state.projects).sort(function(a, b) {
+    var aNew = state.recentlyAddedProjects.has(a) ? 0 : 1;
+    var bNew = state.recentlyAddedProjects.has(b) ? 0 : 1;
+    if (aNew !== bNew) return aNew - bNew;
+    return a.localeCompare(b);
+  });
   var hasProjects = paths.length > 0;
   var html = '<div class="dashboard-header"><div class="dashboard-heading-row"><h1>Portfolio</h1>';
   html += '<span class="runtime-pill">' + esc(runtimeLabel) + '</span>';
@@ -893,6 +892,10 @@ function renderDashboardView() {
     if (doneCount > 0) {
       html += '<button class="btn btn-sm btn-secondary" onclick="event.stopPropagation();window.__modal.clearDoneTeams(\\'' + esc(p).replace(/'/g,"\\\\'") + '\\')">Clear done (' + doneCount + ')</button>';
     }
+    // Per-project "+ Add Team" pre-fills the project in the create modal.
+    // Always visible so zero-team projects (no empty-state card) still have
+    // a one-click affordance from the dashboard.
+    html += '<button class="btn btn-sm btn-primary" onclick="event.stopPropagation();window.__modal.createTeam(\\'' + esc(p).replace(/'/g,"\\\\'") + '\\')">+ Add Team</button>';
     // "Remove from portfolio" — only enabled when the project has zero teams.
     // Backend blocks the removal if teams exist anyway; the UI just keeps the
     // affordance hidden in the common case to reduce destructive-click anxiety.
@@ -903,11 +906,19 @@ function renderDashboardView() {
     html += '</div>';
     html += '<div class="team-grid">';
     if (teamIds.length === 0) {
-      // Empty-portfolio-project state: no teams yet. Offer a quick "+ Create team" CTA.
-      html += '<div style="grid-column:1/-1;padding:24px;text-align:center;border:1px dashed var(--border);border-radius:8px;color:var(--text-muted)">';
-      html += '<p style="margin-bottom:12px">No teams yet in ' + esc(proj.name) + '.</p>';
-      html += '<button class="btn btn-sm btn-primary" onclick="window.__modal.createTeam(\\'' + esc(p).replace(/'/g,"\\\\'") + '\\')">+ Create team</button>';
-      html += '</div>';
+      if (state.recentlyAddedProjects.has(p)) {
+        // Just-added project: prominent empty-state card to draw the eye and
+        // make the next step obvious. Mirrors the global "No projects yet"
+        // pattern.
+        html += '<div style="grid-column:1/-1;padding:32px 24px;text-align:center;border:1px dashed var(--border);border-radius:8px">';
+        html += '<h3 style="margin-bottom:6px;color:var(--text-primary)">No teams yet</h3>';
+        html += '<p style="margin-bottom:14px;color:var(--text-secondary)">Add a team to start work on ' + esc(proj.name) + '. Each team runs the Security → Build → Sweep → Review pipeline independently.</p>';
+        html += '<button class="btn btn-primary" onclick="window.__modal.createTeam(\\'' + esc(p).replace(/'/g,"\\\\'") + '\\')">+ Add Team</button>';
+        html += '</div>';
+      }
+      // Otherwise: zero-team projects from prior sessions just show their
+      // header. The header already has "+ Add Team" and "Remove from
+      // portfolio" buttons; a big empty card per project would be noisy.
     } else {
       for (var j = 0; j < filtered.length; j++) {
         html += renderTeamCard(filtered[j], false);
@@ -934,9 +945,10 @@ function renderProjectDetailView() {
   var html = '<div class="project-detail-header">';
   html += '<button class="back-btn" onclick="window.__nav.goToDashboard()">&#8249;</button>';
   html += '<h1>' + esc(proj.name) + '</h1>';
+  html += '<button class="btn btn-sm btn-primary" style="margin-left:auto" onclick="window.__modal.createTeam(\\'' + esc(p).replace(/'/g,"\\\\'") + '\\')">+ Add Team</button>';
   var doneCountDetail = pStats.done + pStats.attention;
   if (doneCountDetail > 0) {
-    html += '<button class="btn btn-sm btn-secondary" style="margin-left:auto" onclick="window.__modal.clearDoneTeams(\\'' + esc(p).replace(/'/g,"\\\\'") + '\\')">Clear done (' + doneCountDetail + ')</button>';
+    html += '<button class="btn btn-sm btn-secondary" onclick="window.__modal.clearDoneTeams(\\'' + esc(p).replace(/'/g,"\\\\'") + '\\')">Clear done (' + doneCountDetail + ')</button>';
   }
   html += '</div>';
   html += '<div class="project-detail-path">' + esc(p) + '</div>';
@@ -1540,6 +1552,7 @@ window.__modal = {
         })
         .then(function(project) {
           addPortfolioProject(project);
+          state.recentlyAddedProjects.add(project.projectPath);
           showToast('Added "' + (project.displayName || project.projectPath) + '" to portfolio');
           renderCurrentView();
         })

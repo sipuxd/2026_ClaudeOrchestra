@@ -176,6 +176,10 @@ export class DashboardServer {
       this.broadcast('chat-message', { teamId, message });
     });
 
+    this.orchestrator.on('chat-cancelled', (teamId) => {
+      this.broadcast('chat-cancelled', { teamId });
+    });
+
     this.orchestrator.on('shutdown', () => {
       this.broadcast('shutdown', {});
       for (const client of this.sseClients) {
@@ -350,6 +354,11 @@ export class DashboardServer {
     // Team-level Coordinator-1 chat. POST sends a user message, GET returns
     // the team's full chat history. Both routes resolve the team by name
     // (decoded so names with spaces/slashes work).
+    const chatCancelMatch = pathname.match(/^\/api\/teams\/([^/]+)\/chat\/cancel$/);
+    if (chatCancelMatch && method === 'POST') {
+      this.handleChatCancel(decodeURIComponent(chatCancelMatch[1]), res);
+      return;
+    }
     const chatPostMatch = pathname.match(/^\/api\/teams\/([^/]+)\/chat$/);
     if (chatPostMatch && method === 'POST') {
       this.handleSendChatMessage(decodeURIComponent(chatPostMatch[1]), req, res);
@@ -642,7 +651,7 @@ export class DashboardServer {
   ): Promise<void> {
     try {
       const body = JSON.parse(await this.readBody(req));
-      const { message, images } = body;
+      const { message, images, targetInstance } = body;
 
       if (!message) {
         this.sendJSON(res, { error: 'message is required' }, 400);
@@ -650,12 +659,40 @@ export class DashboardServer {
       }
 
       // Fire and forget — response comes via SSE feedback events
-      this.orchestrator.sendMessage(teamId, message, images).catch(() => {
-        // Errors are emitted as feedback events
-      });
+      this.orchestrator
+        .sendMessage(
+          teamId,
+          message,
+          images,
+          typeof targetInstance === 'string' && targetInstance.length > 0
+            ? targetInstance
+            : undefined,
+        )
+        .catch(() => {
+          // Errors are emitted as feedback events
+        });
       this.sendJSON(res, { ok: true });
     } catch (err: any) {
       this.sendJSON(res, { error: err.message }, 400);
+    }
+  }
+
+  // POST /api/teams/:id/chat/cancel — abort the in-flight coordinator turn
+  // for this team, if any. Returns 200 with { cancelled: true } when a turn
+  // was aborted, 409 with { inFlight: false } when there was nothing to cancel.
+  // Does NOT touch the deterministic pipeline — if TRIGGER_PIPELINE has
+  // already been issued, the pipeline continues running.
+  private handleChatCancel(teamId: string, res: http.ServerResponse): void {
+    try {
+      const cancelled = this.orchestrator.cancelChat(teamId);
+      if (!cancelled) {
+        this.sendJSON(res, { inFlight: false }, 409);
+        return;
+      }
+      this.sendJSON(res, { cancelled: true, teamId });
+    } catch (err: any) {
+      const status = /not found/i.test(err.message) ? 404 : 400;
+      this.sendJSON(res, { error: err.message }, status);
     }
   }
 

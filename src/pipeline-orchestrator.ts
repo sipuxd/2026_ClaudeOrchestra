@@ -87,6 +87,10 @@ export interface OrchestratorEvents {
   // panel. Includes the verdict for coordinator messages so the UI can style
   // TRIGGER_PIPELINE differently from RESPONDING/ASKING.
   'chat-message': [teamId: string, message: ChatMessage];
+  // Emitted when cancelChat aborts an in-flight coordinator turn. Dashboard
+  // clears the team's chatPending state and shows a toast. No chat-message
+  // is emitted for the cancelled turn.
+  'chat-cancelled': [teamId: string];
   shutdown: [];
 }
 
@@ -359,6 +363,10 @@ interface PipelineTeamContext {
   /** Serializes sendChatMessage calls so concurrent dashboard messages don't
    *  interleave on the same coordinator session. */
   chatLock?: Promise<void>;
+  /** Abort controller for the in-flight coordinator turn, if any. cancelChat
+   *  aborts it; the chat turn handler races send() against this signal and
+   *  treats the abort as a clean cancellation (no system chat-message). */
+  coordinatorAbortController?: AbortController;
 }
 
 // --- PipelineOrchestrator ---
@@ -551,6 +559,21 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     return next;
   }
 
+  /**
+   * Abort an in-flight coordinator turn for this team, if any. Returns true
+   * if a turn was actually aborted; false otherwise (no turn in flight).
+   * Mirrors the chat-side "stop generating" pattern. Does NOT touch the
+   * deterministic pipeline — if TRIGGER_PIPELINE has already been issued,
+   * the pipeline runs to completion regardless of this call.
+   */
+  cancelChat(teamId: string): boolean {
+    const ctx = this.teams.get(teamId);
+    if (!ctx) throw new Error(`Team "${teamId}" not found`);
+    if (!ctx.coordinatorAbortController) return false;
+    ctx.coordinatorAbortController.abort();
+    return true;
+  }
+
   private async handleChatTurn(
     teamId: string,
     ctx: PipelineTeamContext,
@@ -593,20 +616,46 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     const prompt = this.buildCoordinatorPrompt(ctx);
 
     // 4. Send + parse verdict with the same fail-loud pattern as other gates.
+    //    Race the send against an AbortController so cancelChat can interrupt
+    //    a coordinator turn mid-response. The abort path is treated as a
+    //    clean cancellation — no system chat-message is recorded.
+    const abortController = new AbortController();
+    ctx.coordinatorAbortController = abortController;
+    const abortPromise = new Promise<never>((_, reject) => {
+      abortController.signal.addEventListener('abort', () => {
+        reject(new Error('__chat_cancelled__'));
+      });
+    });
+
     let parsed: ParsedVerdict<ChatVerdict>;
     try {
-      parsed = await sendWithVerdict(
-        ctx.coordinatorSession,
-        prompt,
-        parseChatVerdict,
-        ['RESPONDING', 'ASKING', 'TRIGGER_PIPELINE'] as const,
-        {
-          onResponse: (raw) => this.emit('agent-output', teamId, 'Coordinator-1', raw),
-          onMalformed: (raw) => this.emit('malformed-output', teamId, 'Coordinator-1', raw),
-        },
-        'Coordinator-1',
-      );
+      parsed = await Promise.race([
+        sendWithVerdict(
+          ctx.coordinatorSession,
+          prompt,
+          parseChatVerdict,
+          ['RESPONDING', 'ASKING', 'TRIGGER_PIPELINE'] as const,
+          {
+            onResponse: (raw) => this.emit('agent-output', teamId, 'Coordinator-1', raw),
+            onMalformed: (raw) => this.emit('malformed-output', teamId, 'Coordinator-1', raw),
+          },
+          'Coordinator-1',
+        ),
+        abortPromise,
+      ]);
     } catch (err: any) {
+      if (err?.message === '__chat_cancelled__') {
+        // User clicked the × button while we were awaiting the coordinator.
+        // Close the session so any lingering work stops; next chat message
+        // lazy-respawns it.
+        try {
+          ctx.coordinatorSession.close();
+        } catch {
+          /* best effort */
+        }
+        this.emit('chat-cancelled', teamId);
+        return;
+      }
       const errMsg: ChatMessage = {
         role: 'system',
         content: `Coordinator-1 emitted unparseable output twice. ${err.message}`,
@@ -616,6 +665,10 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       this.persistence.appendChatMessage(teamId, errMsg);
       this.emit('chat-message', teamId, errMsg);
       return;
+    } finally {
+      if (ctx.coordinatorAbortController === abortController) {
+        ctx.coordinatorAbortController = undefined;
+      }
     }
 
     // 5. Persist + emit the coordinator's response.
@@ -1986,21 +2039,42 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     teamId: string,
     message: string,
     images?: Array<{ media_type: string; data: string }>,
+    targetInstance?: string,
   ): Promise<void> {
     const ctx = this.teams.get(teamId);
     if (!ctx) throw new Error(`Team "${teamId}" not found`);
     if (ctx.pipelineRunning) throw new Error('Cannot ask while pipeline is running');
 
-    // Find a live session
-    const liveSession = ctx.sessions.find((s) => !s.closed);
-    if (!liveSession) throw new Error('No active agent sessions — start a new task first');
+    // Find the specific live session if targetInstance is given (UI's Steer
+    // button labels itself with a specific instance, so the message should
+    // land there — not on whatever happens to be first in ctx.sessions).
+    // Falls back to the legacy "first non-closed session" behavior for API
+    // callers that don't specify a target.
+    let liveSession: AgentSession | undefined;
+    if (targetInstance) {
+      // Match a session by name. Some legacy sessions carry the bare role
+      // ("Reviewer") while modern code uses the -1 suffix; accept both.
+      liveSession = ctx.sessions.find(
+        (s) =>
+          !s.closed &&
+          (s.name === targetInstance || (targetInstance === 'Reviewer-1' && s.name === 'Reviewer')),
+      );
+      if (!liveSession) {
+        throw new Error(`No live session for ${targetInstance} — the agent may have been closed.`);
+      }
+    } else {
+      liveSession = ctx.sessions.find((s) => !s.closed);
+      if (!liveSession) throw new Error('No active agent sessions — start a new task first');
+    }
 
     const instance = (
       liveSession.name === 'Reviewer'
         ? 'Reviewer-1'
         : liveSession.name === 'Worker-1'
           ? 'Worker-1'
-          : liveSession.name + '-1'
+          : liveSession.name.includes('-')
+            ? liveSession.name
+            : liveSession.name + '-1'
     ) as any;
 
     // Show user's question in feedback bar

@@ -490,6 +490,21 @@ function phaseLabel(ph) {
     pr_open:'PR open', merged:'merged', errored:'error', cancelled:'cancelled' };
   return map[ph] || ph;
 }
+// Which agent the Steer button should target right now. Returns null when
+// Steer isn't actually usable — the engine throws on sendMessage while a
+// pipeline is running, and sessions are wiped when a team is cancelled or
+// re-tasked, so Steer is only meaningful in the post-completion window.
+//
+// In that window, the agent the user almost always wants to follow up with
+// is the one that did the final work: Reviewer-1 in a standard pipeline,
+// Worker-1 in a simple one. Engine still routes to whatever session is
+// open under that name (see sendMessage's targetInstance support).
+function getSteerTarget(t) {
+  if (!t) return null;
+  if (t.currentPhase !== 'done') return null;
+  return getTeamComplexity(t) === 'simple' ? 'Worker-1' : 'Reviewer-1';
+}
+
 function getTeamComplexity(t) {
   var explicit = (t && t.currentTask && t.currentTask.complexity) || (t && t.complexity) || null;
   if (explicit) return explicit;
@@ -1056,9 +1071,12 @@ function renderTeamActionButtons(teamId) {
   if (!t) return '';
   var ph = t.currentPhase;
   var html = '';
+  var steerTarget = getSteerTarget(t);
+  if (steerTarget) {
+    html += '<button class="btn btn-sm btn-secondary" onclick="window.__modal.steerAgent(\\'' + esc(teamId) + '\\',\\'' + steerTarget + '\\')">Steer ' + steerTarget + '</button>';
+  }
   if (ph !== 'done' && ph !== 'merged' && ph !== 'cancelled') {
-    html += '<button class="btn btn-sm btn-secondary" onclick="window.__modal.steerAgent(\\'' + esc(teamId) + '\\')">Steer</button>';
-    html += '<button class="btn btn-sm btn-danger" onclick="window.__modal.stopPipeline(\\'' + esc(teamId) + '\\')">Stop</button>';
+    html += '<button class="btn btn-sm btn-danger" onclick="window.__modal.stopPipeline(\\'' + esc(teamId) + '\\')">Terminate team</button>';
   }
   // Preview is intentionally NOT a team-level action — it lives at the
   // project level (project header) because the preview reflects the
@@ -1070,13 +1088,11 @@ function renderTeamActionButtons(teamId) {
   if (ph === 'pr_open' && t.prUrl) {
     html += '<a href="' + esc(t.prUrl) + '" target="_blank" class="btn btn-sm btn-purple">View PR #' + (t.prNumber||'') + '</a>';
   }
-  if (!t.currentTask && ph !== 'done' && ph !== 'merged' && ph !== 'pr_open') {
-    html += '<button class="btn btn-sm btn-green" onclick="window.__modal.assignTask(\\'' + esc(teamId) + '\\')">Assign Task</button>';
-  } else if (t.currentTask && ph !== 'pr_open' && ph !== 'merged') {
-    html += '<button class="btn btn-sm btn-green" onclick="window.__modal.assignTask(\\'' + esc(teamId) + '\\')">Assign New Task</button>';
-  }
+  // Assign Task / Assign New Task removed in PR #18 — Coordinator-1's chat
+  // panel triggers the same pipeline via its TRIGGER_PIPELINE verdict.
+  // The POST /api/teams/:id/task endpoint stays for API users.
   // Delete is available in any terminal phase (done/merged/cancelled/errored)
-  // since the existing Stop button already covers active phases.
+  // since the existing Terminate-team button already covers active phases.
   if (ph === 'done' || ph === 'merged' || ph === 'cancelled' || ph === 'errored') {
     html += '<button class="btn btn-sm btn-danger" onclick="window.__modal.deleteTeam(\\'' + esc(teamId) + '\\')">Delete</button>';
   }
@@ -1169,25 +1185,32 @@ function renderSummaryContent(teamId) {
   return html;
 }
 
+// Verdict label for the per-agent card. Trust agState as the primary
+// signal — output is only used to refine the DONE state into the specific
+// verdict the agent emitted (APPROVED / REVISION_NEEDED / REJECTED / N/M met /
+// BLOCKED / SKIPPED / Complete). Previously this function returned 'ACTIVE'
+// for any agent that had ever produced output, which made finished agents
+// look like they were still running.
 function getAgentVerdict(output, instance, agState) {
-  if (agState === 'skipped') return 'SKIPPED';
-  if (agState === 'done') return 'Complete';
-  if (agState === 'errored') return 'ERRORED';
-  if (!output && (!agState || agState === 'waiting')) return 'WAITING';
-  if (output && output.match(/APPROVED/i)) return 'APPROVED';
-  if (output && output.match(/REVISION.NEEDED/i)) return 'REVISION_NEEDED';
-  if (output && output.match(/REJECTED/i)) return 'REJECTED';
-  if (output && output.match(/BLOCKED/i)) return 'BLOCKED';
-  if (output && output.match(/COMPLETE/i)) return 'Complete';
-  if (output && output.match(/\\b(ERRORED|FATAL|PIPELINE_FAILED|UNHANDLED|EXCEPTION)\\b/i) && instance !== 'Security-1') return 'ERRORED';
-  if (output && output.match(/SKIPPED/i)) return 'SKIPPED';
-  if (output) {
-    var metMatch = output.match(new RegExp('\\\\d+/\\\\d+\\\\s*met','i'));
-    if (metMatch) return metMatch[0];
-  }
-  if (agState === 'working' || agState === 'active') return 'ACTIVE';
+  if (agState === 'skipped')  return 'SKIPPED';
+  if (agState === 'errored')  return 'ERRORED';
+  if (agState === 'blocked')  return 'BLOCKED';
   if (agState === 'spawning') return 'SPAWNING';
-  if (output) return 'ACTIVE';
+  if (agState === 'active' || agState === 'working') return 'ACTIVE';
+  if (agState === 'done') {
+    if (output) {
+      if (output.match(/APPROVED/i))         return 'APPROVED';
+      if (output.match(/REVISION.NEEDED/i))  return 'REVISION_NEEDED';
+      if (output.match(/REJECTED/i))         return 'REJECTED';
+      var metMatch = output.match(new RegExp('\\\\d+/\\\\d+\\\\s*met','i'));
+      if (metMatch)                          return metMatch[0];
+      if (output.match(/BLOCKED/i))          return 'BLOCKED';
+      if (output.match(/SKIPPED/i))          return 'SKIPPED';
+      if (output.match(/COMPLETE/i))         return 'Complete';
+    }
+    return 'Complete';
+  }
+  // 'idle' / 'waiting' / anything unknown
   return 'WAITING';
 }
 
@@ -1286,7 +1309,14 @@ function renderChatPanel(teamId) {
 
   html += '<form class="chat-input-row" onsubmit="window.__api.sendChat(event, \\'' + esc(teamId).replace(/'/g, "\\\\'") + '\\')">';
   html +=   '<textarea class="chat-input" id="chatInput-' + esc(teamId) + '" rows="2" placeholder="Type a message — e.g. \\'Build a settings page with dark mode\\' or \\'Why did Worker-2 flag X?\\'" ' + (pending ? 'disabled' : '') + '></textarea>';
-  html +=   '<button type="submit" class="btn btn-primary chat-send-btn"' + (pending ? ' disabled' : '') + '>Send</button>';
+  if (pending) {
+    // × cancel button — abort the in-flight coordinator turn. Mirrors
+    // Claude Code\\'s "stop generating" affordance. The deterministic
+    // pipeline keeps running if TRIGGER_PIPELINE had already fired.
+    html += '<button type="button" class="btn btn-secondary chat-send-btn" title="Cancel coordinator turn" onclick="window.__api.cancelChat(\\'' + esc(teamId).replace(/'/g, "\\\\'") + '\\')">&#10005;</button>';
+  } else {
+    html += '<button type="submit" class="btn btn-primary chat-send-btn">Send</button>';
+  }
   html += '</form>';
   html += '</div>'; // end chat-panel
   return html;
@@ -1663,12 +1693,6 @@ window.__modal = {
       })
       .catch(function(e) { showToast(e.message, 'error'); });
   },
-  assignTask: function(teamId) {
-    openModal('assignTaskModal');
-    $('atTeamId').value = teamId;
-    $('atTask').value = '';
-    $('atTeamLabel').textContent = teamId;
-  },
   stopPipeline: function(teamId) {
     openModal('stopModal');
     $('stopTeamId').value = teamId;
@@ -1726,11 +1750,16 @@ window.__modal = {
     $('prStatus').textContent = '';
     $('prSubmitBtn').disabled = false;
   },
-  steerAgent: function(teamId) {
+  steerAgent: function(teamId, targetInstance) {
     openModal('steerModal');
     $('steerTeamId').value = teamId;
+    $('steerTargetInstance').value = targetInstance || '';
     $('steerMessage').value = '';
-    $('steerTeamLabel').textContent = state.teams[teamId] ? (state.teams[teamId].teamName || teamId) : teamId;
+    var team = state.teams[teamId];
+    var teamName = team ? (team.teamName || teamId) : teamId;
+    $('steerTeamLabel').textContent = targetInstance
+      ? (targetInstance + ' (' + teamName + ')')
+      : teamName;
   },
   securityReview: function(teamId) {
     openModal('securityReviewModal');
@@ -1817,25 +1846,20 @@ window.__api = {
     });
     return false;
   },
-  assignTask: function() {
-    var teamId = $('atTeamId').value;
-    var description = $('atTask').value.trim();
-    if (!description) {
-      showToast('Task description is required', 'error');
-      return;
-    }
-    var body = { description: description };
-    if (attachedImages.length > 0) body.images = attachedImages;
-    fetch('/api/teams/' + encodeURIComponent(teamId) + '/task', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
+  // Abort the in-flight coordinator turn. The SSE chat-cancelled event flips
+  // chatPending off and re-renders; here we just fire the request.
+  cancelChat: function(teamId) {
+    fetch('/api/teams/' + encodeURIComponent(teamId) + '/chat/cancel', {
+      method: 'POST'
     }).then(function(r) {
-      if (!r.ok) return r.json().then(function(d){ throw new Error(d.error||'Failed'); });
-      return r.json();
-    }).then(function() {
-      closeModal();
-      showToast('Task assigned');
+      if (r.status === 409) {
+        // No turn was in flight by the time the cancel arrived — race with
+        // the coordinator finishing on its own. Clear pending defensively.
+        state.chatPending[teamId] = false;
+        if (state.panelOpen && state.panelTeamId === teamId) renderPanel();
+        return;
+      }
+      if (!r.ok) return r.json().then(function(d){ throw new Error(d.error || 'Failed to cancel'); });
     }).catch(function(e) {
       showToast(e.message, 'error');
     });
@@ -1876,12 +1900,14 @@ window.__api = {
   },
   steerAgent: function() {
     var teamId = $('steerTeamId').value;
+    var targetInstance = $('steerTargetInstance').value;
     var message = $('steerMessage').value.trim();
     if (!message) {
       showToast('Message is required', 'error');
       return;
     }
     var body = { message: message };
+    if (targetInstance) body.targetInstance = targetInstance;
     if (attachedImages.length > 0) body.images = attachedImages;
     fetch('/api/teams/' + encodeURIComponent(teamId) + '/ask', {
       method: 'POST',
@@ -2207,6 +2233,16 @@ function connectSSE() {
     }
   });
 
+  // User clicked × — coordinator turn was aborted. Clear pending state and
+  // toast. The deterministic pipeline (if TRIGGER_PIPELINE had fired) keeps
+  // running and surfaces via its own events.
+  es.addEventListener('chat-cancelled', function(e) {
+    var data = JSON.parse(e.data);
+    state.chatPending[data.teamId] = false;
+    showToast('Coordinator turn cancelled. Any pipeline already started keeps running.', 'info');
+    if (state.panelOpen && state.panelTeamId === data.teamId) renderPanel();
+  });
+
   es.addEventListener('shutdown', function() {
     state.sseConnected = false;
     showToast('Server shutting down', 'info');
@@ -2257,7 +2293,6 @@ window.openModal = openModal;
 
 setTimeout(function() {
   setupImageArea('ctImageArea', 'ctImageInput');
-  setupImageArea('atImageArea', 'atImageInput');
   setupImageArea('steerImageArea', 'steerImageInput');
 }, 100);
 
@@ -2348,48 +2383,20 @@ setTimeout(function() {
     </div>
   </div>
 
-  <!-- Assign Task Modal -->
-  <div class="modal" id="assignTaskModal" style="display:none" onclick="event.stopPropagation()">
-    <div class="modal-header">
-      <h3>Assign Task</h3>
-      <button class="panel-close" onclick="closeModal()">&#10005;</button>
-    </div>
-    <div class="modal-body">
-      <input type="hidden" id="atTeamId">
-      <p style="color:var(--text-secondary);font-size:.8125rem;margin-bottom:12px">Team: <strong id="atTeamLabel"></strong></p>
-      <div class="form-group">
-        <label>Task Description</label>
-        <textarea id="atTask" placeholder="Describe the task..." rows="4"></textarea>
-      </div>
-      <div class="form-group">
-        <label>Images (optional)</label>
-        <div class="image-attach-area" id="atImageArea">
-          Drop images or click to browse
-        </div>
-        <input type="file" id="atImageInput" accept="image/*" multiple style="display:none">
-        <div class="image-previews"></div>
-      </div>
-    </div>
-    <div class="modal-footer">
-      <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="window.__api.assignTask()">Assign</button>
-    </div>
-  </div>
-
-  <!-- Stop Pipeline Modal -->
+  <!-- Terminate Team Modal -->
   <div class="modal" id="stopModal" style="display:none" onclick="event.stopPropagation()">
     <div class="modal-header">
-      <h3>Stop Pipeline</h3>
+      <h3>Terminate team</h3>
       <button class="panel-close" onclick="closeModal()">&#10005;</button>
     </div>
     <div class="modal-body">
       <input type="hidden" id="stopTeamId">
-      <p style="margin-bottom:12px">Are you sure you want to stop the pipeline for <strong id="stopTeamLabel"></strong>?</p>
-      <p style="color:var(--text-secondary);font-size:.8125rem">This will terminate all running agents. The team state will be set to cancelled.</p>
+      <p style="margin-bottom:12px">Terminate team <strong id="stopTeamLabel"></strong>?</p>
+      <p style="color:var(--text-secondary);font-size:.8125rem">This terminates all running agents and marks the team cancelled. The team's on-disk state is preserved but it will be removed from the active dashboard.</p>
     </div>
     <div class="modal-footer">
       <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-danger" onclick="window.__api.stopTeam()">Stop Pipeline</button>
+      <button class="btn btn-danger" onclick="window.__api.stopTeam()">Terminate team</button>
     </div>
   </div>
 
@@ -2419,7 +2426,8 @@ setTimeout(function() {
     </div>
     <div class="modal-body">
       <input type="hidden" id="steerTeamId">
-      <p style="color:var(--text-secondary);font-size:.8125rem;margin-bottom:12px">Send a message to the active agent on <strong id="steerTeamLabel"></strong>.</p>
+      <input type="hidden" id="steerTargetInstance">
+      <p style="color:var(--text-secondary);font-size:.8125rem;margin-bottom:12px">Send a message to <strong id="steerTeamLabel"></strong>.</p>
       <div class="form-group">
         <label>Message</label>
         <textarea id="steerMessage" placeholder="Guide the agent..." rows="4"></textarea>

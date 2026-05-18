@@ -799,6 +799,56 @@ describe('PipelineOrchestrator', () => {
     });
   });
 
+  // --- Chat cancellation ---
+
+  describe('cancelChat', () => {
+    it('throws when team is not found', () => {
+      expect(() => orchestrator.cancelChat('nope')).toThrow(/not found/);
+    });
+
+    it('returns false when no chat turn is in flight', () => {
+      orchestrator.createTeam('chat-idle', projectDir);
+      expect(orchestrator.cancelChat('chat-idle')).toBe(false);
+    });
+
+    it('aborts an in-flight coordinator turn and emits chat-cancelled', async () => {
+      orchestrator.createTeam('chat-cancel', projectDir);
+
+      const cancelled = vi.fn();
+      orchestrator.on('chat-cancelled', cancelled);
+      const messages: Array<{ role: string }> = [];
+      orchestrator.on('chat-message', (_teamId, message) => messages.push(message));
+
+      // Send a chat message but never call .respond() on the mock session,
+      // so the coordinator's send() hangs indefinitely. The abort path is
+      // what should resolve the outer Promise.
+      const chatPromise = orchestrator.sendChatMessage('chat-cancel', 'hi');
+
+      // Wait for the user message to be persisted/emitted — that's the
+      // signal that handleChatTurn has reached the point where the abort
+      // controller is registered on ctx.
+      await new Promise<void>((resolve, reject) => {
+        const start = Date.now();
+        const tick = () => {
+          if (messages.some((m) => m.role === 'user')) return resolve();
+          if (Date.now() - start > 2000) {
+            return reject(new Error('user chat-message never emitted'));
+          }
+          setTimeout(tick, 10);
+        };
+        tick();
+      });
+
+      expect(orchestrator.cancelChat('chat-cancel')).toBe(true);
+      await chatPromise;
+
+      expect(cancelled).toHaveBeenCalledWith('chat-cancel');
+      // The cancelled turn must NOT have produced a coordinator or system
+      // reply — chat is left in a clean "user sent, no response" state.
+      expect(messages.filter((m) => m.role !== 'user')).toHaveLength(0);
+    });
+  });
+
   // --- Shutdown ---
 
   describe('clearDoneTeams', () => {

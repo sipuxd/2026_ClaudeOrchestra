@@ -47,14 +47,12 @@ export type LogEvent =
   | 'task_complete'
   | 'agent_spawned'
   | 'agent_errored'
-  | 'agent_respawned'
   | 'message_sent'
   | 'message_received'
   | 'message_malformed'
   | 'phase_transition'
   | 'timeout_warning'
   | 'timeout_exceeded'
-  | 'deadlock_detected'
   | 'loop_limit_reached'
   | 'shutdown_initiated'
   | 'health_check_failed'
@@ -314,29 +312,6 @@ export class Logger {
       });
     });
 
-    orchestrator.on('agent-stderr', (teamId, instance, data) => {
-      this.error('agent_errored', `${instance} stderr: ${data}`, {
-        teamId,
-        roleSourceInstance: instance,
-        data: { stderr: data },
-      });
-    });
-
-    orchestrator.on('agent-crashed', (teamId, instance, code) => {
-      this.error('agent_errored', `${instance} crashed (exit ${code})`, {
-        teamId,
-        roleSourceInstance: instance,
-        data: { exitCode: code },
-      });
-    });
-
-    orchestrator.on('agent-respawned', (teamId, instance) => {
-      this.warn('agent_respawned', `${instance} respawned`, {
-        teamId,
-        roleSourceInstance: instance,
-      });
-    });
-
     orchestrator.on('malformed-output', (teamId, instance, raw) => {
       const preview = raw.length > 100 ? raw.substring(0, 100) + '...' : raw;
       this.warn('message_malformed', `${instance} sent invalid output: ${preview}`, {
@@ -344,10 +319,6 @@ export class Logger {
         roleSourceInstance: instance,
         data: { rawLength: raw.length },
       });
-    });
-
-    orchestrator.on('deadlock-detected', (teamId) => {
-      this.error('deadlock_detected', `Deadlock detected in ${teamId}`, { teamId });
     });
 
     orchestrator.on('error', (teamId, err) => {
@@ -429,18 +400,8 @@ export class Logger {
         break;
       }
 
-      case 'agent_respawned': {
-        line += `${ANSI.yellow}RESPAWN${ANSI.reset} ${entry.roleSourceInstance}`;
-        break;
-      }
-
       case 'message_malformed': {
         line += `${ANSI.yellow}MALFORMED${ANSI.reset} ${entry.roleSourceInstance}: invalid output`;
-        break;
-      }
-
-      case 'deadlock_detected': {
-        line += `${ANSI.brightRed}${ANSI.bold}DEADLOCK${ANSI.reset} No active agents, no pending messages`;
         break;
       }
 

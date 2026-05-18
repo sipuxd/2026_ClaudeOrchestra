@@ -225,13 +225,10 @@ The `/preview/*` routes are legacy — the Run-in-Browser button on every projec
 | `agent-output` | `{ teamId, instance, text }` | Final output per agent turn |
 | `agent-progress` | `{ teamId, instance, text }` | Streaming tool activity (500ms throttle) |
 | `agent-task` | `{ teamId, instance, subtask }` | Current subtask label |
-| `agent-crashed` | `{ teamId, instance, code }` | Agent process exited unexpectedly |
-| `agent-stderr` | `{ teamId, instance, data }` | Agent stderr line |
-| `agent-respawned` | `{ teamId, instance }` | Crashed agent respawned |
-| `malformed-output` | `{ teamId, instance, raw }` | Verdict parse failed |
+| `malformed-output` | `{ teamId, instance, raw }` | Verdict parser failed to read agent response (auto-retried once) |
 | `task-complete` | `{ teamId, phase, durationMs }` | Pipeline finished |
 | `feedback` | `{ teamId, id, type, title, message, blocking?, actions? }` | Notification or blocking question |
-| `feedback-response` | `{ teamId, feedbackId, value }` | User responded to blocking feedback |
+| `feedback-response` | `{ teamId, feedbackId, value }` | A client resolved a blocking feedback prompt (multi-tab dismissal) |
 | `security-review` | `{ teamId, status, result? }` | On-demand security review result |
 | `pr-created` | `{ teamId, prNumber, prUrl }` | `gh pr create` succeeded |
 | `team-archived` | `{ teamId, prUrl }` | PR merged, team archived |
@@ -242,10 +239,10 @@ The `/preview/*` routes are legacy — the Run-in-Browser button on every projec
 | `runner-ready` | `{ projectPath, url }` | Dev server printed its URL |
 | `runner-error` | `{ projectPath, reason, stdoutTail }` | Dev server failed to start or crashed |
 | `runner-stopped` | `{ projectPath }` | Stop button clicked, dev server killed |
-| `deadlock-detected` | `{ teamId }` | Deadlock heuristic tripped |
 | `error` | `{ teamId, message }` | Generic team error |
-| `tick` | `{ teamId }` | Periodic heartbeat |
 | `shutdown` | `{}` | Engine shutting down |
+
+**Future SSE events** (not currently emitted): `agent-crashed` / `agent-respawned` as a paired crash+recover story will land when the `AgentSession` adapters grow crash detection + respawn budgets. A `deadlock-detected` event will land when a real silence-timeout / stuck-state detector ships — today the orchestrator only fails to `errored` on loop-limit exhaustion, which is distinct from deadlock.
 
 ### UI (`src/dashboard/dashboard-ui.ts`)
 
@@ -379,7 +376,7 @@ Three tiers:
 
 All git commands have a 30-second timeout. `gh` availability is detected lazily and cached; if `gh` is missing, the **Create PR** path surfaces an install hint instead of failing silently.
 
-**Single-branch workflow** (commit `23f40db`, March 2026): the engine used to maintain a separate `dev` branch and merge to `main` automatically. That was dropped in favour of the team-branch + GitHub-PR flow above.
+**Single-branch workflow** (commit `23f40db`, May 2026): the engine used to maintain a separate `dev` branch and merge to `main` automatically. That was dropped in favour of the team-branch + GitHub-PR flow above.
 
 ---
 

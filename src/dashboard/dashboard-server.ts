@@ -180,6 +180,14 @@ export class DashboardServer {
       this.broadcast('chat-cancelled', { teamId });
     });
 
+    this.orchestrator.on('malformed-output', (teamId, instance, raw) => {
+      this.broadcast('malformed-output', { teamId, instance, raw });
+    });
+
+    this.orchestrator.on('feedback-response', (teamId, feedbackId, value) => {
+      this.broadcast('feedback-response', { teamId, feedbackId, value });
+    });
+
     this.orchestrator.on('shutdown', () => {
       this.broadcast('shutdown', {});
       for (const client of this.sseClients) {

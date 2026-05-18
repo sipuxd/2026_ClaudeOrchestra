@@ -436,6 +436,7 @@ const state = {
   liveOutput: {},      // teamId -> [ { agent, text, type } ]
   chatMessages: {},    // teamId -> [ { role, content, timestamp, verdict? } ]
   chatPending: {},     // teamId -> bool (true while a coordinator turn is in flight)
+  malformedOutputs: {}, // teamId -> instance -> { count, lastRaw } — transient marker for verdict-parse retries
   currentView: 'dashboard', // 'dashboard' | 'project'
   currentProject: null,
   topTab: 'portfolio',      // 'portfolio' | 'code' — outer view selector
@@ -1160,12 +1161,17 @@ function renderSummaryContent(teamId) {
     var verdictStyle = getVerdictStyle(verdict);
     var dotColor = getAgentDotColor(verdict, agState, agentColors[inst]);
 
+    var malformed = (state.malformedOutputs[teamId] || {})[inst];
     html += '<div class="agent-section" onclick="toggleAgentSection(this)">';
     html += '<div class="agent-section-header">';
     html += '<span class="agent-chevron">&#9654;</span>';
     html += '<span class="agent-dot-sm" style="background:' + dotColor + '"></span>';
     html += '<span class="agent-name">' + inst + '</span>';
     html += '<span class="agent-verdict" style="' + verdictStyle + '">' + esc(verdict) + '</span>';
+    if (malformed && malformed.count > 0) {
+      var mfTitle = 'Verdict parse failed ' + malformed.count + 'x — last: ' + (malformed.lastRaw || '').substring(0, 200);
+      html += '<span class="mini-pill pill-error" title="' + esc(mfTitle) + '" style="margin-left:6px">malformed &times;' + malformed.count + '</span>';
+    }
     html += '</div>';
     html += '<div class="agent-section-body">';
     html += '<pre class="agent-output">' + esc(agSummary) + '</pre>';
@@ -2241,6 +2247,40 @@ function connectSSE() {
     state.chatPending[data.teamId] = false;
     showToast('Coordinator turn cancelled. Any pipeline already started keeps running.', 'info');
     if (state.panelOpen && state.panelTeamId === data.teamId) renderPanel();
+  });
+
+  // Verdict parser failed to read an agent response. The orchestrator
+  // automatically re-prompts once. Surface it as a per-agent pill (not a
+  // toast) so the user sees it in agent context and recurrent flakiness
+  // doesn't spam notifications. Also append to the live output log.
+  es.addEventListener('malformed-output', function(e) {
+    var data = JSON.parse(e.data);
+    if (!state.malformedOutputs[data.teamId]) state.malformedOutputs[data.teamId] = {};
+    var prev = state.malformedOutputs[data.teamId][data.instance] || { count: 0, lastRaw: '' };
+    state.malformedOutputs[data.teamId][data.instance] = {
+      count: prev.count + 1,
+      lastRaw: data.raw,
+    };
+    if (!state.liveOutput[data.teamId]) state.liveOutput[data.teamId] = [];
+    var preview = (data.raw || '').toString().substring(0, 120);
+    state.liveOutput[data.teamId].push({
+      agent: data.instance,
+      text: 'Malformed verdict, re-prompting: ' + preview,
+      type: 'error',
+    });
+    renderCurrentView();
+  });
+
+  // Another client (or this one) resolved a blocking feedback prompt.
+  // Filter it out of our local state so the prompt UI disappears in every
+  // open tab without requiring a refresh.
+  es.addEventListener('feedback-response', function(e) {
+    var data = JSON.parse(e.data);
+    var fbs = state.feedbacks[data.teamId];
+    if (fbs && fbs.length > 0) {
+      state.feedbacks[data.teamId] = fbs.filter(function(f) { return f.id !== data.feedbackId; });
+    }
+    renderCurrentView();
   });
 
   es.addEventListener('shutdown', function() {

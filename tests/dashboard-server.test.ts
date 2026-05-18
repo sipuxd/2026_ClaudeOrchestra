@@ -441,4 +441,114 @@ describe('DashboardServer', () => {
       });
     });
   });
+
+  // --- SSE bridges for orchestrator events ---
+
+  describe('SSE bridges', () => {
+    it('broadcasts malformed-output events via SSE', async () => {
+      return new Promise<void>((resolve) => {
+        const req = http.get(`http://localhost:${port}/events`, (res) => {
+          let data = '';
+          let gotInit = false;
+          res.on('data', (chunk: Buffer) => {
+            data += chunk.toString();
+            if (!gotInit && data.includes('event: init')) {
+              gotInit = true;
+              orchestrator.emit(
+                'malformed-output',
+                'mf-team',
+                'Worker-2' as any,
+                'gibberish-not-a-verdict',
+              );
+            }
+            if (gotInit && data.includes('event: malformed-output')) {
+              const lines = data.split('\n');
+              const idx = lines.indexOf('event: malformed-output');
+              if (idx >= 0 && lines[idx + 1]) {
+                const eventData = JSON.parse(lines[idx + 1].replace('data: ', ''));
+                expect(eventData.teamId).toBe('mf-team');
+                expect(eventData.instance).toBe('Worker-2');
+                expect(eventData.raw).toBe('gibberish-not-a-verdict');
+                req.destroy();
+                resolve();
+              }
+            }
+          });
+        });
+      });
+    });
+
+    it('broadcasts feedback-response events via SSE', async () => {
+      return new Promise<void>((resolve) => {
+        const req = http.get(`http://localhost:${port}/events`, (res) => {
+          let data = '';
+          let gotInit = false;
+          res.on('data', (chunk: Buffer) => {
+            data += chunk.toString();
+            if (!gotInit && data.includes('event: init')) {
+              gotInit = true;
+              orchestrator.emit('feedback-response', 'fbr-team', 'fb-xyz', 'approve');
+            }
+            if (gotInit && data.includes('event: feedback-response')) {
+              const lines = data.split('\n');
+              const idx = lines.indexOf('event: feedback-response');
+              if (idx >= 0 && lines[idx + 1]) {
+                const eventData = JSON.parse(lines[idx + 1].replace('data: ', ''));
+                expect(eventData.teamId).toBe('fbr-team');
+                expect(eventData.feedbackId).toBe('fb-xyz');
+                expect(eventData.value).toBe('approve');
+                req.destroy();
+                resolve();
+              }
+            }
+          });
+        });
+      });
+    });
+
+    // Multi-tab dismissal: two SSE clients subscribed at the same time both
+    // receive `feedback-response`. Without this bridge, a feedback prompt
+    // answered in one tab would stay visible in any other open tab.
+    it('delivers feedback-response to multiple concurrent SSE clients', async () => {
+      const waitForFeedbackResponse = (): Promise<{
+        teamId: string;
+        feedbackId: string;
+        value: string;
+      }> =>
+        new Promise((resolve, reject) => {
+          const req = http.get(`http://localhost:${port}/events`, (res) => {
+            let data = '';
+            res.on('data', (chunk: Buffer) => {
+              data += chunk.toString();
+              if (data.includes('event: feedback-response')) {
+                const lines = data.split('\n');
+                const idx = lines.indexOf('event: feedback-response');
+                if (idx >= 0 && lines[idx + 1]) {
+                  const eventData = JSON.parse(lines[idx + 1].replace('data: ', ''));
+                  req.destroy();
+                  resolve(eventData);
+                }
+              }
+            });
+            res.on('error', reject);
+          });
+          req.on('error', reject);
+        });
+
+      const clientA = waitForFeedbackResponse();
+      const clientB = waitForFeedbackResponse();
+
+      // Allow both SSE clients to register before emitting. The first message
+      // SSE sends is `init`, so a small delay is enough to ensure both clients
+      // are in the broadcast set when the event fires.
+      await new Promise((r) => setTimeout(r, 100));
+      orchestrator.emit('feedback-response', 'multi-team', 'fb-multi', 'reject');
+
+      const [a, b] = await Promise.all([clientA, clientB]);
+      expect(a.teamId).toBe('multi-team');
+      expect(a.feedbackId).toBe('fb-multi');
+      expect(a.value).toBe('reject');
+      expect(b).toEqual(a);
+    });
+  });
 });

@@ -4,7 +4,7 @@
 // orchestrator events via SSE. Uses Node.js built-in http module
 // (no Express or WebSocket dependencies).
 
-import { execFile } from 'node:child_process';
+import { type ChildProcess, execFile, spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as http from 'node:http';
 import * as path from 'node:path';
@@ -33,6 +33,11 @@ export class DashboardServer {
   // Throttle agent-progress events to avoid flooding SSE clients
   private progressThrottles: Map<string, number> = new Map();
   private readonly PROGRESS_THROTTLE_MS = 500;
+
+  // Handle to a running `claude auth login` subprocess so it can be cancelled.
+  // The login flow blocks until the user completes OAuth in their browser; the
+  // /api/auth/login/cancel endpoint SIGTERMs this child if the user backs out.
+  private authLoginProcess: ChildProcess | null = null;
 
   constructor(options: DashboardServerOptions) {
     this.orchestrator = options.orchestrator;
@@ -180,6 +185,14 @@ export class DashboardServer {
       this.broadcast('chat-cancelled', { teamId });
     });
 
+    this.orchestrator.on('malformed-output', (teamId, instance, raw) => {
+      this.broadcast('malformed-output', { teamId, instance, raw });
+    });
+
+    this.orchestrator.on('feedback-response', (teamId, feedbackId, value) => {
+      this.broadcast('feedback-response', { teamId, feedbackId, value });
+    });
+
     this.orchestrator.on('shutdown', () => {
       this.broadcast('shutdown', {});
       for (const client of this.sseClients) {
@@ -305,6 +318,25 @@ export class DashboardServer {
     }
     if (method === 'POST' && pathname === '/api/code-server/start') {
       this.handleCodeServerStart(res);
+      return;
+    }
+
+    // Claude account auth (subscription/OAuth) — drives the dashboard's
+    // "Connect your Claude account" flow. See handleAuthStatus etc.
+    if (method === 'GET' && pathname === '/api/auth/status') {
+      this.handleAuthStatus(res);
+      return;
+    }
+    if (method === 'POST' && pathname === '/api/auth/login') {
+      this.handleAuthLogin(res);
+      return;
+    }
+    if (method === 'POST' && pathname === '/api/auth/login/cancel') {
+      this.handleAuthLoginCancel(res);
+      return;
+    }
+    if (method === 'POST' && pathname === '/api/auth/logout') {
+      this.handleAuthLogout(res);
       return;
     }
 
@@ -1054,6 +1086,108 @@ ${fileListHtml}
     } catch (err: any) {
       this.sendJSON(res, { state: 'error', error: err.message }, 500);
     }
+  }
+
+  // --- Claude account auth (subscription/OAuth) ---
+  //
+  // Delegates to the official `claude` CLI's `auth` subcommands. The engine
+  // never holds tokens itself — these endpoints just surface CLI state to the
+  // dashboard so the user can sign in / out without leaving the UI.
+
+  // Env-var names that would override subscription auth and make the engine
+  // refuse to start (mirrors validateAgentRuntime in agent-runtime/auth.ts).
+  private readonly SUBSCRIPTION_CONFLICT_ENV_KEYS = [
+    'CLAUDE_CODE_USE_BEDROCK',
+    'CLAUDE_CODE_USE_VERTEX',
+    'CLAUDE_CODE_USE_FOUNDRY',
+    'ANTHROPIC_AUTH_TOKEN',
+    'ANTHROPIC_API_KEY',
+  ];
+
+  private handleAuthStatus(res: http.ServerResponse): void {
+    const conflicts = this.SUBSCRIPTION_CONFLICT_ENV_KEYS.filter((k) => !!process.env[k]);
+    const loginInProgress = !!this.authLoginProcess && this.authLoginProcess.exitCode === null;
+    execFile('claude', ['auth', 'status', '--json'], { timeout: 5000 }, (err, stdout, stderr) => {
+      if (err) {
+        this.sendJSON(res, {
+          loggedIn: false,
+          available: false,
+          error: stderr?.toString().trim() || err.message,
+          engineConflicts: conflicts,
+          loginInProgress,
+        });
+        return;
+      }
+      let parsed: any = {};
+      try {
+        parsed = JSON.parse(stdout);
+      } catch {
+        this.sendJSON(res, {
+          loggedIn: false,
+          available: true,
+          error: 'Could not parse `claude auth status --json` output',
+          engineConflicts: conflicts,
+          loginInProgress,
+        });
+        return;
+      }
+      this.sendJSON(res, {
+        ...parsed,
+        available: true,
+        engineConflicts: conflicts,
+        loginInProgress,
+      });
+    });
+  }
+
+  private handleAuthLogin(res: http.ServerResponse): void {
+    if (this.authLoginProcess && this.authLoginProcess.exitCode === null) {
+      this.sendJSON(res, { ok: false, error: 'A login is already in progress' }, 409);
+      return;
+    }
+    try {
+      // Spawn detached-ish: we don't await the child, we just track it so the
+      // user can cancel. The login command opens a browser on the user's
+      // machine and blocks until the OAuth callback resolves. Tokens get
+      // written to the user's keychain / ~/.claude by the CLI itself.
+      const child = spawn('claude', ['auth', 'login'], { stdio: 'ignore' });
+      this.authLoginProcess = child;
+      child.on('exit', () => {
+        if (this.authLoginProcess === child) this.authLoginProcess = null;
+      });
+      child.on('error', () => {
+        if (this.authLoginProcess === child) this.authLoginProcess = null;
+      });
+      this.sendJSON(res, { ok: true, pid: child.pid });
+    } catch (err: any) {
+      this.authLoginProcess = null;
+      this.sendJSON(res, { ok: false, error: err.message }, 500);
+    }
+  }
+
+  private handleAuthLoginCancel(res: http.ServerResponse): void {
+    const child = this.authLoginProcess;
+    if (!child || child.exitCode !== null) {
+      this.sendJSON(res, { ok: false, error: 'No login in progress' }, 409);
+      return;
+    }
+    try {
+      child.kill('SIGTERM');
+    } catch {
+      /* best effort */
+    }
+    this.authLoginProcess = null;
+    this.sendJSON(res, { ok: true });
+  }
+
+  private handleAuthLogout(res: http.ServerResponse): void {
+    execFile('claude', ['auth', 'logout'], { timeout: 10000 }, (err, _stdout, stderr) => {
+      if (err) {
+        this.sendJSON(res, { ok: false, error: stderr?.toString().trim() || err.message }, 500);
+        return;
+      }
+      this.sendJSON(res, { ok: true });
+    });
   }
 
   private pickDirectoryNative(

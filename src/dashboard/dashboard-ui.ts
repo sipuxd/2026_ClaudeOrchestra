@@ -74,10 +74,21 @@ a:hover{text-decoration:underline}
 .top-tab-pane.active{display:flex;flex-direction:column}
 .top-tab-pane.portfolio{overflow-y:auto}
 .code-frame{flex:1;width:100%;border:none;background:var(--bg)}
+/* Masks code-server's white bootstrap HTML during the first paint, then fades
+   out once the workbench has time to apply the dark theme. */
+.code-frame-overlay{position:absolute;inset:0;background:var(--bg);z-index:10;opacity:1;transition:opacity .25s ease;pointer-events:none}
+.code-frame-overlay.fade-out{opacity:0}
 .code-empty{flex:1;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;padding:40px;text-align:center;color:var(--text-muted)}
 .code-empty h2{color:var(--text);font-size:1.1rem;font-weight:600;margin:0}
 .code-empty code{background:var(--surface);padding:6px 10px;border-radius:4px;font-family:var(--mono);font-size:0.875rem;color:var(--text)}
-.view-container{padding:32px 40px;max-width:1400px;margin:0 auto}
+/* width:100% is required because the parent .top-tab-pane.portfolio.active uses
+   display:flex — without it the container shrinks to intrinsic content width
+   and max-width never takes effect, producing inconsistent per-project widths. */
+.view-container{width:100%;max-width:1028px;padding:32px 40px;margin:0 auto;box-sizing:border-box}
+/* The all-projects Portfolio overview gets a wider cap. Distinguished from
+   individual project detail views by the .dashboard-header direct child
+   (project pages render .project-detail-header instead). */
+.view-container:has(> .dashboard-header){max-width:1400px}
 
 /* --- Dashboard Header --- */
 .dashboard-header{margin-bottom:28px}
@@ -87,6 +98,19 @@ a:hover{text-decoration:underline}
 .runtime-pill{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:999px;
   background:var(--surface);border:1px solid var(--border);color:var(--text-secondary);
   font-size:.75rem;text-transform:uppercase;letter-spacing:.04em}
+.auth-pill{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:999px;
+  font-size:.75rem;font-weight:500;background:var(--surface);border:1px solid var(--border);
+  color:var(--text-secondary);cursor:pointer;transition:border-color .15s,background .15s}
+.auth-pill:hover{border-color:var(--text-muted)}
+.auth-pill .auth-dot{width:7px;height:7px;border-radius:50%;background:currentColor;flex-shrink:0}
+.auth-pill-loading{color:var(--text-muted);cursor:default}
+.auth-pill-loading:hover{border-color:var(--border)}
+.auth-pill-ok{color:var(--green);border-color:rgba(63,185,80,.4);background:rgba(63,185,80,.08)}
+.auth-pill-off{color:var(--red-light);border-color:rgba(218,54,51,.45);background:rgba(218,54,51,.1)}
+.auth-pill-error{color:var(--red-light);border-color:rgba(218,54,51,.45);background:rgba(218,54,51,.1)}
+.auth-pill-conflict{color:var(--amber);border-color:rgba(210,153,34,.45);background:rgba(210,153,34,.12)}
+.auth-pill-pending{color:var(--blue);border-color:rgba(88,166,255,.4);background:rgba(88,166,255,.1)}
+.auth-pill-pending .auth-dot{animation:pulse-dot 1.2s infinite}
 
 /* --- Stat Pills --- */
 .stat-pills{display:flex;align-items:center;gap:10px;margin-bottom:28px;flex-wrap:wrap}
@@ -111,8 +135,10 @@ a:hover{text-decoration:underline}
 .project-section-header h2{font-size:1.1rem;font-weight:600;margin-right:12px;display:inline}
 .project-path-label{color:var(--text-muted);font-size:.75rem;font-family:'SF Mono','Fira Code',monospace;margin-right:12px}
 .project-team-count{color:var(--text-secondary);font-size:.8125rem}
-.project-stats{display:flex;gap:6px;flex-shrink:0}
-.mini-pill{font-size:.65rem;font-weight:600;padding:2px 8px;border-radius:10px}
+.project-stats{display:flex;align-items:center;gap:6px;flex-shrink:0}
+/* 50px + parent's 6px gap = 56px separation between the badge cluster and the action buttons */
+.project-stats > .mini-pill + button{margin-left:50px}
+.mini-pill{font-size:.65rem;font-weight:600;padding:0 8px;border-radius:10px;height:20px;display:inline-flex;align-items:center;box-sizing:border-box}
 .pill-error{background:rgba(218,54,51,.12);color:var(--red-light)}
 .pill-active{background:rgba(88,166,255,.12);color:var(--blue)}
 .pill-review{background:rgba(210,153,34,.12);color:var(--amber)}
@@ -268,7 +294,9 @@ a:hover{text-decoration:underline}
 .agent-output{font-family:'SF Mono','Fira Code',monospace;font-size:.75rem;color:var(--text-secondary);
   line-height:1.5;white-space:pre-wrap;word-break:break-word;margin:0;max-height:200px;overflow-y:auto}
 .security-result-section{margin-top:16px}
-.security-result-section h4{font-size:.8125rem;color:var(--text-muted);text-transform:uppercase;margin-bottom:8px}
+.security-result-section h4{font-size:.8125rem;color:var(--text-muted);text-transform:uppercase;margin:0}
+.security-result-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.security-result-actions{margin-left:auto;display:flex;gap:4px}
 
 /* --- Live Mode --- */
 .live-header{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:12px}
@@ -331,6 +359,8 @@ a:hover{text-decoration:underline}
 .btn-danger:hover:not(:disabled){background:var(--red-light)}
 .btn-secondary{background:var(--bg);color:var(--text-secondary);border:1px solid var(--border)}
 .btn-secondary:hover:not(:disabled){background:var(--surface);color:var(--text-primary)}
+.btn-outline{background:transparent;color:var(--blue);border:1px solid var(--blue)}
+.btn-outline:hover:not(:disabled){background:rgba(88,166,255,.1)}
 .btn-ghost{color:var(--text-secondary);padding:6px 10px}
 .btn-ghost:hover{color:var(--text-primary);background:rgba(255,255,255,.05)}
 .btn-sm{padding:5px 10px;font-size:.75rem}
@@ -397,29 +427,194 @@ a:hover{text-decoration:underline}
 
 /* --- Security review result --- */
 .security-result{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);
-  padding:12px;font-family:'SF Mono','Fira Code',monospace;font-size:.75rem;white-space:pre-wrap;
-  max-height:200px;overflow-y:auto;color:var(--text-secondary);margin-top:8px}
+  padding:12px 14px;font-size:.8125rem;line-height:1.55;color:var(--text-primary);margin-top:8px;
+  max-height:360px;overflow-y:auto}
+.security-result .sr-h{font-size:.8125rem;font-weight:600;color:var(--text-primary);
+  margin:10px 0 4px;letter-spacing:.01em}
+.security-result h4.sr-h{font-size:.875rem}
+.security-result .sr-p{margin:4px 0;color:var(--text-secondary)}
+.security-result .sr-p strong,.security-result .sr-list strong{color:var(--text-primary);font-weight:600}
+.security-result .sr-list{margin:4px 0 8px;padding-left:20px;color:var(--text-secondary)}
+.security-result .sr-list li{margin:2px 0}
+.security-result code{font-family:'SF Mono','Fira Code',monospace;font-size:.75rem;
+  background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:1px 5px;color:var(--text-primary)}
+.security-result .sr-code{font-family:'SF Mono','Fira Code',monospace;font-size:.75rem;
+  background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:10px 12px;
+  white-space:pre-wrap;word-break:break-word;color:var(--text-primary);margin:6px 0}
+/* Severity callouts inside paragraphs/list items get a colored tint. */
+.security-result strong:where(:not(.sr-p strong, .sr-list strong)){color:inherit}
 
-/* --- Team chat panel (Coordinator-1) --- */
-.chat-panel{margin-top:24px;border-top:1px solid var(--border);padding-top:16px;display:flex;flex-direction:column;gap:10px}
-.chat-panel-header{font-size:.75rem;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.05em}
-.chat-log{display:flex;flex-direction:column;gap:8px;max-height:480px;overflow-y:auto;padding:4px}
-.chat-empty{color:var(--text-muted);font-style:italic;font-size:.875rem;padding:20px;text-align:center}
-.chat-msg{display:flex;width:100%}
-.chat-msg-user{justify-content:flex-end}
-.chat-msg-coordinator{justify-content:flex-start}
-.chat-msg-system{justify-content:center}
-.chat-bubble{max-width:80%;padding:10px 14px;border-radius:var(--radius-sm);font-size:.875rem;line-height:1.5;white-space:pre-wrap;word-wrap:break-word}
-.chat-bubble-user{background:var(--accent);color:white}
-.chat-bubble-coordinator{background:var(--surface);color:var(--text);border:1px solid var(--border)}
-.chat-bubble-system{background:transparent;color:var(--text-muted);border:1px dashed var(--border);font-style:italic;max-width:90%}
-.chat-bubble-meta{font-size:.65rem;font-weight:600;text-transform:uppercase;letter-spacing:.05em;opacity:.7;margin-bottom:4px}
-.chat-pending{opacity:.7;font-style:italic}
-.chat-input-row{display:flex;gap:8px;align-items:flex-end}
-.chat-input{flex:1;min-height:44px;padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg);color:var(--text);font-family:inherit;font-size:.875rem;resize:vertical}
-.chat-input:focus{outline:none;border-color:var(--accent)}
-.chat-input:disabled{opacity:.6;cursor:wait}
-.chat-send-btn{align-self:stretch;padding:0 20px;flex-shrink:0}
+/* ==========================================================================
+   Side panel redesign — 4 regions: Header / Agents / Chat / Composer
+   See docs/side-panel-redesign.md
+   ========================================================================== */
+.slide-panel{padding:0}
+.slide-panel-redesign{display:flex;flex-direction:column;height:100vh;overflow:hidden}
+
+/* Header region */
+.sp-header{flex-shrink:0;padding:14px 18px 12px;border-bottom:1px solid var(--border);background:var(--surface);position:relative}
+.sp-header-top{display:flex;align-items:center;gap:8px;margin-bottom:2px}
+.sp-header-title{font-size:1rem;font-weight:600;color:var(--text-primary);flex:1;min-width:0;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sp-icon-btn{width:30px;height:30px;border-radius:var(--radius-sm);display:flex;align-items:center;
+  justify-content:center;font-size:20px;line-height:1;cursor:pointer;color:var(--text-primary);
+  transition:background .15s,color .15s,border-color .15s;flex-shrink:0;background:var(--bg);
+  border:1px solid var(--border)}
+.sp-icon-btn:hover{background:var(--surface);border-color:var(--text-muted)}
+.sp-icon-btn:focus-visible{outline:2px solid var(--blue);outline-offset:1px}
+.sp-breadcrumb{font-size:.75rem;color:var(--text-secondary);line-height:1.4;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:10px}
+.sp-status-row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.sp-status-pill{display:inline-flex;align-items:center;gap:6px;font-size:.6875rem;font-weight:600;
+  padding:3px 9px;border-radius:999px;text-transform:uppercase;letter-spacing:.04em;flex-shrink:0}
+.sp-status-pill .sp-status-dot{width:7px;height:7px;border-radius:50%;background:currentColor}
+.sp-status-pill[data-tone="active"]{background:rgba(88,166,255,.12);color:var(--blue)}
+.sp-status-pill[data-tone="review"]{background:rgba(210,153,34,.14);color:var(--amber)}
+.sp-status-pill[data-tone="done"]{background:rgba(63,185,80,.14);color:var(--green)}
+.sp-status-pill[data-tone="pr"]{background:rgba(163,113,247,.14);color:var(--purple)}
+.sp-status-pill[data-tone="blocked"]{background:rgba(218,54,51,.14);color:var(--red-light)}
+.sp-status-pill[data-tone="muted"]{background:rgba(72,79,88,.18);color:var(--text-secondary)}
+.sp-progress{flex:1;display:flex;align-items:center;gap:4px;min-width:120px}
+.sp-progress-tick{flex:1;height:4px;border-radius:2px;background:var(--border);min-width:8px}
+.sp-progress-tick.past{background:var(--green)}
+.sp-progress-tick.current{background:var(--blue)}
+.sp-progress-tick.fail{background:var(--red)}
+.sp-progress-label{font-size:.6875rem;color:var(--text-muted);font-variant-numeric:tabular-nums;
+  flex-shrink:0;letter-spacing:.02em}
+.sp-stats-row{display:flex;gap:14px;margin-top:8px;font-size:.6875rem;color:var(--text-muted)}
+.sp-stats-row b{color:var(--text-secondary);font-weight:600}
+.sp-cancelled-note{margin-top:8px;font-size:.75rem;color:var(--text-secondary);line-height:1.45;
+  background:rgba(218,54,51,.08);border:1px solid rgba(218,54,51,.25);border-radius:var(--radius-sm);
+  padding:8px 10px}
+
+/* Overflow menu — used by side panel and inline-detail card */
+.sp-overflow-wrap{position:relative}
+.inline-overflow-wrap{margin-left:auto}
+.sp-overflow-menu{position:absolute;top:calc(100% + 4px);right:0;min-width:180px;
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  box-shadow:0 8px 24px rgba(0,0,0,.45);padding:4px;z-index:50;
+  display:none;flex-direction:column}
+.sp-overflow-menu[data-open="true"]{display:flex}
+.sp-overflow-item{padding:8px 12px;border-radius:var(--radius-sm);font-size:.8125rem;
+  color:var(--text-primary);text-align:left;background:transparent;border:none;cursor:pointer;
+  display:flex;align-items:center;gap:8px}
+.sp-overflow-item:hover:not(:disabled),.sp-overflow-item:focus-visible{background:var(--bg);outline:none}
+.sp-overflow-item:disabled{color:var(--text-muted);cursor:not-allowed;opacity:.55}
+.sp-overflow-item[data-danger="true"]{color:var(--red-light)}
+.sp-overflow-item[data-danger="true"]:hover{background:rgba(218,54,51,.1)}
+.sp-overflow-divider{height:1px;background:var(--border);margin:4px 6px}
+
+/* Agents region */
+.sp-agents{flex-shrink:0;padding:12px 18px;border-bottom:1px solid var(--border)}
+.sp-section-header{display:flex;align-items:center;gap:8px;padding:4px 0;cursor:pointer;
+  background:transparent;border:none;color:var(--text-secondary);width:100%}
+.sp-section-label{font-size:.6875rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;
+  color:var(--text-secondary)}
+.sp-section-chevron{margin-left:auto;font-size:.6rem;color:var(--text-muted);transition:transform .15s}
+.sp-agents[data-collapsed="false"] .sp-section-chevron{transform:rotate(90deg)}
+.sp-agents-list{display:grid;grid-template-columns:1fr;gap:6px;margin-top:8px}
+.sp-agents[data-collapsed="true"] .sp-agents-list{display:none}
+.sp-agent-row{background:var(--bg);border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.sp-agent-row-head{display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;
+  background:transparent;border:none;width:100%;text-align:left}
+.sp-agent-row-head:hover{background:var(--surface)}
+.sp-agent-row-chevron{font-size:.55rem;color:var(--text-muted);transition:transform .15s;width:8px}
+.sp-agent-row[data-expanded="true"] .sp-agent-row-chevron{transform:rotate(90deg)}
+.sp-agent-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.sp-agent-name{font-weight:600;font-size:.8125rem;color:var(--text-primary)}
+.sp-agent-verdict{margin-left:auto;font-size:.6875rem;font-weight:600;padding:2px 8px;border-radius:10px}
+.sp-agent-row-body{display:none;padding:10px 14px;border-top:1px solid var(--border);
+  font-family:'SF Mono','Fira Code',monospace;font-size:.75rem;color:var(--text-secondary);
+  line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:200px;overflow-y:auto}
+.sp-agent-row[data-expanded="true"] .sp-agent-row-body{display:block}
+.sp-agents-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+/* Long feedback messages (e.g. requirements checklists) get a capped scroll
+   so they don't push the chat region out of the viewport. */
+.sp-agents .feedback-block-msg{max-height:200px;overflow-y:auto;padding-right:6px}
+
+/* Chat region (own scroll) */
+.sp-chat{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+.sp-chat-subheader{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;
+  padding:10px 18px;background:var(--surface);border-bottom:1px solid var(--border)}
+.sp-chat-subheader .sp-section-label{flex:1}
+.sp-chat-thread{flex:1;overflow-y:auto;padding:14px 18px 8px;display:flex;flex-direction:column;gap:10px}
+
+/* Pinned task card */
+.sp-pinned-card{background:var(--bg);border:1px solid var(--border);border-radius:8px;
+  padding:12px 14px;display:flex;flex-direction:column;gap:6px}
+.sp-pinned-head{display:flex;align-items:center;gap:8px}
+.sp-pinned-icon{font-size:.95rem;color:var(--amber)}
+.sp-pinned-label{font-size:.6875rem;font-weight:600;text-transform:uppercase;letter-spacing:.06em;
+  color:var(--text-secondary)}
+.sp-pinned-actions{margin-left:auto;display:flex;gap:6px}
+.sp-pinned-btn{background:transparent;border:none;color:var(--text-secondary);font-size:.75rem;
+  padding:2px 6px;border-radius:4px;cursor:pointer}
+.sp-pinned-btn:hover,.sp-pinned-btn:focus-visible{background:var(--surface);color:var(--text-primary);outline:none}
+.sp-pinned-body{font-size:.875rem;color:var(--text-primary);line-height:1.5;white-space:pre-wrap;
+  word-break:break-word}
+.sp-pinned-body[data-collapsed="true"]{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;
+  overflow:hidden}
+.sp-pinned-expand{align-self:flex-start;background:transparent;border:none;color:var(--blue);
+  font-size:.75rem;cursor:pointer;padding:2px 0}
+.sp-pinned-expand:hover{text-decoration:underline}
+
+/* Day divider + message bubbles */
+.sp-day-divider{display:flex;align-items:center;gap:8px;color:var(--text-muted);font-size:.6875rem;
+  text-transform:uppercase;letter-spacing:.06em;margin:6px 0}
+.sp-day-divider::before,.sp-day-divider::after{content:'';flex:1;height:1px;background:var(--border)}
+.sp-msg{display:flex;flex-direction:column;gap:4px;max-width:90%}
+.sp-msg.is-user{align-self:flex-end;align-items:flex-end}
+.sp-msg.is-coordinator,.sp-msg.is-system{align-self:flex-start;align-items:flex-start}
+.sp-msg-meta{font-size:.6875rem;color:var(--text-muted);display:flex;align-items:center;gap:6px}
+.sp-msg-author{color:var(--text-secondary);font-weight:600}
+.sp-msg-bubble{padding:10px 13px;border-radius:10px;font-size:.875rem;line-height:1.5;
+  white-space:pre-wrap;word-wrap:break-word;border:1px solid transparent}
+.sp-msg-bubble[data-collapsed="true"]{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;
+  overflow:hidden;white-space:normal}
+.sp-msg-toggle{background:transparent;border:none;font-size:.75rem;cursor:pointer;padding:2px 0;
+  align-self:flex-start;color:var(--blue)}
+.sp-msg.is-user .sp-msg-toggle{color:#cfe5ff}
+.sp-msg-toggle:hover{text-decoration:underline}
+.sp-msg.is-user .sp-msg-bubble{background:var(--blue);color:#fff;border-color:var(--blue)}
+.sp-msg.is-coordinator .sp-msg-bubble{background:var(--bg);color:var(--text-primary);border-color:var(--border)}
+.sp-msg.is-system .sp-msg-bubble{background:transparent;color:var(--text-secondary);border-color:var(--border);
+  border-style:dashed}
+.sp-msg-verdict{font-size:.625rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em;
+  opacity:.75;margin-right:4px}
+.sp-thread-empty{color:var(--text-secondary);font-size:.875rem;line-height:1.5;text-align:center;
+  padding:24px 12px;max-width:380px;align-self:center}
+
+/* Composer */
+.sp-composer{flex-shrink:0;padding:12px 18px 14px;border-top:1px solid var(--border);background:var(--surface)}
+.sp-composer-box{position:relative;background:var(--bg);border:1px solid var(--border);
+  border-radius:10px;padding:8px 10px;transition:border-color .15s}
+.sp-composer-box:focus-within{border-color:var(--blue)}
+.sp-composer textarea{width:100%;min-height:38px;max-height:160px;background:transparent;border:none;
+  outline:none;color:var(--text-primary);font-family:inherit;font-size:.875rem;line-height:1.45;
+  resize:none;padding:4px 70px 4px 4px}
+.sp-composer-actions{position:absolute;right:6px;bottom:6px;display:flex;align-items:center;gap:6px}
+.sp-composer-hint{font-size:.6875rem;color:var(--text-muted);padding:0 4px}
+.sp-composer-send{padding:5px 12px;font-size:.75rem;border-radius:6px;background:var(--blue);color:#fff;
+  font-weight:600;border:none;cursor:pointer}
+.sp-composer-send:disabled{opacity:.4;cursor:not-allowed}
+.sp-composer-cancel{padding:5px 10px;font-size:.75rem;border-radius:6px;background:var(--bg);
+  border:1px solid var(--border);color:var(--text-secondary);cursor:pointer}
+.sp-composer-affordances{font-size:.6875rem;color:var(--text-muted);margin-top:6px;display:flex;gap:10px}
+.sp-composer-affordances code{background:var(--bg);border:1px solid var(--border);border-radius:4px;
+  padding:1px 5px;font-family:'SF Mono','Fira Code',monospace;font-size:.625rem}
+
+/* Confirm dialog (reuses .modal markup, just adds focus styling) */
+.modal[data-confirm="true"] .modal-body{font-size:.875rem;color:var(--text-secondary);line-height:1.5}
+.modal[data-confirm="true"] .modal-body strong{color:var(--text-primary)}
+
+/* Responsive: full width on small viewports */
+@media (max-width: 639px){
+  :root{--panel-width:100vw}
+  .slide-panel{border-left:none}
+}
+@media (min-width: 640px) and (max-width: 1023px){
+  :root{--panel-width:420px}
+}
 `;
 
   const JS = `
@@ -436,12 +631,25 @@ const state = {
   liveOutput: {},      // teamId -> [ { agent, text, type } ]
   chatMessages: {},    // teamId -> [ { role, content, timestamp, verdict? } ]
   chatPending: {},     // teamId -> bool (true while a coordinator turn is in flight)
+  malformedOutputs: {}, // teamId -> instance -> { count, lastRaw } — transient marker for verdict-parse retries
   currentView: 'dashboard', // 'dashboard' | 'project'
   currentProject: null,
   topTab: 'portfolio',      // 'portfolio' | 'code' — outer view selector
   codeServer: { state: 'idle', port: null, error: null, installCommand: null },
   panelOpen: false,
   panelTeamId: null,
+  // Side panel redesign UI state — purely client-side; see docs/side-panel-redesign.md.
+  panelUI: {
+    agentsCollapsed: false,        // global collapse for AGENTS region
+    pinnedTaskExpanded: false,     // pinned task collapsed by default per spec
+    overflowOpen: false,           // ⋮ menu open
+    overflowReturnFocusId: null,   // element id to refocus when the menu closes
+    confirmDeleteReturnFocusId: null,
+    expandedAgents: {},            // instance name -> bool
+    expandedMessages: {},          // timestamp -> bool
+    securityResultCollapsed: {},   // teamId -> bool
+    inlineOverflowTeamId: null,    // teamId whose inline-detail ⋮ menu is open, or null
+  },
   selectedCompact: null,
   activeFilter: null,
   projectFilter: {},   // projectPath -> filter
@@ -450,10 +658,89 @@ const state = {
   sseConnected: false,
   securityResults: {}, // teamId -> result string
   runtime: null,
+  // Claude account auth (subscription/OAuth). Populated by GET /api/auth/status
+  // on dashboard load and after sign-in/out actions. Shape mirrors the CLI's
+  // "claude auth status --json" plus { available, engineConflicts, loginInProgress }.
+  auth: { available: false, loggedIn: false, loading: true },
+  authPollTimer: null,
 };
 
 // ---- Helpers ----
 function esc(s) { if (!s) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+// Render the small markdown subset emitted by the security-review agent prompt.
+// Returns { verdict, body }. verdict is 'PASSED' or 'CONCERNS' if found in the
+// first non-empty line, else null. body is safe HTML — every text fragment is
+// HTML-escaped before any inline marker (** or backticks) is rewritten to a tag.
+function formatSecurityReview(raw) {
+  var text = (raw == null ? '' : String(raw)).replace(/\\r\\n/g, '\\n').trim();
+  if (!text) return { verdict: null, body: '' };
+  var verdict = null;
+  var lines = text.split('\\n');
+  // First non-empty line: look for the verdict marker.
+  for (var i = 0; i < lines.length; i++) {
+    var trimmed = lines[i].trim();
+    if (!trimmed) continue;
+    var m = trimmed.match(/^\\**\\s*(PASSED|CONCERNS)\\s*\\**/i);
+    if (m) {
+      verdict = m[1].toUpperCase();
+      // Strip the verdict token from that line so it doesn't repeat in the body.
+      lines[i] = trimmed.replace(m[0], '').replace(/^[\\s\\-—:]+/, '');
+    }
+    break;
+  }
+
+  function renderInline(s) {
+    // Escape first; then turn the markdown markers (which survive escaping)
+    // into known-safe tags.
+    var out = esc(s);
+    // Inline code: \`x\` -> <code>x</code>
+    out = out.replace(/\`([^\`]+)\`/g, '<code>$1</code>');
+    // Bold: **x** -> <strong>x</strong>
+    out = out.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
+    return out;
+  }
+
+  var html = '';
+  var inList = false;
+  var inCode = false;
+  var codeBuf = [];
+  for (var j = 0; j < lines.length; j++) {
+    var line = lines[j];
+    // Fenced code block
+    if (/^\\s*\`\`\`/.test(line)) {
+      if (!inCode) { inCode = true; codeBuf = []; }
+      else {
+        inCode = false;
+        html += '<pre class="sr-code">' + esc(codeBuf.join('\\n')) + '</pre>';
+      }
+      continue;
+    }
+    if (inCode) { codeBuf.push(line); continue; }
+
+    var stripped = line.replace(/^\\s+/, '');
+    // Heading
+    var hm = stripped.match(/^(#{1,6})\\s+(.+)$/);
+    if (hm) {
+      if (inList) { html += '</ul>'; inList = false; }
+      var level = Math.min(6, hm[1].length + 3); // h1 -> h4 visually
+      html += '<h' + level + ' class="sr-h">' + renderInline(hm[2]) + '</h' + level + '>';
+      continue;
+    }
+    // List item: -, *, or numbered "1."
+    var lm = stripped.match(/^(?:[-*]|\\d+\\.)\\s+(.+)$/);
+    if (lm) {
+      if (!inList) { html += '<ul class="sr-list">'; inList = true; }
+      html += '<li>' + renderInline(lm[1]) + '</li>';
+      continue;
+    }
+    if (inList) { html += '</ul>'; inList = false; }
+    if (!stripped) { html += ''; continue; }
+    html += '<p class="sr-p">' + renderInline(line) + '</p>';
+  }
+  if (inList) html += '</ul>';
+  if (inCode) html += '<pre class="sr-code">' + esc(codeBuf.join('\\n')) + '</pre>';
+  return { verdict: verdict, body: html };
+}
 function $(id) { return document.getElementById(id); }
 function qs(sel, el) { return (el||document).querySelector(sel); }
 function qsa(sel, el) { return (el||document).querySelectorAll(sel); }
@@ -713,11 +1000,11 @@ function renderRunnerControls(projPath) {
   var stop = '<button class="btn btn-sm btn-secondary" onclick="event.stopPropagation();window.__runner.stop(\\'' + encPath + '\\')">Stop</button>';
   if (st === 'starting') {
     var fwLabel = r && r.framework ? esc(r.framework) : 'dev server';
-    return '<span class="mini-pill pill-active">Starting ' + fwLabel + '…</span>' + stop;
+    return '<span class="mini-pill pill-active" onclick="event.stopPropagation()">Starting ' + fwLabel + '…</span>' + stop;
   }
   if (st === 'ready' && r && r.url) {
     var open = '<button class="btn btn-sm btn-green" onclick="event.stopPropagation();window.open(\\'' + esc(r.url) + '\\',\\'_blank\\')">Open</button>';
-    var runningPill = '<span class="mini-pill pill-active" title="' + esc(r.url) + '">Running</span>';
+    var runningPill = '<span class="mini-pill pill-active" title="' + esc(r.url) + '" onclick="event.stopPropagation()">Running</span>';
     return runningPill + open + stop;
   }
   if (st === 'error') {
@@ -736,6 +1023,38 @@ function filterTeams(teams, filter) {
     if (filter === 'attention') return cat === 'attention' || teamNeedsAttention(tid);
     return cat === filter;
   });
+}
+
+// ---- Render: Claude account auth pill ----
+// Surfaces three states: connected (green w/ email + tier), not connected
+// (red, click-to-sign-in), and env-var conflict (amber, ANTHROPIC_API_KEY etc.
+// set in the shell — engine will refuse to start).
+function renderAuthPill() {
+  var a = state.auth || {};
+  if (a.loading) {
+    return '<span class="auth-pill auth-pill-loading" title="Checking Claude account status…">Checking auth…</span>';
+  }
+  if (a.engineConflicts && a.engineConflicts.length > 0) {
+    var keyList = a.engineConflicts.join(', ');
+    return '<button class="auth-pill auth-pill-conflict" title="' + esc(keyList) + ' is set in your environment. Unset it for subscription auth." onclick="window.__auth.openModal()">'
+      + '<span class="auth-dot"></span>Env conflict</button>';
+  }
+  if (!a.available) {
+    return '<button class="auth-pill auth-pill-error" title="The claude CLI was not found on PATH. Install Claude Code to enable agent runs." onclick="window.__auth.openModal()">'
+      + '<span class="auth-dot"></span>CLI not found</button>';
+  }
+  if (a.loginInProgress) {
+    return '<button class="auth-pill auth-pill-pending" title="Complete sign-in in your browser…" onclick="window.__auth.openModal()">'
+      + '<span class="auth-dot"></span>Signing in…</button>';
+  }
+  if (a.loggedIn) {
+    var label = a.email || 'Claude account';
+    var tier = a.subscriptionType ? ' · ' + a.subscriptionType : '';
+    return '<button class="auth-pill auth-pill-ok" title="Click to manage" onclick="window.__auth.openModal()">'
+      + '<span class="auth-dot"></span>' + esc(label) + esc(tier) + '</button>';
+  }
+  return '<button class="auth-pill auth-pill-off" onclick="window.__auth.openModal()">'
+    + '<span class="auth-dot"></span>Connect Claude account</button>';
 }
 
 // ---- Render: Nav Rail ----
@@ -877,6 +1196,7 @@ function renderDashboardView() {
   var hasProjects = paths.length > 0;
   var html = '<div class="dashboard-header"><div class="dashboard-heading-row"><h1>Portfolio</h1>';
   html += '<span class="runtime-pill">' + esc(runtimeLabel) + '</span>';
+  html += renderAuthPill();
   // Hide the top-right + Add Project button when the empty state is showing
   // (the empty-state CTA below is the primary affordance in that case).
   if (hasProjects) {
@@ -922,7 +1242,7 @@ function renderDashboardView() {
     // Per-project "+ Add Team" pre-fills the project in the create modal.
     // Always visible so zero-team projects (no empty-state card) still have
     // a one-click affordance from the dashboard.
-    html += '<button class="btn btn-sm btn-primary" onclick="event.stopPropagation();window.__modal.createTeam(\\'' + esc(p).replace(/'/g,"\\\\'") + '\\')">+ Add Team</button>';
+    html += '<button class="btn btn-sm btn-outline" onclick="event.stopPropagation();window.__modal.createTeam(\\'' + esc(p).replace(/'/g,"\\\\'") + '\\')">+ Add Team</button>';
     // "Remove from portfolio" — only enabled when the project has zero teams.
     // Backend blocks the removal if teams exist anyway; the UI just keeps the
     // affordance hidden in the common case to reduce destructive-click anxiety.
@@ -940,7 +1260,7 @@ function renderDashboardView() {
         html += '<div style="grid-column:1/-1;padding:32px 24px;text-align:center;border:1px dashed var(--border);border-radius:8px">';
         html += '<h3 style="margin-bottom:6px;color:var(--text-primary)">No teams yet</h3>';
         html += '<p style="margin-bottom:14px;color:var(--text-secondary)">Add a team to start work on ' + esc(proj.name) + '. Each team runs the Security → Build → Sweep → Review pipeline independently.</p>';
-        html += '<button class="btn btn-primary" onclick="window.__modal.createTeam(\\'' + esc(p).replace(/'/g,"\\\\'") + '\\')">+ Add Team</button>';
+        html += '<button class="btn btn-outline" onclick="window.__modal.createTeam(\\'' + esc(p).replace(/'/g,"\\\\'") + '\\')">+ Add Team</button>';
         html += '</div>';
       }
       // Otherwise: zero-team projects from prior sessions just show their
@@ -974,7 +1294,7 @@ function renderProjectDetailView() {
   html += '<h1>' + esc(proj.name) + '</h1>';
   html += '<div style="margin-left:auto;display:flex;gap:6px;align-items:center">';
   html += renderRunnerControls(p);
-  html += '<button class="btn btn-sm btn-primary" onclick="window.__modal.createTeam(\\'' + esc(p).replace(/'/g,"\\\\'") + '\\')">+ Add Team</button>';
+  html += '<button class="btn btn-sm btn-outline" onclick="window.__modal.createTeam(\\'' + esc(p).replace(/'/g,"\\\\'") + '\\')">+ Add Team</button>';
   var doneCountDetail = pStats.done + pStats.attention;
   if (doneCountDetail > 0) {
     html += '<button class="btn btn-sm btn-secondary" onclick="window.__modal.clearDoneTeams(\\'' + esc(p).replace(/'/g,"\\\\'") + '\\')">Clear done (' + doneCountDetail + ')</button>';
@@ -1015,8 +1335,15 @@ function renderProjectDetailView() {
 function renderInlineDetail(teamId) {
   var t = state.teams[teamId];
   if (!t) return '';
+  var teamIdAttr = esc(teamId).replace(/'/g, "\\\\'");
   var html = '<div class="inline-detail">';
-  html += '<div class="inline-detail-header"><h3>' + esc(t.teamName || teamId) + '</h3></div>';
+  html += '<div class="inline-detail-header">';
+  html +=   '<h3>' + esc(t.teamName || teamId) + '</h3>';
+  html +=   '<div class="sp-overflow-wrap inline-overflow-wrap">';
+  html +=     '<button class="sp-icon-btn" id="inlineOverflowBtn-' + esc(teamId) + '" title="More actions" aria-label="Team actions" aria-haspopup="menu" aria-expanded="' + (state.panelUI.inlineOverflowTeamId === teamId ? 'true' : 'false') + '" onclick="window.__panel.toggleInlineOverflow(\\'' + teamIdAttr + '\\', event)">&#8942;</button>';
+  html +=     renderInlineOverflowMenu(teamId);
+  html +=   '</div>';
+  html += '</div>';
   // Feedback blocks
   html += renderFeedbackBlocks(teamId);
   // Summary info
@@ -1071,30 +1398,14 @@ function renderTeamActionButtons(teamId) {
   if (!t) return '';
   var ph = t.currentPhase;
   var html = '';
-  var steerTarget = getSteerTarget(t);
-  if (steerTarget) {
-    html += '<button class="btn btn-sm btn-secondary" onclick="window.__modal.steerAgent(\\'' + esc(teamId) + '\\',\\'' + steerTarget + '\\')">Steer ' + steerTarget + '</button>';
-  }
-  if (ph !== 'done' && ph !== 'merged' && ph !== 'cancelled') {
-    html += '<button class="btn btn-sm btn-danger" onclick="window.__modal.stopPipeline(\\'' + esc(teamId) + '\\')">Terminate team</button>';
-  }
-  // Preview is intentionally NOT a team-level action — it lives at the
-  // project level (project header) because the preview reflects the
-  // project's current filesystem state, not any single task's output.
+  // Destructive actions (Terminate, Delete) live in the inline-detail ⋮ menu
+  // alongside Rename/Duplicate/Archive — mirrors the side panel pattern and
+  // keeps red buttons out of the inline action row.
   if (ph === 'done') {
-    html += '<button class="btn btn-sm btn-purple" onclick="window.__modal.createPR(\\'' + esc(teamId) + '\\')">Create PR</button>';
     html += '<button class="btn btn-sm btn-secondary" onclick="window.__modal.securityReview(\\'' + esc(teamId) + '\\')">Security Review</button>';
   }
   if (ph === 'pr_open' && t.prUrl) {
     html += '<a href="' + esc(t.prUrl) + '" target="_blank" class="btn btn-sm btn-purple">View PR #' + (t.prNumber||'') + '</a>';
-  }
-  // Assign Task / Assign New Task removed in PR #18 — Coordinator-1's chat
-  // panel triggers the same pipeline via its TRIGGER_PIPELINE verdict.
-  // The POST /api/teams/:id/task endpoint stays for API users.
-  // Delete is available in any terminal phase (done/merged/cancelled/errored)
-  // since the existing Terminate-team button already covers active phases.
-  if (ph === 'done' || ph === 'merged' || ph === 'cancelled' || ph === 'errored') {
-    html += '<button class="btn btn-sm btn-danger" onclick="window.__modal.deleteTeam(\\'' + esc(teamId) + '\\')">Delete</button>';
   }
   return html;
 }
@@ -1160,12 +1471,17 @@ function renderSummaryContent(teamId) {
     var verdictStyle = getVerdictStyle(verdict);
     var dotColor = getAgentDotColor(verdict, agState, agentColors[inst]);
 
+    var malformed = (state.malformedOutputs[teamId] || {})[inst];
     html += '<div class="agent-section" onclick="toggleAgentSection(this)">';
     html += '<div class="agent-section-header">';
     html += '<span class="agent-chevron">&#9654;</span>';
     html += '<span class="agent-dot-sm" style="background:' + dotColor + '"></span>';
     html += '<span class="agent-name">' + inst + '</span>';
     html += '<span class="agent-verdict" style="' + verdictStyle + '">' + esc(verdict) + '</span>';
+    if (malformed && malformed.count > 0) {
+      var mfTitle = 'Verdict parse failed ' + malformed.count + 'x — last: ' + (malformed.lastRaw || '').substring(0, 200);
+      html += '<span class="mini-pill pill-error" title="' + esc(mfTitle) + '" style="margin-left:6px">malformed &times;' + malformed.count + '</span>';
+    }
     html += '</div>';
     html += '<div class="agent-section-body">';
     html += '<pre class="agent-output">' + esc(agSummary) + '</pre>';
@@ -1235,7 +1551,8 @@ window.toggleAgentSection = function(el) {
   el.classList.toggle('expanded');
 };
 
-// ---- Render: Panel ----
+// ---- Render: Panel (4 regions: Header / Agents / Chat / Composer) ----
+// See docs/side-panel-redesign.md.
 function renderPanel() {
   var overlay = $('panelOverlay');
   var panel = $('slidePanel');
@@ -1247,78 +1564,369 @@ function renderPanel() {
   overlay.classList.add('open');
   panel.classList.add('open');
 
-  var t = state.teams[state.panelTeamId];
-  $('panelTitle').textContent = t ? (t.teamName || state.panelTeamId) : state.panelTeamId;
-
-  var body = $('panelBody');
-  var html = '';
-  // Always show feedback blocks at top
-  html += renderFeedbackBlocks(state.panelTeamId);
-  html += renderSummaryContent(state.panelTeamId);
-  html += renderChatPanel(state.panelTeamId);
-  body.innerHTML = html;
+  var teamId = state.panelTeamId;
+  // Preserve scroll position across re-renders (innerHTML resets scrollTop to 0).
+  // Callers that want a different position set state.panelUI._scrollIntent.
+  var prevThread = $('panelChatThread');
+  var prevScroll = prevThread ? prevThread.scrollTop : null;
+  $('panelHeader').innerHTML = renderPanelHeader(teamId);
+  $('panelAgents').innerHTML = renderPanelAgents(teamId);
+  $('panelAgents').setAttribute('data-collapsed', state.panelUI.agentsCollapsed ? 'true' : 'false');
+  $('panelChatSubheader').innerHTML = renderPanelChatSubheader();
+  $('panelChatThread').innerHTML = renderPanelChatThread(teamId);
+  $('panelComposer').innerHTML = renderPanelComposer(teamId);
+  setTimeout(function() {
+    var thread = $('panelChatThread');
+    if (thread) {
+      if (state.panelUI._scrollIntent === 'bottom') {
+        thread.scrollTop = thread.scrollHeight;
+      } else if (state.panelUI._scrollIntent === 'top') {
+        thread.scrollTop = 0;
+      } else if (prevScroll !== null) {
+        thread.scrollTop = prevScroll;
+      }
+      state.panelUI._scrollIntent = null;
+    }
+    // Wire Enter-to-send on the composer textarea. Shift+Enter still inserts a
+    // newline. Skip while an IME composition is active so CJK input isn't sent
+    // mid-composition.
+    var ta = $('chatInput-' + teamId);
+    if (ta && !ta.dataset.kbBound) {
+      ta.addEventListener('keydown', function(ev) {
+        if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing) {
+          ev.preventDefault();
+          window.__api.sendChat(null, teamId);
+        }
+      });
+      ta.dataset.kbBound = '1';
+    }
+  }, 0);
 }
 
-// ---- Render: Team Chat Panel (Coordinator-1 conversation) ----
-function renderChatPanel(teamId) {
-  var messages = state.chatMessages[teamId] || [];
-  var pending = !!state.chatPending[teamId];
-  var team = state.teams[teamId];
+// ---- Render: Panel Header ----
+function renderPanelHeader(teamId) {
+  var t = state.teams[teamId];
+  var teamName = t ? (t.teamName || teamId) : teamId;
+  var ph = t ? (t.currentPhase || 'pre_work') : 'pre_work';
+  var statusInfo = getCardStatusInfo(ph, teamNeedsAttention(teamId), teamId);
+  var statusTone = getStatusTone(ph, teamNeedsAttention(teamId));
+  var progress = getProgressModel(t);
 
-  var html = '<div class="chat-panel">';
-  html += '<div class="chat-panel-header">Chat with Coordinator-1</div>';
-  html += '<div class="chat-log" id="chatLog-' + esc(teamId) + '">';
+  var projectPath = t && t.projectPath ? t.projectPath : '';
+  var projectName = projectPath && state.projects[projectPath] ? state.projects[projectPath].name : projectPath;
+  var crumbParts = [];
+  if (projectName) crumbParts.push(esc(projectName));
+  crumbParts.push(esc(teamName));
+  var breadcrumb = crumbParts.join(' <span style="color:var(--text-muted)">/</span> ');
 
-  if (messages.length === 0) {
-    // Empty-state hint. If the team had a previous task (existing teams that
-    // pre-date the chat feature), surface it as a synthetic system message so
-    // the conversation has context.
-    if (team && team.currentTask && team.currentTask.description) {
-      html += '<div class="chat-msg chat-msg-system">';
-      html +=   '<div class="chat-bubble chat-bubble-system">';
-      html +=     '<div class="chat-bubble-meta">Original task</div>';
-      html +=     esc(team.currentTask.description);
-      html +=   '</div>';
-      html += '</div>';
-    } else {
-      html += '<div class="chat-empty">Send a message to get started. Your first message becomes the team\\'s task.</div>';
-    }
+  var elapsed = t && t.createdAt ? elapsedSince(t.createdAt) : '';
+  var revisions = t && t.counters ? t.counters.revisions : 0;
+  var rejections = t && t.counters ? t.counters.rejections : 0;
+  var teamIdAttr = esc(teamId).replace(/'/g, "\\\\'");
+
+  var html = '';
+  html += '<div class="sp-header-top">';
+  html +=   '<div class="sp-header-title" title="' + esc(teamName) + '">' + esc(teamName) + '</div>';
+  html +=   '<div class="sp-overflow-wrap">';
+  html +=     '<button class="sp-icon-btn" id="panelOverflowBtn" title="More actions" aria-label="Team actions" aria-haspopup="menu" aria-expanded="' + (state.panelUI.overflowOpen ? 'true' : 'false') + '" onclick="window.__panel.toggleOverflow(event)">&#8942;</button>';
+  html +=     renderOverflowMenu(teamId);
+  html +=   '</div>';
+  html +=   '<button class="sp-icon-btn" aria-label="Close panel" onclick="window.__nav.closePanel()">&#10005;</button>';
+  html += '</div>';
+  if (breadcrumb) html += '<div class="sp-breadcrumb">' + breadcrumb + '</div>';
+  html += '<div class="sp-status-row">';
+  html +=   '<span class="sp-status-pill" data-tone="' + statusTone + '" aria-label="Status: ' + esc(statusInfo.label) + '"><span class="sp-status-dot" aria-hidden="true"></span>' + esc(statusInfo.label) + '</span>';
+  html +=   '<div class="sp-progress" role="progressbar" aria-label="Pipeline progress" aria-valuemin="0" aria-valuemax="' + progress.labels.length + '" aria-valuenow="' + (progress.complete ? progress.labels.length : progress.index) + '">';
+  var failure = ph === 'errored' || ph === 'cancelled';
+  for (var s = 0; s < progress.labels.length; s++) {
+    var cls = '';
+    if (failure) cls = s <= progress.index ? 'fail' : '';
+    else if (s < progress.index || progress.complete) cls = 'past';
+    else if (s === progress.index) cls = 'current';
+    html += '<span class="sp-progress-tick ' + cls + '" title="' + esc(progress.labels[s]) + '"></span>';
   }
+  html +=   '</div>';
+  html +=   '<span class="sp-progress-label">' + esc(elapsed) + '</span>';
+  html += '</div>';
+  html += '<div class="sp-stats-row">';
+  html +=   '<span><b>' + revisions + '</b> revisions</span>';
+  html +=   '<span><b>' + rejections + '</b> rejections</span>';
+  html += '</div>';
+  if (ph === 'cancelled') {
+    html += '<div class="sp-cancelled-note">Cancelled teams can be deleted or kept as a record, but not restarted. To run the task again, create a new team.</div>';
+  }
+  return html;
+}
 
-  for (var i = 0; i < messages.length; i++) {
-    var m = messages[i];
-    var bubbleClass = 'chat-bubble-' + (m.role === 'user' ? 'user' : (m.role === 'system' ? 'system' : 'coordinator'));
-    var rowClass = 'chat-msg chat-msg-' + (m.role === 'user' ? 'user' : (m.role === 'system' ? 'system' : 'coordinator'));
-    html += '<div class="' + rowClass + '">';
-    html +=   '<div class="chat-bubble ' + bubbleClass + '">';
-    if (m.role === 'coordinator' && m.verdict) {
-      html += '<div class="chat-bubble-meta">' + esc(m.verdict) + '</div>';
-    } else if (m.role === 'system') {
-      html += '<div class="chat-bubble-meta">system</div>';
+function getStatusTone(ph, hasAttn) {
+  if (hasAttn) return 'blocked';
+  if (ph === 'errored' || ph === 'cancelled') return 'blocked';
+  if (ph === 'pr_open') return 'pr';
+  if (ph === 'done' || ph === 'merged') return 'done';
+  if (ph === 'review') return 'review';
+  if (ph === 'pre_work' || ph === 'work' || ph === 'handoff') return 'active';
+  return 'muted';
+}
+
+function renderOverflowMenu(teamId) {
+  if (!state.panelUI.overflowOpen) return '';
+  return overflowMenuMarkup(teamId, 'panel');
+}
+
+function renderInlineOverflowMenu(teamId) {
+  if (state.panelUI.inlineOverflowTeamId !== teamId) return '';
+  return overflowMenuMarkup(teamId, 'inline');
+}
+
+// Markup shared by the side-panel ⋮ and the inline-detail ⋮ menus. Both
+// expose the same items (Rename/Duplicate/Archive disabled, Terminate, Delete)
+// so destructive actions stay in one consistent place across surfaces.
+function overflowMenuMarkup(teamId, context) {
+  var teamIdAttr = esc(teamId).replace(/'/g, "\\\\'");
+  var t = state.teams[teamId];
+  var ph = t ? t.currentPhase : 'pre_work';
+  var canDelete = ph === 'done' || ph === 'merged' || ph === 'cancelled' || ph === 'errored';
+  var canTerminate = !canDelete && ph !== 'pr_open';
+  var menuId = context === 'inline' ? 'inlineOverflowMenu-' + esc(teamId) : 'panelOverflowMenu';
+  var html = '<div class="sp-overflow-menu" role="menu" data-open="true" id="' + menuId + '" onkeydown="window.__panel.overflowKeydown(event)">';
+  html +=   '<button class="sp-overflow-item" role="menuitem" disabled title="Renaming is not yet supported.">Rename</button>';
+  html +=   '<button class="sp-overflow-item" role="menuitem" disabled title="Duplicating is not yet supported.">Duplicate</button>';
+  html +=   '<button class="sp-overflow-item" role="menuitem" disabled title="Archiving is not yet supported.">Archive</button>';
+  html +=   '<div class="sp-overflow-divider" role="separator"></div>';
+  if (canTerminate) {
+    html += '<button class="sp-overflow-item" role="menuitem" data-danger="true" onclick="window.__panel.terminateFromMenu(\\'' + teamIdAttr + '\\',\\'' + context + '\\')">Terminate team</button>';
+  }
+  html +=   '<button class="sp-overflow-item" role="menuitem" data-danger="true"' + (canDelete ? '' : ' disabled title="Available once the team is done, cancelled, or errored."') + ' onclick="window.__panel.openConfirmDelete(\\'' + teamIdAttr + '\\',\\'' + context + '\\')">Delete team</button>';
+  html += '</div>';
+  return html;
+}
+
+// ---- Render: Agents Region ----
+function renderPanelAgents(teamId) {
+  var t = state.teams[teamId];
+  var agentInstances = ['Security-1','Worker-1','Worker-2','Reviewer-1'];
+  var agentColors = { 'Security-1':'var(--red)', 'Worker-1':'var(--green)', 'Worker-2':'var(--green)', 'Reviewer-1':'var(--amber)' };
+
+  var html = '';
+  html += '<button class="sp-section-header" type="button" aria-expanded="' + (state.panelUI.agentsCollapsed ? 'false' : 'true') + '" aria-controls="panelAgentsList" onclick="window.__panel.toggleAgents()">';
+  html +=   '<span class="sp-section-label">Agents (' + agentInstances.length + ')</span>';
+  html +=   '<span class="sp-section-chevron" aria-hidden="true">&#9654;</span>';
+  html += '</button>';
+  html += '<div class="sp-agents-list" id="panelAgentsList">';
+
+  for (var a = 0; a < agentInstances.length; a++) {
+    var inst = agentInstances[a];
+    var agState = getEffectiveAgentState(t, inst);
+    var agOutput = getAgentOutput(teamId, inst);
+    var agSummary = getAgentSummaryText(t, inst, agState, agOutput);
+    var verdict = getAgentVerdict(agOutput, inst, agState);
+    var verdictStyle = getVerdictStyle(verdict);
+    var dotColor = getAgentDotColor(verdict, agState, agentColors[inst]);
+    var expanded = !!state.panelUI.expandedAgents[inst];
+    var instAttr = esc(inst).replace(/'/g, "\\\\'");
+
+    html += '<div class="sp-agent-row" data-expanded="' + (expanded ? 'true' : 'false') + '">';
+    html +=   '<button class="sp-agent-row-head" type="button" aria-expanded="' + (expanded ? 'true' : 'false') + '" onclick="window.__panel.toggleAgentRow(\\'' + instAttr + '\\')">';
+    html +=     '<span class="sp-agent-row-chevron" aria-hidden="true">&#9654;</span>';
+    html +=     '<span class="sp-agent-dot" style="background:' + dotColor + '" aria-hidden="true"></span>';
+    html +=     '<span class="sp-agent-name">' + esc(inst) + '</span>';
+    html +=     '<span class="sp-agent-verdict" style="' + verdictStyle + '" aria-label="Verdict: ' + esc(verdict) + '">' + esc(verdict) + '</span>';
+    html +=   '</button>';
+    html +=   '<div class="sp-agent-row-body">' + esc(agSummary) + '</div>';
+    html += '</div>';
+  }
+  html += '</div>';
+
+  // Latest ad-hoc Security Review result (when the user runs one from the
+  // action row below). Result lands here via the SSE 'security-review' event.
+  if (state.securityResults[teamId]) {
+    var collapsed = !!state.panelUI.securityResultCollapsed[teamId];
+    var teamIdAttr = esc(teamId).replace(/'/g, "\\\\'");
+    var formatted = formatSecurityReview(state.securityResults[teamId]);
+    html += '<div class="security-result-section" data-collapsed="' + (collapsed ? 'true' : 'false') + '">';
+    html +=   '<div class="security-result-head">';
+    html +=     '<h4>Security Review</h4>';
+    if (formatted.verdict) {
+      var vTone = formatted.verdict === 'PASSED' ? 'done' : 'blocked';
+      html +=   '<span class="sp-status-pill" data-tone="' + vTone + '" style="margin-left:8px"><span class="sp-status-dot" aria-hidden="true"></span>' + esc(formatted.verdict) + '</span>';
     }
-    html += esc(m.content || '');
+    html +=     '<div class="security-result-actions">';
+    html +=       '<button class="sp-pinned-btn" type="button" aria-label="' + (collapsed ? 'Expand' : 'Collapse') + ' security review" onclick="window.__panel.toggleSecurityResult(\\'' + teamIdAttr + '\\')">' + (collapsed ? '&#9660;' : '&#9650;') + '</button>';
+    html +=       '<button class="sp-pinned-btn" type="button" aria-label="Clear security review" title="Clear" onclick="window.__panel.clearSecurityResult(\\'' + teamIdAttr + '\\')">&#10005;</button>';
+    html +=     '</div>';
     html +=   '</div>';
+    if (!collapsed) {
+      html += '<div class="security-result">' + formatted.body + '</div>';
+    }
     html += '</div>';
   }
 
-  if (pending) {
-    html += '<div class="chat-msg chat-msg-coordinator"><div class="chat-bubble chat-bubble-coordinator chat-pending">Coordinator-1 is thinking…</div></div>';
+  // Inline feedback prompts + per-phase operational actions (Create PR,
+  // Security Review). Destructive actions (Terminate / Delete) live in the ⋮ menu.
+  html += renderFeedbackBlocks(teamId);
+  var actionHtml = renderPanelActionButtons(teamId);
+  if (actionHtml) {
+    html += '<div class="sp-agents-actions">' + actionHtml + '</div>';
+  }
+  return html;
+}
+
+// Same logic as the old renderTeamActionButtons but without the destructive
+// buttons — those moved into the ⋮ overflow menu. Steer is currently omitted
+// because the engine can't deliver a side message while the pipeline is
+// running, and the post-completion window where it works is confusing.
+function renderPanelActionButtons(teamId) {
+  var t = state.teams[teamId];
+  if (!t) return '';
+  var ph = t.currentPhase;
+  var html = '';
+  if (ph === 'done') {
+    html += '<button class="btn btn-sm btn-secondary" onclick="window.__modal.securityReview(\\'' + esc(teamId) + '\\')">Security Review</button>';
+  }
+  if (ph === 'pr_open' && t.prUrl) {
+    html += '<a href="' + esc(t.prUrl) + '" target="_blank" class="btn btn-sm btn-purple">View PR #' + (t.prNumber||'') + '</a>';
+  }
+  return html;
+}
+
+// ---- Render: Chat sub-header ----
+function renderPanelChatSubheader() {
+  return '<span class="sp-section-label">Chat with Coordinator</span>';
+}
+
+// ---- Render: Chat thread (pinned task card + messages + day dividers) ----
+function renderPanelChatThread(teamId) {
+  var team = state.teams[teamId];
+  var messages = state.chatMessages[teamId] || [];
+  var pending = !!state.chatPending[teamId];
+  var html = '';
+
+  // Pinned "Original Task" card — first child of the thread.
+  html += renderPinnedTaskCard(teamId, team);
+
+  if (messages.length === 0 && !pending) {
+    html += '<div class="sp-thread-empty">';
+    html +=   'No messages yet. Your original task is pinned above.<br>';
+    html +=   'Try asking the coordinator about scope, agents, or timeline.';
+    html += '</div>';
+    return html;
   }
 
-  html += '</div>'; // end chat-log
-
-  html += '<form class="chat-input-row" onsubmit="window.__api.sendChat(event, \\'' + esc(teamId).replace(/'/g, "\\\\'") + '\\')">';
-  html +=   '<textarea class="chat-input" id="chatInput-' + esc(teamId) + '" rows="2" placeholder="Type a message — e.g. \\'Build a settings page with dark mode\\' or \\'Why did Worker-2 flag X?\\'" ' + (pending ? 'disabled' : '') + '></textarea>';
+  var lastDay = null;
+  for (var i = 0; i < messages.length; i++) {
+    var m = messages[i];
+    var day = dayKey(m.timestamp);
+    if (day !== lastDay) {
+      html += '<div class="sp-day-divider" role="separator">' + esc(dayLabel(m.timestamp)) + '</div>';
+      lastDay = day;
+    }
+    html += renderMessageBubble(m);
+  }
   if (pending) {
-    // × cancel button — abort the in-flight coordinator turn. Mirrors
-    // Claude Code\\'s "stop generating" affordance. The deterministic
-    // pipeline keeps running if TRIGGER_PIPELINE had already fired.
-    html += '<button type="button" class="btn btn-secondary chat-send-btn" title="Cancel coordinator turn" onclick="window.__api.cancelChat(\\'' + esc(teamId).replace(/'/g, "\\\\'") + '\\')">&#10005;</button>';
+    html += '<div class="sp-msg is-coordinator">';
+    html +=   '<div class="sp-msg-meta"><span class="sp-msg-author">Coordinator</span><span>thinking…</span></div>';
+    html +=   '<div class="sp-msg-bubble" style="opacity:.7;font-style:italic">Coordinator is thinking…</div>';
+    html += '</div>';
+  }
+  return html;
+}
+
+function renderPinnedTaskCard(teamId, team) {
+  var taskText = team && team.currentTask ? (team.currentTask.description || team.currentTask).toString() : '';
+  if (!taskText) return '';
+
+  var html = '<div class="sp-pinned-card" role="region" aria-label="Original task">';
+  html +=   '<div class="sp-pinned-head">';
+  html +=     '<span class="sp-pinned-icon" aria-hidden="true">&#128204;</span>';
+  html +=     '<span class="sp-pinned-label">Original task</span>';
+  html +=     '<div class="sp-pinned-actions">';
+  html +=       '<button class="sp-pinned-btn" type="button" aria-label="' + (state.panelUI.pinnedTaskExpanded ? 'Collapse' : 'Expand') + ' original task" onclick="window.__panel.togglePinnedTask()">' + (state.panelUI.pinnedTaskExpanded ? '&#9650;' : '&#9660;') + '</button>';
+  html +=     '</div>';
+  html +=   '</div>';
+  html +=   '<div class="sp-pinned-body" data-collapsed="' + (state.panelUI.pinnedTaskExpanded ? 'false' : 'true') + '">' + esc(taskText) + '</div>';
+  if (!state.panelUI.pinnedTaskExpanded && (taskText.split(/\\n/).length > 3 || taskText.length > 220)) {
+    html += '<button class="sp-pinned-expand" type="button" onclick="window.__panel.togglePinnedTask()">Expand</button>';
+  } else if (state.panelUI.pinnedTaskExpanded) {
+    html += '<button class="sp-pinned-expand" type="button" onclick="window.__panel.togglePinnedTask()">Collapse</button>';
+  }
+  html += '</div>';
+  return html;
+}
+
+function renderMessageBubble(m) {
+  var role = m.role === 'user' ? 'user' : (m.role === 'system' ? 'system' : 'coordinator');
+  var author = role === 'user' ? 'You' : (role === 'system' ? 'System' : 'Coordinator');
+  var time = formatTime(m.timestamp);
+  var verdictPill = (role === 'coordinator' && m.verdict)
+    ? '<span class="sp-msg-verdict">' + esc(m.verdict) + '</span>'
+    : '';
+  var content = m.content || '';
+  // Match the pinned-card threshold: long messages render collapsed by default
+  // so the thread stays scannable. Each message remembers its own expanded
+  // state across re-renders, keyed by timestamp.
+  var isLong = content.split(/\\n/).length > 3 || content.length > 220;
+  var key = m.timestamp || '';
+  var expanded = !!state.panelUI.expandedMessages[key];
+  var collapsedAttr = (isLong && !expanded) ? ' data-collapsed="true"' : '';
+  var keyAttr = esc(key).replace(/'/g, "\\\\'");
+
+  var html = '<div class="sp-msg is-' + role + '">';
+  html +=   '<div class="sp-msg-meta">' + verdictPill + '<span class="sp-msg-author">' + esc(author) + '</span>' + (time ? '<span>' + esc(time) + '</span>' : '') + '</div>';
+  html +=   '<div class="sp-msg-bubble"' + collapsedAttr + '>' + esc(content) + '</div>';
+  if (isLong) {
+    html += '<button class="sp-msg-toggle" type="button" onclick="window.__panel.toggleMessage(\\'' + keyAttr + '\\')">' + (expanded ? 'Collapse' : 'Expand') + '</button>';
+  }
+  html += '</div>';
+  return html;
+}
+
+function dayKey(iso) {
+  if (!iso) return '__none__';
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) return '__none__';
+  return d.getFullYear() + '-' + (d.getMonth()+1) + '-' + d.getDate();
+}
+function dayLabel(iso) {
+  if (!iso) return 'Today';
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) return 'Today';
+  var now = new Date();
+  var sameDay = d.toDateString() === now.toDateString();
+  if (sameDay) return 'Today';
+  var yest = new Date(now.getTime() - 86400000);
+  if (d.toDateString() === yest.toDateString()) return 'Yesterday';
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+function formatTime(iso) {
+  if (!iso) return '';
+  var d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+
+// ---- Render: Composer ----
+function renderPanelComposer(teamId) {
+  var pending = !!state.chatPending[teamId];
+  var teamIdAttr = esc(teamId).replace(/'/g, "\\\\'");
+  var html = '';
+  html += '<form class="sp-composer-form" onsubmit="window.__api.sendChat(event, \\'' + teamIdAttr + '\\')">';
+  html +=   '<div class="sp-composer-box">';
+  html +=     '<textarea id="chatInput-' + esc(teamId) + '" rows="2" aria-label="Message to Coordinator" placeholder="Type a message — e.g. \\'Why did Worker-2 flag X?\\'"' + (pending ? ' disabled' : '') + '></textarea>';
+  html +=     '<div class="sp-composer-actions">';
+  if (pending) {
+    html +=     '<button type="button" class="sp-composer-cancel" aria-label="Cancel coordinator turn" onclick="window.__api.cancelChat(\\'' + teamIdAttr + '\\')">Cancel</button>';
   } else {
-    html += '<button type="submit" class="btn btn-primary chat-send-btn">Send</button>';
+    html +=     '<span class="sp-composer-hint" aria-hidden="true">&crarr;</span>';
+    html +=     '<button type="submit" class="sp-composer-send" aria-label="Send message">Send</button>';
   }
+  html +=     '</div>';
+  html +=   '</div>';
   html += '</form>';
-  html += '</div>'; // end chat-panel
+  html += '<div class="sp-composer-affordances" aria-hidden="true">';
+  html +=   '<span>Replying to Coordinator</span>';
+  html +=   '<span><code>&crarr;</code> send</span>';
+  html +=   '<span><code>Shift+&crarr;</code> newline</span>';
+  html += '</div>';
   return html;
 }
 
@@ -1384,18 +1992,168 @@ function refreshCodeFrame() {
   }
   // 5) ready + project selected — point iframe at folder
   const url = 'http://localhost:' + state.codeServer.port + '/?folder=' + encodeURIComponent(state.currentProject);
-  if (frame.src !== url) frame.src = url;
+  const overlay = document.getElementById('codeFrameOverlay');
+  if (frame.src !== url) {
+    // Show overlay BEFORE swapping src so the user never sees code-server's
+    // white bootstrap HTML. Fade it out once the iframe has loaded AND the
+    // workbench has had a moment to paint the dark theme.
+    if (overlay) {
+      overlay.hidden = false;
+      overlay.classList.remove('fade-out');
+    }
+    frame.onload = function() {
+      // VS Code keeps async-loading after the load event; give the theme
+      // ~500ms to settle before starting the fade.
+      setTimeout(function() {
+        if (overlay) overlay.classList.add('fade-out');
+        // Remove from the DOM flow after the transition completes so it
+        // doesn't sit on top of the iframe forever.
+        setTimeout(function() { if (overlay) overlay.hidden = true; }, 250);
+      }, 500);
+    };
+    frame.src = url;
+  }
   empty.style.display = 'none';
   frame.style.display = 'block';
 }
 
+// ---- Claude account auth ----
+// Drives the dashboard's "Connect your Claude account" flow. Talks to
+// /api/auth/{status,login,login/cancel,logout}. No tokens stored client-side;
+// the official CLI owns the credentials.
+window.__auth = {
+  fetchStatus: function() {
+    return fetch('/api/auth/status')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        state.auth = Object.assign({}, data, { loading: false });
+        renderCurrentView();
+        // If a login is in flight, keep polling so we flip to "connected"
+        // as soon as the OAuth callback completes.
+        if (state.auth.loginInProgress) {
+          if (!state.authPollTimer) {
+            state.authPollTimer = setInterval(window.__auth.fetchStatus, 2000);
+          }
+        } else if (state.authPollTimer) {
+          clearInterval(state.authPollTimer);
+          state.authPollTimer = null;
+        }
+        // Refresh the modal body too, if it's open.
+        if (currentModal === 'authModal') window.__auth.renderModalBody();
+      })
+      .catch(function() {
+        state.auth = { available: false, loggedIn: false, loading: false, error: 'Status check failed' };
+        renderCurrentView();
+      });
+  },
+  openModal: function() {
+    openModal('authModal');
+    window.__auth.renderModalBody();
+    window.__auth.fetchStatus();
+  },
+  closeModal: function() { closeModal(); },
+  renderModalBody: function() {
+    var body = $('authModalBody');
+    var footer = $('authModalFooter');
+    if (!body || !footer) return;
+    var a = state.auth || {};
+    var bodyHtml = '';
+    var footerHtml = '';
+    if (a.engineConflicts && a.engineConflicts.length > 0) {
+      bodyHtml += '<p style="color:var(--amber);font-weight:600;margin-bottom:8px">Environment conflict</p>';
+      bodyHtml += '<p>The following environment variable(s) are set and will block subscription auth:</p>';
+      bodyHtml += '<pre style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 10px;margin:8px 0;font-size:.8125rem">' + esc(a.engineConflicts.join('\\n')) + '</pre>';
+      bodyHtml += '<p style="color:var(--text-secondary);font-size:.8125rem">Unset each of these in the shell you launch the dashboard from, then restart the dashboard.</p>';
+      footerHtml = '<button class="btn btn-secondary" onclick="window.__auth.closeModal()">Close</button>';
+    } else if (!a.available) {
+      bodyHtml += '<p style="color:var(--red-light);font-weight:600;margin-bottom:8px">Claude CLI not found</p>';
+      bodyHtml += '<p>The dashboard delegates account auth to the official <strong>claude</strong> CLI, which it could not locate on your PATH.</p>';
+      bodyHtml += '<p style="color:var(--text-secondary);font-size:.8125rem;margin-top:8px">Install Claude Code, then reload this page.</p>';
+      footerHtml = '<button class="btn btn-secondary" onclick="window.__auth.closeModal()">Close</button>';
+    } else if (a.loginInProgress) {
+      bodyHtml += '<p>A browser window should have opened for sign-in. Complete the flow there; this dialog will update automatically when you are connected.</p>';
+      bodyHtml += '<p style="color:var(--text-secondary);font-size:.8125rem;margin-top:8px">If the browser did not open, run <code>claude auth login</code> in your terminal.</p>';
+      footerHtml  = '<button class="btn btn-secondary" onclick="window.__auth.cancelLogin()">Cancel sign-in</button>';
+      footerHtml += '<button class="btn btn-primary" disabled><span class="spinner"></span> Waiting…</button>';
+    } else if (a.loggedIn) {
+      bodyHtml += '<p>Connected as <strong>' + esc(a.email || '(unknown email)') + '</strong>.</p>';
+      var rows = [];
+      if (a.orgName) rows.push(['Organization', a.orgName]);
+      if (a.subscriptionType) rows.push(['Subscription', a.subscriptionType]);
+      if (a.authMethod) rows.push(['Method', a.authMethod]);
+      if (rows.length > 0) {
+        bodyHtml += '<table style="margin-top:10px;font-size:.8125rem;color:var(--text-secondary);width:100%">';
+        for (var i = 0; i < rows.length; i++) {
+          bodyHtml += '<tr><td style="padding:2px 0;width:120px">' + esc(rows[i][0]) + '</td><td style="color:var(--text-primary)">' + esc(rows[i][1]) + '</td></tr>';
+        }
+        bodyHtml += '</table>';
+      }
+      footerHtml  = '<button class="btn btn-secondary" onclick="window.__auth.signOut()">Sign out</button>';
+      footerHtml += '<button class="btn btn-primary" onclick="window.__auth.closeModal()">Done</button>';
+    } else {
+      bodyHtml += '<p>Connect your Claude account to enable the engine.</p>';
+      bodyHtml += '<p style="color:var(--text-secondary);font-size:.8125rem;margin-top:8px">Clicking <strong>Sign in</strong> opens your default browser to complete OAuth. The dashboard updates automatically when you finish.</p>';
+      footerHtml  = '<button class="btn btn-secondary" onclick="window.__auth.closeModal()">Cancel</button>';
+      footerHtml += '<button class="btn btn-primary" onclick="window.__auth.signIn()">Sign in</button>';
+    }
+    body.innerHTML = bodyHtml;
+    footer.innerHTML = footerHtml;
+  },
+  signIn: function() {
+    state.auth = Object.assign({}, state.auth, { loginInProgress: true });
+    window.__auth.renderModalBody();
+    renderCurrentView();
+    fetch('/api/auth/login', { method: 'POST' })
+      .then(function(r) {
+        if (!r.ok) return r.json().then(function(d){ throw new Error(d.error || 'Login start failed'); });
+        return r.json();
+      })
+      .then(function() {
+        // Start polling immediately so we detect completion ASAP.
+        if (!state.authPollTimer) state.authPollTimer = setInterval(window.__auth.fetchStatus, 2000);
+      })
+      .catch(function(e) {
+        state.auth = Object.assign({}, state.auth, { loginInProgress: false });
+        showToast(e.message, 'error');
+        window.__auth.renderModalBody();
+        renderCurrentView();
+      });
+  },
+  cancelLogin: function() {
+    fetch('/api/auth/login/cancel', { method: 'POST' })
+      .then(function() {
+        if (state.authPollTimer) { clearInterval(state.authPollTimer); state.authPollTimer = null; }
+        window.__auth.fetchStatus();
+      })
+      .catch(function(e) { showToast(e.message, 'error'); });
+  },
+  signOut: function() {
+    fetch('/api/auth/logout', { method: 'POST' })
+      .then(function(r) {
+        if (!r.ok) return r.json().then(function(d){ throw new Error(d.error || 'Logout failed'); });
+        return r.json();
+      })
+      .then(function() {
+        showToast('Signed out');
+        window.__auth.fetchStatus();
+      })
+      .catch(function(e) { showToast(e.message, 'error'); });
+  },
+};
+
 // ---- Run in Browser (Phase 4) ----
 window.__runner = {
   run: function(projectPath) {
+    // Open a placeholder tab synchronously on the user gesture so we can
+    // navigate it to the dev-server URL once runner-ready arrives. Popup
+    // blockers usually allow this because it's tied to the click; opening a
+    // tab later from inside an async SSE handler would be blocked.
+    var pendingTab = null;
+    try { pendingTab = window.open('about:blank', '_blank'); } catch (e) {}
     // Optimistic update so the UI flips to "Starting…" before the network
     // round-trip; runner-starting SSE will overwrite this with the real
     // framework + command.
-    state.runners[projectPath] = { state: 'starting', framework: null, url: null, lastError: null, stdoutTail: [] };
+    state.runners[projectPath] = { state: 'starting', framework: null, url: null, lastError: null, stdoutTail: [], _pendingTab: pendingTab };
     renderCurrentView();
     fetch('/api/projects/run', {
       method: 'POST',
@@ -1407,10 +2165,17 @@ window.__runner = {
         return r.json();
       })
       .then(function(status) {
-        state.runners[projectPath] = status;
+        // Preserve the placeholder tab handle across the POST response,
+        // which doesn't know about it.
+        var existing = state.runners[projectPath] || {};
+        state.runners[projectPath] = Object.assign({}, status, { _pendingTab: existing._pendingTab || null });
         renderCurrentView();
       })
       .catch(function(e) {
+        var existing = state.runners[projectPath] || {};
+        if (existing._pendingTab && !existing._pendingTab.closed) {
+          try { existing._pendingTab.close(); } catch (err) {}
+        }
         state.runners[projectPath] = { state: 'error', framework: null, url: null, lastError: e.message, stdoutTail: [] };
         showToast(e.message, 'error');
         renderCurrentView();
@@ -1489,13 +2254,192 @@ window.__nav = {
   openPanel: function(teamId) {
     state.panelTeamId = teamId;
     state.panelOpen = true;
+    // Reset transient panel UI state when switching teams.
+    state.panelUI.agentsCollapsed = (typeof window !== 'undefined' && window.innerHeight && window.innerHeight < 720);
+    state.panelUI.pinnedTaskExpanded = false;
+    state.panelUI.overflowOpen = false;
+    state.panelUI.overflowReturnFocusId = null;
+    state.panelUI.expandedAgents = {};
+    state.panelUI.expandedMessages = {};
+    state.panelUI._scrollIntent = 'bottom';
     renderPanel();
   },
   closePanel: function() {
     state.panelOpen = false;
     state.panelTeamId = null;
+    state.panelUI.overflowOpen = false;
     renderPanel();
   }
+};
+
+// ---- Side panel handlers (collapse, edit, overflow, confirm-delete) ----
+window.__panel = {
+  toggleAgents: function() {
+    state.panelUI.agentsCollapsed = !state.panelUI.agentsCollapsed;
+    renderPanel();
+  },
+  toggleAgentRow: function(instance) {
+    state.panelUI.expandedAgents[instance] = !state.panelUI.expandedAgents[instance];
+    renderPanel();
+  },
+  togglePinnedTask: function() {
+    state.panelUI.pinnedTaskExpanded = !state.panelUI.pinnedTaskExpanded;
+    // When expanding, scroll the thread to the top so the user can read the
+    // full task from the start. Collapsing leaves scroll where it is.
+    if (state.panelUI.pinnedTaskExpanded) state.panelUI._scrollIntent = 'top';
+    renderPanel();
+  },
+  toggleMessage: function(key) {
+    state.panelUI.expandedMessages[key] = !state.panelUI.expandedMessages[key];
+    renderPanel();
+  },
+  toggleSecurityResult: function(teamId) {
+    state.panelUI.securityResultCollapsed[teamId] = !state.panelUI.securityResultCollapsed[teamId];
+    renderPanel();
+  },
+  clearSecurityResult: function(teamId) {
+    delete state.securityResults[teamId];
+    delete state.panelUI.securityResultCollapsed[teamId];
+    renderPanel();
+  },
+  toggleOverflow: function(ev) {
+    if (ev && ev.stopPropagation) ev.stopPropagation();
+    // Close the inline-card menu if it's open on another surface.
+    state.panelUI.inlineOverflowTeamId = null;
+    state.panelUI.overflowOpen = !state.panelUI.overflowOpen;
+    state.panelUI.overflowReturnFocusId = 'panelOverflowBtn';
+    renderPanel();
+    if (state.panelUI.overflowOpen) {
+      setTimeout(function() {
+        var menu = $('panelOverflowMenu');
+        if (!menu) return;
+        var items = menu.querySelectorAll('button.sp-overflow-item:not([disabled])');
+        if (items.length > 0) items[0].focus();
+      }, 0);
+    }
+  },
+  closeOverflow: function() {
+    if (!state.panelUI.overflowOpen) return;
+    state.panelUI.overflowOpen = false;
+    var returnId = state.panelUI.overflowReturnFocusId;
+    state.panelUI.overflowReturnFocusId = null;
+    renderPanel();
+    if (returnId) {
+      setTimeout(function() {
+        var el = $(returnId);
+        if (el) el.focus();
+      }, 0);
+    }
+  },
+  toggleInlineOverflow: function(teamId, ev) {
+    if (ev && ev.stopPropagation) ev.stopPropagation();
+    // Mutually exclusive with the side panel's ⋮.
+    state.panelUI.overflowOpen = false;
+    var wasOpen = state.panelUI.inlineOverflowTeamId === teamId;
+    state.panelUI.inlineOverflowTeamId = wasOpen ? null : teamId;
+    state.panelUI.overflowReturnFocusId = 'inlineOverflowBtn-' + teamId;
+    renderCurrentView();
+    if (state.panelUI.inlineOverflowTeamId) {
+      setTimeout(function() {
+        var menu = document.getElementById('inlineOverflowMenu-' + teamId);
+        if (!menu) return;
+        var items = menu.querySelectorAll('button.sp-overflow-item:not([disabled])');
+        if (items.length > 0) items[0].focus();
+      }, 0);
+    }
+  },
+  closeInlineOverflow: function() {
+    if (!state.panelUI.inlineOverflowTeamId) return;
+    var returnId = state.panelUI.overflowReturnFocusId;
+    state.panelUI.inlineOverflowTeamId = null;
+    state.panelUI.overflowReturnFocusId = null;
+    renderCurrentView();
+    if (returnId) {
+      setTimeout(function() {
+        var el = document.getElementById(returnId);
+        if (el) el.focus();
+      }, 0);
+    }
+  },
+  overflowKeydown: function(ev) {
+    var menu = $('panelOverflowMenu');
+    if (!menu) return;
+    var items = Array.prototype.slice.call(menu.querySelectorAll('button.sp-overflow-item:not([disabled])'));
+    var idx = items.indexOf(document.activeElement);
+    if (ev.key === 'ArrowDown') {
+      ev.preventDefault();
+      items[(idx + 1) % items.length].focus();
+    } else if (ev.key === 'ArrowUp') {
+      ev.preventDefault();
+      items[(idx - 1 + items.length) % items.length].focus();
+    } else if (ev.key === 'Home') {
+      ev.preventDefault();
+      if (items.length) items[0].focus();
+    } else if (ev.key === 'End') {
+      ev.preventDefault();
+      if (items.length) items[items.length - 1].focus();
+    }
+  },
+  terminateFromMenu: function(teamId, context) {
+    if (context === 'inline') window.__panel.closeInlineOverflow();
+    else window.__panel.closeOverflow();
+    window.__modal.stopPipeline(teamId);
+  },
+  openConfirmDelete: function(teamId, context) {
+    if (context === 'inline') {
+      state.panelUI.confirmDeleteReturnFocusId = 'inlineOverflowBtn-' + teamId;
+      state.panelUI.inlineOverflowTeamId = null;
+    } else {
+      state.panelUI.confirmDeleteReturnFocusId = 'panelOverflowBtn';
+      state.panelUI.overflowOpen = false;
+    }
+    renderCurrentView();
+    var teamName = state.teams[teamId] ? (state.teams[teamId].teamName || teamId) : teamId;
+    $('deleteConfirmTeamId').value = teamId;
+    $('deleteConfirmTeamLabel').textContent = teamName;
+    $('deleteConfirmTitle').textContent = 'Delete team "' + teamName + '"?';
+    openModal('deleteConfirmModal');
+    // Focus the Cancel button by default (safer default per spec).
+    setTimeout(function() {
+      var c = $('deleteConfirmCancel');
+      if (c) c.focus();
+    }, 0);
+  },
+  closeConfirmDelete: function() {
+    closeModal();
+    var returnId = state.panelUI.confirmDeleteReturnFocusId;
+    state.panelUI.confirmDeleteReturnFocusId = null;
+    if (returnId) {
+      setTimeout(function() {
+        var el = $(returnId);
+        if (el) el.focus();
+      }, 0);
+    }
+  },
+  confirmDelete: function() {
+    var teamId = $('deleteConfirmTeamId').value;
+    var teamName = state.teams[teamId] ? (state.teams[teamId].teamName || teamId) : teamId;
+    fetch('/api/teams/' + encodeURIComponent(teamId) + '/stop', { method: 'POST' })
+      .then(function(r) {
+        if (!r.ok) return r.json().then(function(d){ throw new Error(d.error || 'Failed to delete'); });
+        showToast('Team "' + teamName + '" deleted');
+      })
+      .catch(function(e) { showToast(e.message, 'error'); });
+    window.__panel.closeConfirmDelete();
+  },
+  trapTabInConfirm: function(ev) {
+    if (ev.key !== 'Tab') return;
+    var first = $('deleteConfirmCancel');
+    var last = $('deleteConfirmOk');
+    if (!first || !last) return;
+    if (ev.shiftKey && document.activeElement === first) {
+      ev.preventDefault();
+      last.focus();
+    } else if (!ev.shiftKey && document.activeElement === last) {
+      ev.preventDefault();
+      first.focus();
+    }
+  },
 };
 
 // ---- Modals ----
@@ -2019,10 +2963,16 @@ function connectSSE() {
   es.addEventListener('runner-ready', function(e) {
     var d = JSON.parse(e.data);
     var existing = state.runners[d.projectPath] || {};
+    // If we opened a placeholder tab on the Run click, navigate it now.
+    // Popup blockers that allowed about:blank typically allow this redirect.
+    if (existing._pendingTab && !existing._pendingTab.closed) {
+      try { existing._pendingTab.location.href = d.url; } catch (err) {}
+    }
     state.runners[d.projectPath] = Object.assign({}, existing, {
       projectPath: d.projectPath,
       state: 'ready',
-      url: d.url
+      url: d.url,
+      _pendingTab: null,
     });
     showToast('Dev server ready: ' + d.url);
     renderCurrentView();
@@ -2030,17 +2980,25 @@ function connectSSE() {
   es.addEventListener('runner-error', function(e) {
     var d = JSON.parse(e.data);
     var existing = state.runners[d.projectPath] || {};
+    if (existing._pendingTab && !existing._pendingTab.closed) {
+      try { existing._pendingTab.close(); } catch (err) {}
+    }
     state.runners[d.projectPath] = Object.assign({}, existing, {
       projectPath: d.projectPath,
       state: 'error',
       lastError: d.reason,
-      stdoutTail: d.stdoutTail || []
+      stdoutTail: d.stdoutTail || [],
+      _pendingTab: null,
     });
     showToast(d.reason, 'error');
     renderCurrentView();
   });
   es.addEventListener('runner-stopped', function(e) {
     var d = JSON.parse(e.data);
+    var existing = state.runners[d.projectPath];
+    if (existing && existing._pendingTab && !existing._pendingTab.closed) {
+      try { existing._pendingTab.close(); } catch (err) {}
+    }
     delete state.runners[d.projectPath];
     renderCurrentView();
   });
@@ -2165,6 +3123,10 @@ function connectSSE() {
     var data = JSON.parse(e.data);
     if (data.result) {
       state.securityResults[data.teamId] = data.result;
+      // Fresh result: expand by default so the user sees the new content.
+      if (state.panelUI && state.panelUI.securityResultCollapsed) {
+        delete state.panelUI.securityResultCollapsed[data.teamId];
+      }
     }
     renderCurrentView();
   });
@@ -2224,12 +3186,8 @@ function connectSSE() {
       state.chatPending[data.teamId] = false;
     }
     if (state.panelOpen && state.panelTeamId === data.teamId) {
+      state.panelUI._scrollIntent = 'bottom';
       renderPanel();
-      // Auto-scroll the chat to the bottom on new message.
-      setTimeout(function() {
-        var log = $('chatLog-' + data.teamId);
-        if (log) log.scrollTop = log.scrollHeight;
-      }, 0);
     }
   });
 
@@ -2241,6 +3199,40 @@ function connectSSE() {
     state.chatPending[data.teamId] = false;
     showToast('Coordinator turn cancelled. Any pipeline already started keeps running.', 'info');
     if (state.panelOpen && state.panelTeamId === data.teamId) renderPanel();
+  });
+
+  // Verdict parser failed to read an agent response. The orchestrator
+  // automatically re-prompts once. Surface it as a per-agent pill (not a
+  // toast) so the user sees it in agent context and recurrent flakiness
+  // doesn't spam notifications. Also append to the live output log.
+  es.addEventListener('malformed-output', function(e) {
+    var data = JSON.parse(e.data);
+    if (!state.malformedOutputs[data.teamId]) state.malformedOutputs[data.teamId] = {};
+    var prev = state.malformedOutputs[data.teamId][data.instance] || { count: 0, lastRaw: '' };
+    state.malformedOutputs[data.teamId][data.instance] = {
+      count: prev.count + 1,
+      lastRaw: data.raw,
+    };
+    if (!state.liveOutput[data.teamId]) state.liveOutput[data.teamId] = [];
+    var preview = (data.raw || '').toString().substring(0, 120);
+    state.liveOutput[data.teamId].push({
+      agent: data.instance,
+      text: 'Malformed verdict, re-prompting: ' + preview,
+      type: 'error',
+    });
+    renderCurrentView();
+  });
+
+  // Another client (or this one) resolved a blocking feedback prompt.
+  // Filter it out of our local state so the prompt UI disappears in every
+  // open tab without requiring a refresh.
+  es.addEventListener('feedback-response', function(e) {
+    var data = JSON.parse(e.data);
+    var fbs = state.feedbacks[data.teamId];
+    if (fbs && fbs.length > 0) {
+      state.feedbacks[data.teamId] = fbs.filter(function(f) { return f.id !== data.feedbackId; });
+    }
+    renderCurrentView();
   });
 
   es.addEventListener('shutdown', function() {
@@ -2273,18 +3265,52 @@ setInterval(updateElapsedTimers, 1000);
 
 // ---- Keyboard ----
 document.addEventListener('keydown', function(e) {
+  // Escape priority (innermost first): confirm dialog -> overflow menu -> other modal -> panel.
   if (e.key === 'Escape') {
+    if (currentModal === 'deleteConfirmModal') {
+      window.__panel.closeConfirmDelete();
+      return;
+    }
+    if (state.panelUI && state.panelUI.overflowOpen) {
+      window.__panel.closeOverflow();
+      return;
+    }
+    if (state.panelUI && state.panelUI.inlineOverflowTeamId) {
+      window.__panel.closeInlineOverflow();
+      return;
+    }
     if (currentModal) {
       closeModal();
     } else if (state.panelOpen) {
       window.__nav.closePanel();
     }
+    return;
+  }
+  // Focus trap inside the delete-confirm dialog.
+  if (currentModal === 'deleteConfirmModal' && state.panelUI) {
+    window.__panel.trapTabInConfirm(e);
+  }
+});
+
+// Click anywhere outside an overflow menu to close it.
+document.addEventListener('click', function(e) {
+  if (!state.panelUI) return;
+  // Side panel ⋮
+  if (state.panelUI.overflowOpen) {
+    var wrap = document.querySelector('.slide-panel .sp-overflow-wrap');
+    if (!wrap || !wrap.contains(e.target)) window.__panel.closeOverflow();
+  }
+  // Inline-detail card ⋮
+  if (state.panelUI.inlineOverflowTeamId) {
+    var inlineWrap = document.querySelector('.inline-detail .sp-overflow-wrap');
+    if (!inlineWrap || !inlineWrap.contains(e.target)) window.__panel.closeInlineOverflow();
   }
 });
 
 // ---- Init ----
 renderCurrentView();
 connectSSE();
+window.__auth.fetchStatus();
 
 // Setup image areas after DOM ready
 // Expose closeModal/openModal to inline HTML onclick handlers
@@ -2335,17 +3361,20 @@ setTimeout(function() {
       <p id="codeEmptyMsg">Select a project from the sidebar to open it in the embedded editor.</p>
     </div>
     <iframe class="code-frame" id="codeFrame" style="display:none" title="Embedded VS Code"></iframe>
+    <div class="code-frame-overlay" id="codeFrameOverlay" hidden></div>
   </div>
 </main>
 
-<!-- Slide-in Panel -->
+<!-- Slide-in Panel — 4 regions: Header / Agents / Chat / Composer (see docs/side-panel-redesign.md) -->
 <div class="panel-overlay" id="panelOverlay" onclick="window.__nav.closePanel()"></div>
-<div class="slide-panel" id="slidePanel">
-  <div class="panel-header">
-    <h3 id="panelTitle"></h3>
-    <button class="panel-close" onclick="window.__nav.closePanel()">&#10005;</button>
+<div class="slide-panel slide-panel-redesign" id="slidePanel" role="dialog" aria-label="Team detail" aria-modal="false">
+  <div class="sp-header" id="panelHeader"></div>
+  <div class="sp-agents" id="panelAgents" data-collapsed="false"></div>
+  <div class="sp-chat" id="panelChat">
+    <div class="sp-chat-subheader" id="panelChatSubheader"></div>
+    <div class="sp-chat-thread" id="panelChatThread" tabindex="0" aria-label="Conversation with Coordinator"></div>
   </div>
-  <div class="panel-body" id="panelBody"></div>
+  <div class="sp-composer" id="panelComposer"></div>
 </div>
 
 <!-- Toast Container -->
@@ -2462,6 +3491,37 @@ setTimeout(function() {
     <div class="modal-footer">
       <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
       <button class="btn btn-amber" id="srSubmitBtn" onclick="window.__api.runSecurityReview()">Run Review</button>
+    </div>
+  </div>
+
+  <!-- Claude account auth modal — drives sign-in / sign-out / env-conflict warnings -->
+  <div class="modal" id="authModal" style="display:none" role="dialog" aria-modal="true" aria-labelledby="authModalTitle" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <h3 id="authModalTitle">Claude account</h3>
+      <button class="panel-close" onclick="window.__auth.closeModal()" aria-label="Close">&#10005;</button>
+    </div>
+    <div class="modal-body" id="authModalBody">
+      <!-- Rendered dynamically by window.__auth.renderModalBody() -->
+    </div>
+    <div class="modal-footer" id="authModalFooter">
+      <!-- Rendered dynamically -->
+    </div>
+  </div>
+
+  <!-- Delete Team Confirm Modal -->
+  <div class="modal" id="deleteConfirmModal" data-confirm="true" style="display:none" role="dialog" aria-modal="true" aria-labelledby="deleteConfirmTitle" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <h3 id="deleteConfirmTitle">Delete team</h3>
+      <button class="panel-close" onclick="window.__panel.closeConfirmDelete()" aria-label="Cancel">&#10005;</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="deleteConfirmTeamId">
+      <p>Delete team <strong id="deleteConfirmTeamLabel"></strong>?</p>
+      <p style="margin-top:8px;color:var(--text-muted);font-size:.8125rem">This permanently removes the team and its chat history. This cannot be undone.</p>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" id="deleteConfirmCancel" onclick="window.__panel.closeConfirmDelete()">Cancel</button>
+      <button class="btn btn-danger" id="deleteConfirmOk" onclick="window.__panel.confirmDelete()">Delete</button>
     </div>
   </div>
 

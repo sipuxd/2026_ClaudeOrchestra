@@ -68,16 +68,11 @@ export interface OrchestratorEvents {
   'task-complete': [teamId: string, phase: TeamPhase, durationMs: number];
   'agent-output': [teamId: string, instance: RoleInstance, data: string];
   'agent-progress': [teamId: string, instance: RoleInstance, text: string];
-  'agent-crashed': [teamId: string, instance: RoleInstance, code: number | null];
-  'agent-stderr': [teamId: string, instance: RoleInstance, data: string];
-  'agent-respawned': [teamId: string, instance: RoleInstance];
   'malformed-output': [teamId: string, instance: RoleInstance, raw: string];
-  'deadlock-detected': [teamId: string];
   error: [teamId: string, error: Error];
   feedback: [teamId: string, feedback: FeedbackPayload];
   'feedback-response': [teamId: string, feedbackId: string, value: string];
   'agent-task': [teamId: string, instance: RoleInstance, subtask: string];
-  tick: [teamId: string];
   'security-review': [teamId: string, data: { status: string; result?: string }];
   'pr-created': [teamId: string, prNumber: number, prUrl: string];
   'team-archived': [teamId: string, prUrl: string];
@@ -951,7 +946,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   // --- Start / Stop (no-ops for API compatibility) ---
 
   start(): void {
-    // No-op — pipeline mode doesn't use a tick loop
+    // No-op — pipeline orchestration is fully event-driven
   }
 
   stop(): void {

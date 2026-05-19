@@ -82,6 +82,10 @@ const DEFAULT_USER_SETTINGS = {
   'workbench.secondarySideBar.defaultVisibility': 'hidden',
   'workbench.startupEditor': 'none',
   'workbench.welcomePage.walkthroughs.openOnInstall': false,
+  // Match the dashboard's dark theme. "Default Dark+" is a bundled theme
+  // that has shipped with VS Code / code-server for years (stable name
+  // across versions, no marketplace dependency).
+  'workbench.colorTheme': 'Default Dark+',
   'chat.disableAIFeatures': true,
   'chat.commandCenter.enabled': false,
   'chat.agent.enabled': false,
@@ -94,8 +98,31 @@ const DEFAULT_USER_SETTINGS = {
 function ensureProjectDataDir(): void {
   fs.mkdirSync(PROJECT_USER_DIR, { recursive: true });
   fs.mkdirSync(PROJECT_EXT_DIR, { recursive: true });
-  if (!fs.existsSync(PROJECT_SETTINGS_FILE)) {
-    fs.writeFileSync(PROJECT_SETTINGS_FILE, `${JSON.stringify(DEFAULT_USER_SETTINGS, null, 2)}\n`);
+
+  // Merge — not write-once — so adding a new default key (e.g. the dark
+  // theme) propagates on the next spawn without forcing users to wipe
+  // .code-server-data/. Our defaults overwrite the same keys; any user
+  // additions outside our key set are preserved.
+  let existing: Record<string, unknown> = {};
+  if (fs.existsSync(PROJECT_SETTINGS_FILE)) {
+    try {
+      existing = JSON.parse(fs.readFileSync(PROJECT_SETTINGS_FILE, 'utf-8')) as Record<
+        string,
+        unknown
+      >;
+    } catch {
+      // Corrupt settings file — start clean.
+      existing = {};
+    }
+  }
+  const merged = { ...existing, ...DEFAULT_USER_SETTINGS };
+  const next = `${JSON.stringify(merged, null, 2)}\n`;
+  // Skip rewrite if content hasn't changed — avoids needless mtime churn.
+  const prev = fs.existsSync(PROJECT_SETTINGS_FILE)
+    ? fs.readFileSync(PROJECT_SETTINGS_FILE, 'utf-8')
+    : null;
+  if (prev !== next) {
+    fs.writeFileSync(PROJECT_SETTINGS_FILE, next);
   }
 }
 

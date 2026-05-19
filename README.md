@@ -94,16 +94,18 @@ The engine repo stays clean. Each target project gets a `.claude-orchestra/` dir
 
 ## Dashboard
 
-A live browser dashboard at `localhost:3460` with zero external dependencies (Node.js built-in `http` + SSE).
+A live browser dashboard at `localhost:3460`. Built with Node.js built-in `http` + SSE — no external runtime UI dependencies (no React, no WebSocket library).
 
-- **Sidebar** — All teams grouped by project, with phase badges (SCAN, BUILD, DONE, etc.)
-- **Phase bar** — Visual 5-step progression with loop-back support
-- **Agent panels** — Real-time streaming output per agent with role labels and subtask indicators
-- **Feedback bar** — Non-blocking notifications and blocking prompts when the pipeline needs input
-- **New Team modal** — Create a team by name, project path, and task description
-- **Preview** — Opens the most recently built HTML file directly in a new tab
-- **Push & Merge** — One-click git push to main when task is complete
-- **Run Task / Ask** — Submit follow-up tasks or ask questions to a warm agent session
+- **Nav rail** — 64px-wide rail of project initials on the left; click to drill into a project.
+- **Portfolio view** — All teams grouped by project, with status pills and a phase progress bar per card.
+- **Side panel** — Click a team card to open a slide-out panel with four regions: Header (name, breadcrumb, status, progress, ⋮ menu), Agents (collapsible roster, each row independently expandable), Chat (sticky `CHAT WITH COORDINATOR` sub-header with a pinned "Original Task" card), and Composer (multi-line textarea; Enter sends, Shift+Enter newline).
+- **Coordinator chat (per team)** — The composer talks to a persistent `Coordinator-1` session. The coordinator decides per turn whether to RESPOND, ASK a clarifying question, or emit `TRIGGER_PIPELINE` to kick off a fresh Security-1 → Worker-1/2 → Reviewer-1 run. Chat history persists in `.claude-orchestra/teams/<id>/chat.jsonl`.
+- **Code tab** — Top-tab toggle that embeds a project-local `code-server` (Microsoft VS Code in the browser). Locked-down config: chat disabled, telemetry off.
+- **Run / Open / Stop** — Per-project dev-server controls. Click **Run** to detect the framework (Vite, Next, Storybook, etc.) and spawn it; a placeholder browser tab opens synchronously on the click and redirects to the dev URL once ready.
+- **Push & Merge** — One-click git push to main when a team's task is `done`.
+- **Auth pill** — Top-right of the Portfolio header surfaces Claude account state (`● email · subscription tier`). Click to sign in / sign out through the dashboard; the engine delegates OAuth to the official `claude` CLI.
+- **⋮ overflow menu** — Side panel header + inline-detail card header both have a ⋮ menu housing destructive actions (Terminate, Delete) behind a confirm dialog.
+- **Feedback prompts** — Inline action blocks inside the Agents region when the pipeline needs input.
 
 ## Agent Roles
 
@@ -126,17 +128,20 @@ npm install
 npm run build
 
 # Start the dashboard
-node dist/index.js dashboard --mode pipeline
-
-# Opens http://localhost:3460 in your browser automatically
-# Click "+ New Team" to create a team and assign a task
+npm run dashboard
 ```
+
+Then in your browser at `http://localhost:3460`:
+
+1. **Connect your Claude account.** Click the red **Connect Claude account** pill in the top-right of the Portfolio header. A browser tab opens for OAuth; complete sign-in there. The pill turns green with your email + subscription tier once connected. (If you prefer the terminal: `claude auth login` works too — the dashboard picks up the result automatically.)
+2. **Add a project.** Click **+ Add Project** and pick any local git repo. The engine attaches to existing directories — it does not create them. Team runtime data lives in `.claude-orchestra/` inside that project (gitignored).
+3. **Create a team.** Click **+ Add Team** on the project section, give it a name, then click the team card to open the side panel. Type your task into the composer. The first message becomes the team's task; the Coordinator decides whether to chat back or kick off the pipeline.
 
 ### Prerequisites
 
-- Node.js 18+
-- Claude subscription for the Claude provider, or ChatGPT/Codex subscription for the Codex provider
-- A local git repo to point the engine at (the engine does not create projects)
+- **Node.js 18+**
+- **Claude Code installed** (`claude` CLI on PATH) for the Claude provider, or **Codex CLI** for the Codex provider. The dashboard's auth pill drives the official CLI's OAuth flow — no API keys, no `.env`.
+- **A local git repo** to attach teams to. The engine never creates projects on its own.
 
 ### CLI Commands
 
@@ -289,7 +294,7 @@ The runtime keeps backward-compatible aliases at the adapter boundary: `max` map
 - **Runtime:** TypeScript, Node.js
 - **AI:** Claude Agent SDK (`@anthropic-ai/claude-agent-sdk`) or Codex SDK (`@openai/codex-sdk`)
 - **Dashboard:** Node.js built-in `http` + SSE (zero UI dependencies)
-- **Tests:** Vitest — 233 tests across 10 files
+- **Tests:** Vitest — 314 tests across 14 files
 - **External dependencies:** Claude Agent SDK and Codex SDK
 
 ## Project Structure
@@ -311,8 +316,10 @@ src/
 │   ├── claude-session.ts          # Claude Agent SDK adapter
 │   └── codex-session.ts           # Codex SDK adapter
 ├── dashboard/
-│   ├── dashboard-server.ts        # HTTP + SSE server, preview routes
-│   ├── dashboard-ui.ts            # Single-page HTML/CSS/JS builder
+│   ├── dashboard-server.ts        # HTTP + SSE server, auth/runner/code-server routes
+│   ├── dashboard-ui.ts            # Single-page HTML/CSS/JS builder (string template)
+│   ├── code-server-manager.ts     # Embeds the Code tab's VS Code instance
+│   ├── project-runner.ts          # Detects + spawns per-project dev servers (Run/Open/Stop)
 │   └── index.ts                   # Dashboard exports
 ├── router/
 │   └── complexity-router.ts       # Simple vs standard classification
@@ -320,8 +327,6 @@ src/
 │   ├── team-state.ts              # In-memory state with validated transitions
 │   └── persistence.ts             # Filesystem persistence (.claude-orchestra/)
 ├── spawner/
-│   ├── agent-spawner.ts           # Legacy Claude-only lifecycle path
-│   ├── agent-process.ts           # Legacy Claude-only SDK/child-process wrapper
 │   └── frontmatter-parser.ts     # YAML frontmatter parser for agent files
 ├── roles/
 │   └── role-types.ts              # Role enums & types
@@ -335,9 +340,12 @@ agents/                            # Agent system prompts (YAML frontmatter + ma
 ├── worker-2.agent.md             # Requirements verifier (Write/Edit/Bash denied at SDK)
 ├── security.agent.md             # Security pre-scan & post-sweep
 ├── reviewer.agent.md             # Code review & verdicts
-└── security-review.agent.md      # Final security review (on-demand)
+├── coordinator.agent.md          # Persistent chat session per team (verdict-routed)
+├── requirements.agent.md         # Optional pre-pipeline requirements extraction
+├── security-review.agent.md      # Final security review (on-demand)
+└── built-in-security-review.agent.md  # Bundled fallback for the built-in review tool
 
-tests/                             # 10 test files, 233 tests (Vitest)
+tests/                             # 14 test files, 314 tests (Vitest)
 docs/                              # Architecture & design specifications
 ```
 

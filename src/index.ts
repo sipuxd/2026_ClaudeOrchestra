@@ -101,7 +101,6 @@ ${colors.bold}Commands:${colors.reset}
 ${colors.bold}Flags:${colors.reset}
   --port <n>                 Dashboard port (default: 3460)
   --registry <path>          Registry file path (default: ./registry.json)
-  --tick-interval <ms>       Main loop interval (default: 1000)
   --max-teams <n>            Max concurrent teams (default: 5)
   --provider <name>          Agent provider: claude or codex
   --auth <mode>              Auth mode: subscription

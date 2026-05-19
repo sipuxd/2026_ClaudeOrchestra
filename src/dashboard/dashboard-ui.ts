@@ -364,6 +364,7 @@ a:hover{text-decoration:underline}
 .btn-ghost{color:var(--text-secondary);padding:6px 10px}
 .btn-ghost:hover{color:var(--text-primary);background:rgba(255,255,255,.05)}
 .btn-sm{padding:5px 10px;font-size:.75rem}
+.btn-lg{height:40px;padding:0 20px;font-size:.9375rem;font-weight:600}
 .btn-green{background:var(--green);color:#fff}
 .btn-green:hover:not(:disabled){background:var(--green-light);color:#000}
 .btn-purple{background:var(--purple);color:#fff}
@@ -1200,7 +1201,7 @@ function renderDashboardView() {
   // Hide the top-right + Add Project button when the empty state is showing
   // (the empty-state CTA below is the primary affordance in that case).
   if (hasProjects) {
-    html += '<button class="btn btn-sm btn-primary" style="margin-left:auto" onclick="window.__modal.addProject()">+ Add Project</button>';
+    html += '<button class="btn btn-lg btn-primary" style="margin-left:auto" onclick="window.__modal.addProject()">+ Add Project</button>';
   }
   html += '</div>';
   html += '<p class="dashboard-subtitle">' + Object.keys(state.teams).length + ' teams across ' + Object.keys(state.projects).length + ' projects</p></div>';
@@ -1209,7 +1210,7 @@ function renderDashboardView() {
   if (!hasProjects) {
     html += '<div class="empty-state"><div class="empty-state-icon">&#9654;</div>';
     html += '<h3>No projects yet</h3><p>Add a project to get started. Teams live inside projects.</p>';
-    html += '<button class="btn btn-primary" onclick="window.__modal.addProject()">+ Add Project</button></div>';
+    html += '<button class="btn btn-lg btn-primary" onclick="window.__modal.addProject()">+ Add Project</button></div>';
   }
 
   for (var i = 0; i < paths.length; i++) {

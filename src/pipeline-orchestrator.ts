@@ -108,6 +108,69 @@ const FALLBACK_MODEL = 'claude-opus-4-6';
 const FALLBACK_EFFORT: EffortLevel = 'medium';
 const FALLBACK_MAX_TURNS = 20;
 
+// Tools that write to disk/state, and the network/exfiltration tools a read-only
+// role must also be denied. In the Claude Agent SDK `allowedTools` only
+// auto-approves; `disallowedTools` is the only hard removal ("removed from the
+// model's context and cannot be used"). So a role is only truly read-only if
+// every one of these is disallowed — not just Write/Edit/Bash.
+const WRITE_TOOLS = ['Write', 'Edit', 'Bash'];
+export const READ_ONLY_DISALLOWED_TOOLS = [
+  ...WRITE_TOOLS,
+  'NotebookEdit',
+  'WebFetch',
+  'WebSearch',
+  'Task',
+];
+
+// The security REVIEWER is read-only for the repo but needs Bash to run
+// `git diff` on large diffs (its prompt instructs this when the diff is
+// truncated). Deny writes and network/exfiltration tools, but keep Bash — the
+// guardrail hook blocks destructive and secret-exfiltration shell commands.
+export const SECURITY_REVIEW_DISALLOWED_TOOLS = ['Write', 'Edit', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Task'];
+
+// Instances that must ALWAYS be read-only, driven by role identity rather than
+// inferred from a tool list — so a config/frontmatter override can never grant
+// one of them write access. Worker-1 is the only write-capable instance.
+const READ_ONLY_INSTANCES: readonly RoleInstance[] = [
+  'Security-1',
+  'Worker-2',
+  'Reviewer-1',
+  'Coordinator-1',
+];
+
+/**
+ * If `disallowed` marks a role read-only (it denies any of Write/Edit/Bash),
+ * union in the full read-only tool set so NotebookEdit/WebFetch/WebSearch/Task
+ * can't slip through. Write-capable roles (e.g. Worker-1, with no denials) are
+ * returned unchanged.
+ */
+export function hardenReadOnlyTools(disallowed: string[]): string[] {
+  if (!WRITE_TOOLS.some((tool) => disallowed.includes(tool))) return disallowed;
+  return Array.from(new Set([...disallowed, ...READ_ONLY_DISALLOWED_TOOLS]));
+}
+
+/**
+ * Validates a team name before it becomes a filesystem directory name, registry
+ * key, and map key. Rejects anything that could escape the
+ * `.claude-orchestra/teams` tree (path separators, `..`) or corrupt on-disk
+ * state (control characters, empty, over-long). Throws a user-facing message.
+ */
+export function validateTeamName(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed) throw new Error('Team name must not be empty.');
+  if (trimmed.length > 100) throw new Error('Team name must be 100 characters or fewer.');
+  if (trimmed.includes('..')) throw new Error('Team name must not contain "..".');
+  if (/[/\\]/.test(trimmed)) throw new Error('Team name must not contain "/" or "\\".');
+  if (trimmed === '.') throw new Error('Team name must not be ".".');
+  for (let i = 0; i < trimmed.length; i++) {
+    if (trimmed.charCodeAt(i) < 0x20) {
+      throw new Error('Team name must not contain control characters.');
+    }
+  }
+  // The trimmed value is what becomes the on-disk directory and registry key.
+  return trimmed;
+}
+
 // --- Verdict types ---
 
 export type SecurityVerdict = 'APPROVED' | 'FLAGGED' | 'BLOCKED';
@@ -421,8 +484,10 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       const role = INSTANCE_TO_ROLE[instance];
       this.models[instance] = config.models?.[role] ?? fmDefaults.models[instance];
       this.efforts[instance] = config.efforts?.[role] ?? fmDefaults.efforts[instance];
-      this.disallowedTools[instance] =
-        config.disallowedTools?.[role] ?? fmDefaults.disallowedTools[instance];
+      const baseDisallowed = config.disallowedTools?.[role] ?? fmDefaults.disallowedTools[instance];
+      this.disallowedTools[instance] = READ_ONLY_INSTANCES.includes(instance)
+        ? Array.from(new Set([...baseDisallowed, ...READ_ONLY_DISALLOWED_TOOLS]))
+        : hardenReadOnlyTools(baseDisallowed);
       this.maxTurnsPerInstance[instance] = config.maxTurns?.[role] ?? fmDefaults.maxTurns[instance];
     }
   }
@@ -438,7 +503,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       throw new Error('Orchestrator is shutting down');
     }
 
-    const teamId = name;
+    const teamId = validateTeamName(name);
     if (this.teams.has(teamId)) {
       throw new Error(`Team "${teamId}" already exists`);
     }
@@ -829,17 +894,20 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     const complexity = classifyComplexity(taskDescription);
     ctx.state.setTaskComplexity(complexity);
 
-    const agentCount = complexity === 'simple' ? 1 : 4;
+    // Every task now runs the scan-first pipeline: Security-1 always scans and
+    // is the sole authority that may downgrade a genuinely trivial task to a
+    // Worker-1-only run. So all four agents are activated up front (Security-1
+    // marks the unused ones Done if it downgrades). The heuristic router no
+    // longer decides whether the security scan runs.
+    const agentCount = 4;
     this.emit('task-classified', teamId, complexity, agentCount);
     this.emit('task-assigned', teamId, taskDescription);
 
     // Register agents in state
     ctx.state.transitionAgent('Worker-1' as any, AgentState.Active);
-    if (complexity === 'standard') {
-      ctx.state.transitionAgent('Worker-2' as any, AgentState.Active);
-      ctx.state.transitionAgent('Security-1' as any, AgentState.Active);
-      ctx.state.transitionAgent('Reviewer-1' as any, AgentState.Active);
-    }
+    ctx.state.transitionAgent('Worker-2' as any, AgentState.Active);
+    ctx.state.transitionAgent('Security-1' as any, AgentState.Active);
+    ctx.state.transitionAgent('Reviewer-1' as any, AgentState.Active);
 
     this.persistence.persistNow(ctx.state);
 
@@ -855,8 +923,12 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     complexity: 'simple' | 'standard' | 'complex',
     images?: Array<{ media_type: string; data: string }>,
   ): Promise<void> {
+    // 'simple' no longer bypasses the security scan. Keep the fast path (no
+    // requirements extraction), but run the scan-first standard pipeline;
+    // Security-1 downgrades to a Worker-1-only run when the task is genuinely
+    // trivial (see runStandardPipeline's SIMPLE reclassification path).
     if (complexity === 'simple') {
-      this.runSimplePipeline(teamId, ctx, task, images);
+      this.runStandardPipeline(teamId, ctx, task, images);
       return;
     }
 
@@ -1322,6 +1394,12 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
         cwd,
         effort: 'high',
         maxTurns: 15,
+        // The security reviewer must not modify the repo ("Do NOT implement
+        // fixes"), but it does need Bash for `git diff` on large diffs. Deny
+        // writes/network at the SDK boundary (the frontmatter restriction is not
+        // applied to ad-hoc sessions); the guardrail hook gates its Bash use.
+        disallowedTools: SECURITY_REVIEW_DISALLOWED_TOOLS,
+        guardrails: this.guardrails,
         onProgress: (text: string) => {
           this.emit('agent-progress', teamId, 'Security-1' as any, text);
         },
@@ -1432,53 +1510,6 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       guardrails: this.guardrails,
       onProgress,
     });
-  }
-
-  // --- Private: Simple Pipeline ---
-
-  private async runSimplePipeline(
-    teamId: string,
-    ctx: PipelineTeamContext,
-    task: string,
-    images?: Array<{ media_type: string; data: string }>,
-  ): Promise<void> {
-    const startTime = Date.now();
-
-    try {
-      // Phase: Work
-      const fromPhase = ctx.state.currentPhase;
-      this.tryTransitionPhase(
-        ctx.state,
-        teamId,
-        fromPhase,
-        TeamPhase.Work,
-        'simple pipeline start',
-      );
-
-      // Create Worker-1 session
-      const worker = this.createSession('Worker-1', ctx.state.snapshot.projectPath, (text) =>
-        this.emit('agent-progress', teamId, 'Worker-1' as any, text),
-      );
-      ctx.sessions.push(worker);
-
-      ctx.state.setAgentJob('Worker-1' as any, 'Implementing task (simple)');
-      this.emit('agent-task', teamId, 'Worker-1' as any, 'Implementing task (simple)');
-      this.emit('agent-output', teamId, 'Worker-1' as any, `[Pipeline] Starting simple task...`);
-
-      // Send task to worker (with approved requirements if present)
-      const requirements = ctx.state.snapshot.currentTask?.requirements;
-      const fullPrompt = requirements ? `${task}\n\nAPPROVED REQUIREMENTS:\n${requirements}` : task;
-      const result = await worker.send(fullPrompt, images);
-      const simpleDisplay = result.trim() || worker.lastActivityLog || '(no text output)';
-      this.emit('agent-output', teamId, 'Worker-1' as any, simpleDisplay);
-      this.runGuardrailAudit(teamId, ctx, 'simple-work');
-
-      // Done — keep session alive for Q&A
-      this.markAgentDone(ctx, 'Worker-1' as any);
-      this.completePipeline(teamId, ctx, startTime);
-    } catch (err: any) {
-      this.failPipeline(teamId, ctx, err, startTime);
-    }
   }
 
   // --- Private: Standard Pipeline ---
@@ -2219,6 +2250,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       cwd,
       effort: 'medium',
       maxTurns: 1,
+      // Requirements extraction is read-only — it must not touch the repo.
+      disallowedTools: READ_ONLY_DISALLOWED_TOOLS,
       guardrails: this.guardrails,
     });
 

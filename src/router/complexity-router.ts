@@ -42,6 +42,17 @@ const COMPLEX_KEYWORDS = [
   'optimize',
 ];
 
+/**
+ * Destructive / high-risk intent. A task matching this is routed to the full
+ * pipeline regardless of length — defense-in-depth so a short destructive task
+ * (e.g. "drop the users table") is never treated as trivial. Matched on WHOLE
+ * words (not substrings) so ordinary tasks like "preset the layout" or "update
+ * the backdrop" aren't misclassified. This is a denylist and cannot be
+ * exhaustive, which is why Security-1 also scans every task.
+ */
+const DESTRUCTIVE_PATTERN =
+  /\b(?:delete|drop|truncate|remove|wipe|erase|destroy|purge|prune|rm|reset|revert|rollback|overwrite|format|uninstall|downgrade|force[- ]?push|sudo|chmod|chown|credentials?|secrets?|passwords?|tokens?|production|prod)\b|\bprivate key\b|\.env\b/i;
+
 /** Word count threshold — descriptions longer than this are standard. */
 const MAX_SIMPLE_WORDS = 20;
 
@@ -60,6 +71,9 @@ const MAX_SIMPLE_WORDS = 20;
 export function classifyComplexity(description: string): TaskComplexity {
   const lower = description.toLowerCase();
   const words = description.trim().split(/\s+/).length;
+
+  // Destructive/high-risk intent → always standard, regardless of length.
+  if (DESTRUCTIVE_PATTERN.test(description)) return 'standard';
 
   // Long descriptions → standard
   if (words > MAX_SIMPLE_WORDS) return 'standard';

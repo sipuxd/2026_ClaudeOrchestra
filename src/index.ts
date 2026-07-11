@@ -100,6 +100,8 @@ ${colors.bold}Commands:${colors.reset}
 
 ${colors.bold}Flags:${colors.reset}
   --port <n>                 Dashboard port (default: 3460)
+  --host <addr>              Dashboard bind host (default: 127.0.0.1; use 0.0.0.0
+                             to expose to your network — the dashboard is UNAUTHENTICATED)
   --registry <path>          Registry file path (default: ./registry.json)
   --max-teams <n>            Max concurrent teams (default: 5)
   --provider <name>          Agent provider: claude or codex
@@ -347,6 +349,9 @@ async function main(): Promise<void> {
 
     case 'dashboard': {
       const port = parseInt(parsed.flags['--port'] ?? '3460', 10);
+      // Bind host: defaults to loopback inside DashboardServer. Opt in to network
+      // exposure with `--host 0.0.0.0` (the server logs a warning when it does).
+      const host = parsed.flags['--host'] || undefined;
 
       // Recover existing teams
       recoverTeams(orchestrator);
@@ -355,6 +360,7 @@ async function main(): Promise<void> {
       const dashboard = new DashboardServer({
         orchestrator,
         port,
+        host,
       });
 
       await dashboard.start();

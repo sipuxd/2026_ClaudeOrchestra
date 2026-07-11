@@ -112,7 +112,11 @@ const SECRET_LINE_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
 const FORBIDDEN_COMMAND_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   { pattern: /\bsudo\b/, reason: 'sudo is outside the agent safety envelope' },
   {
-    pattern: /\brm\s+(-[^\s]*r[^\s]*f|-?[^\s]*f[^\s]*r)\s+(?:\/|~|\.\.)(?:\s|$)/,
+    // Recursive-force rm whose target begins with an absolute (`/`), home
+    // (`~`), parent (`..`), or env-var (`$`) reference — i.e. anything that can
+    // reach outside the project. Local relative deletes (`rm -rf ./build`,
+    // `rm -rf node_modules`) are intentionally still allowed.
+    pattern: /\brm\s+(?:-\S*r\S*f|-\S*f\S*r|-[rf]\s+-[rf])\S*\s+['"]?(?:\/|~|\.\.|\$)/,
     reason: 'destructive recursive removal outside the project is blocked',
   },
   {
@@ -120,14 +124,32 @@ const FORBIDDEN_COMMAND_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
     reason: 'piped remote script execution is blocked',
   },
   {
-    pattern: /\b(?:cat|less|more|grep|rg)\b[\s\S]{0,120}(?:^|\s)\.env(?:\s|$|[./-])/,
+    // SSH private keys and cloud credential files, wherever they live. Bash is
+    // not path-contained, so a read of these outside the project (e.g.
+    // `cat ~/.ssh/id_rsa`) must be blocked by content, not location.
+    pattern: /\bid_(?:rsa|dsa|ecdsa|ed25519)\b|(?:^|[\s='"/])\.ssh\/|\.aws\/credentials\b|\.config\/gcloud\b/i,
+    reason: 'accessing SSH keys or cloud credential files is blocked',
+  },
+  {
+    // Uploading a local file over the network (curl/wget reading @file into a
+    // POST/upload) — the common Bash exfiltration shape.
+    pattern:
+      /\b(?:curl|wget)\b[\s\S]{0,200}(?:--data(?:-binary|-raw|-urlencode)?|--upload-file|--form|-T|-F|-d)\b[\s\S]{0,100}@/i,
+    reason: 'exfiltrating a local file over the network is blocked',
+  },
+  {
+    // Any common reader referencing a `.env`/`.env.*` file. The boundary before
+    // `.env` accepts whitespace, `=`, `/`, or a quote so `cat ./.env`,
+    // `head .env`, and `less "/p/.env.local"` are all caught.
+    pattern:
+      /\b(?:cat|less|more|head|tail|bat|nl|tac|xxd|od|strings|grep|rg|awk|sed|cut|sort|uniq|view|vi|vim|nano|open|code|printenv)\b[\s\S]{0,160}(?:^|[\s=/'"])\.env(?:\.[A-Za-z0-9_.-]+)?(?:['"\s]|$)/,
     reason: 'reading environment secret files is blocked',
   },
   { pattern: /\bgit\s+reset\s+--hard\b/, reason: 'destructive git reset is blocked' },
   { pattern: /\bchmod\s+-R\s+777\b/, reason: 'broad world-writable permissions are blocked' },
 ];
 
-export function evaluatePathAccess(filePath: string): GuardrailFinding[] {
+export function evaluatePathAccess(filePath: string, projectRoot?: string): GuardrailFinding[] {
   const normalized = normalizePathForPolicy(filePath);
   if (!normalized) return [];
 
@@ -138,6 +160,21 @@ export function evaluatePathAccess(filePath: string): GuardrailFinding[] {
       kind: 'path_traversal',
       severity: 'block',
       message: 'Path traversal is blocked.',
+      evidence: filePath,
+      path: filePath,
+    });
+  }
+
+  // Project containment: refuse any path that resolves outside the project root.
+  // Absolute paths (e.g. /Users/you/.zshrc, /etc/passwd) and home references
+  // (~/...) are outside by definition. This is the primary write/read boundary
+  // now that agents run with permissionMode 'bypassPermissions', where the SDK
+  // itself no longer prompts.
+  if (projectRoot && isOutsideProject(filePath, projectRoot)) {
+    findings.push({
+      kind: 'path_traversal',
+      severity: 'block',
+      message: 'Path escapes the project directory.',
       evidence: filePath,
       path: filePath,
     });
@@ -157,9 +194,9 @@ export function evaluatePathAccess(filePath: string): GuardrailFinding[] {
   return findings;
 }
 
-export function evaluateChangedPath(filePath: string): GuardrailFinding[] {
+export function evaluateChangedPath(filePath: string, projectRoot?: string): GuardrailFinding[] {
   const normalized = normalizePathForPolicy(filePath);
-  const findings = evaluatePathAccess(filePath);
+  const findings = evaluatePathAccess(filePath, projectRoot);
   if (!normalized) return findings;
 
   if (DEPENDENCY_PATH_PATTERNS.some((pattern) => pattern.test(normalized))) {
@@ -222,7 +259,7 @@ export function evaluateDiffForSecrets(diff: string): GuardrailFinding[] {
   return findings;
 }
 
-export function evaluateCodexStreamItem(item: unknown): GuardrailFinding[] {
+export function evaluateCodexStreamItem(item: unknown, projectRoot?: string): GuardrailFinding[] {
   if (!item || typeof item !== 'object') return [];
   const typed = item as Record<string, unknown>;
 
@@ -233,7 +270,10 @@ export function evaluateCodexStreamItem(item: unknown): GuardrailFinding[] {
   if (typed.type === 'file_change' && Array.isArray(typed.changes)) {
     return typed.changes.flatMap((change) => {
       if (!change || typeof change !== 'object') return [];
-      return evaluateChangedPath(String((change as Record<string, unknown>).path ?? ''));
+      return evaluateChangedPath(
+        String((change as Record<string, unknown>).path ?? ''),
+        projectRoot,
+      );
     });
   }
 
@@ -277,7 +317,7 @@ export function auditProjectChanges(projectPath: string, phase: string): Guardra
   ]);
 
   for (const changedPath of changedPaths) {
-    findings.push(...evaluateChangedPath(changedPath));
+    findings.push(...evaluateChangedPath(changedPath, projectPath));
   }
 
   const diff = gitOutput(projectPath, ['diff', '--unified=0', 'HEAD']);
@@ -321,6 +361,19 @@ function normalizePathForPolicy(filePath: string): string {
 
 function hasTraversal(filePath: string): boolean {
   return filePath.split('/').some((part) => part === '..');
+}
+
+/**
+ * True when `filePath` resolves outside `projectRoot`. A leading `~` is a home
+ * reference the shell would expand outside the project, so it is treated as
+ * outside without needing to expand it. Absolute paths resolve to themselves;
+ * relative paths resolve against the project root.
+ */
+function isOutsideProject(filePath: string, projectRoot: string): boolean {
+  if (/^~($|\/)/.test(filePath.trim())) return true;
+  const root = path.resolve(projectRoot);
+  const resolved = path.resolve(root, filePath);
+  return resolved !== root && !resolved.startsWith(root + path.sep);
 }
 
 function isGitRepository(projectPath: string): boolean {

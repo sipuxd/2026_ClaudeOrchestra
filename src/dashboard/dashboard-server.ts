@@ -19,6 +19,11 @@ export interface DashboardServerOptions {
   host?: string;
 }
 
+/** True when `host` binds only the local machine (no network exposure). */
+export function isLoopbackHost(host: string): boolean {
+  return host === '127.0.0.1' || host === 'localhost' || host === '::1';
+}
+
 export class DashboardServer {
   private readonly orchestrator: PipelineOrchestrator;
   private readonly port: number;
@@ -42,7 +47,11 @@ export class DashboardServer {
   constructor(options: DashboardServerOptions) {
     this.orchestrator = options.orchestrator;
     this.port = options.port;
-    this.host = options.host ?? '0.0.0.0';
+    // Default to loopback so the dashboard is reachable only from this machine.
+    // The dashboard is an unauthenticated control surface (it can create teams,
+    // run projects, and spawn agents); binding a non-loopback host exposes that
+    // to the network and must be an explicit opt-in (warned about in start()).
+    this.host = options.host ?? '127.0.0.1';
   }
 
   /**
@@ -67,6 +76,13 @@ export class DashboardServer {
       this.server.on('error', reject);
 
       this.server.listen(this.port, this.host, () => {
+        if (!isLoopbackHost(this.host)) {
+          console.warn(
+            `[dashboard] WARNING: binding to non-loopback host ${this.host}. ` +
+              'The dashboard has no authentication — anyone who can reach ' +
+              `${this.host}:${this.port} can create teams, run projects, and spawn agents.`,
+          );
+        }
         resolve();
       });
     });
@@ -242,15 +258,51 @@ export class DashboardServer {
     const pathname = url.pathname;
     const method = req.method ?? 'GET';
 
-    // CORS headers
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    // DNS-rebinding defense: applies to ALL methods (a rebound GET could read
+    // data too). The loopback bind and Origin check both fail against DNS
+    // rebinding, where the victim's own browser sends a matching Origin AND Host
+    // for the attacker's domain; validating the Host header against a loopback
+    // allowlist is what actually closes it.
+    if (!this.isAllowedHost(req)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Host not allowed' }));
+      return;
+    }
 
+    // The dashboard SPA is served same-origin from this same server, so it needs
+    // no CORS headers. We deliberately do NOT advertise
+    // Access-Control-Allow-Origin — a wildcard would let any website read this
+    // server's responses, and any cross-origin preflight should simply fail.
     if (method === 'OPTIONS') {
       res.writeHead(204);
       res.end();
       return;
+    }
+
+    // CSRF / cross-site defense (primary): reject any state-changing request that
+    // carries an Origin header from a different host. Same-origin SPA calls send a
+    // matching Origin (or none); a malicious page in the user's browser sends its
+    // own foreign Origin and is blocked. CLI clients (curl) send no Origin and are
+    // unaffected. Combined with loopback binding this closes the "any website can
+    // POST to localhost and spawn a process" vector.
+    if (method !== 'GET' && method !== 'HEAD' && this.isCrossOriginRequest(req)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Cross-origin request refused' }));
+      return;
+    }
+
+    // Content-type hardening (defense-in-depth): a cross-site "simple request"
+    // POST uses text/plain to skip the CORS preflight. With the wildcard CORS
+    // removed, requiring application/json for any mutating request that declares
+    // a body content-type rejects that path too. Body-less mutations (no
+    // content-type) are still covered by the Origin check above.
+    if (method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE') {
+      const contentType = req.headers['content-type'];
+      if (contentType && !/^application\/json\b/i.test(contentType)) {
+        res.writeHead(415, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Unsupported Media Type: application/json required' }));
+        return;
+      }
     }
 
     // Route matching
@@ -426,6 +478,38 @@ export class DashboardServer {
     }
 
     this.send404(res);
+  }
+
+  /**
+   * True when the request carries an Origin header whose host differs from the
+   * server's host — i.e. a cross-site request from a page in the user's browser.
+   * A missing Origin (curl, other CLI clients) is treated as same-origin because
+   * those are not CSRF vectors. A malformed Origin is treated as cross-origin.
+   */
+  private isCrossOriginRequest(req: http.IncomingMessage): boolean {
+    const origin = req.headers.origin;
+    if (!origin) return false;
+    let originHost: string;
+    try {
+      originHost = new URL(origin).host;
+    } catch {
+      return true;
+    }
+    return originHost !== (req.headers.host ?? '');
+  }
+
+  /**
+   * DNS-rebinding defense. When bound to loopback (the default), only accept
+   * requests whose Host header is a loopback name; a rebound attacker request
+   * carries Host: attacker.example and is refused even though its Origin and
+   * Host agree. Skipped when the user opts into network exposure via --host,
+   * where the Host header legitimately varies (LAN IP / hostname).
+   */
+  private isAllowedHost(req: http.IncomingMessage): boolean {
+    if (!isLoopbackHost(this.host)) return true;
+    const hostHeader = (req.headers.host ?? '').toLowerCase();
+    const hostname = hostHeader.replace(/:\d+$/, '').replace(/^\[|\]$/g, '');
+    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
   }
 
   // --- Route Handlers ---

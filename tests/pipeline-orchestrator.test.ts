@@ -144,6 +144,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => {
 
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 import {
+  hardenReadOnlyTools,
   MalformedVerdictError,
   PipelineOrchestrator,
   parseChatVerdict,
@@ -152,7 +153,9 @@ import {
   parseSecurityVerdict,
   parseVerifyVerdict,
   postProcessRequirements,
+  READ_ONLY_DISALLOWED_TOOLS,
   sendWithVerdict,
+  validateTeamName,
 } from '../src/pipeline-orchestrator.js';
 
 const GUARDED_ENV_KEYS = [
@@ -175,6 +178,44 @@ function initGitProject(dir: string): void {
   execSync('git commit -m initial', { cwd: dir, stdio: 'pipe' });
   execSync('git branch -M main', { cwd: dir, stdio: 'pipe' });
 }
+
+describe('validateTeamName', () => {
+  it('accepts ordinary names (including spaces)', () => {
+    expect(() => validateTeamName('my team')).not.toThrow();
+    expect(() => validateTeamName('feature-42')).not.toThrow();
+  });
+
+  it('rejects path-traversal and separator characters', () => {
+    expect(() => validateTeamName('../evil')).toThrow('..');
+    expect(() => validateTeamName('a/b')).toThrow('/');
+    expect(() => validateTeamName('a\\b')).toThrow('\\');
+    expect(() => validateTeamName('..')).toThrow('..');
+  });
+
+  it('rejects empty, control-char, and over-long names', () => {
+    expect(() => validateTeamName('   ')).toThrow('empty');
+    expect(() => validateTeamName('bad\u0001name')).toThrow('control');
+    expect(() => validateTeamName('x'.repeat(101))).toThrow('100');
+  });
+});
+
+describe('hardenReadOnlyTools', () => {
+  it('expands a read-only role to the full denial set', () => {
+    expect(hardenReadOnlyTools(['Write', 'Edit', 'Bash'])).toEqual(READ_ONLY_DISALLOWED_TOOLS);
+  });
+
+  it('adds the network/notebook tools even if only one write tool is denied', () => {
+    const result = hardenReadOnlyTools(['Bash']);
+    expect(result).toContain('NotebookEdit');
+    expect(result).toContain('WebFetch');
+    expect(result).toContain('WebSearch');
+    expect(result).toContain('Task');
+  });
+
+  it('leaves write-capable roles (no denials) untouched', () => {
+    expect(hardenReadOnlyTools([])).toEqual([]);
+  });
+});
 
 describe('PipelineOrchestrator', () => {
   let tmpDir: string;
@@ -434,16 +475,19 @@ describe('PipelineOrchestrator', () => {
   // --- Simple pipeline ---
 
   describe('simple pipeline', () => {
-    it('creates only 1 agent session for simple tasks', async () => {
+    it('runs a Security-1 scan before a simple task', async () => {
       orchestrator.createTeam('simple', projectDir);
       orchestrator.assignTask('simple', 'fix a typo');
 
-      // Wait for session to be created
+      // Wait for sessions to be created
       await new Promise((resolve) => setTimeout(resolve, 50));
 
-      // Simple task: only 1 query() call (Worker-1). Coordinator-1 is
+      // Security must run on every task now: all four agents spawn up front and
+      // Security-1 receives the scan prompt before any implementation. It may
+      // then downgrade a trivial task to a Worker-1-only run. Coordinator-1 is
       // lazy-spawned on first chat message and is not part of pipeline counts.
-      expect(mock.sessions.length).toBe(1);
+      expect(mock.sessions.length).toBe(4);
+      expect(mock.getSession(0).receivedMessages.join('\n')).toContain('PRE-WORK SCAN');
     });
 
     it('does not block simple tasks on requirements extraction', async () => {
@@ -459,8 +503,12 @@ describe('PipelineOrchestrator', () => {
 
         await new Promise((resolve) => setTimeout(resolve, 50));
 
-        expect(mock.sessions.length).toBe(1);
-        expect(mock.getSession(0).receivedMessages.join('\n')).toContain('build me a calculator');
+        // Security-1 scans first, then downgrades a trivial task to Worker-1-only.
+        mock.getSession(0).respond('CLASSIFICATION: SIMPLE\nTrivial change.');
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        // Worker-1 receives the task directly — no requirements-extraction step.
+        expect(mock.getSession(1).receivedMessages.join('\n')).toContain('build me a calculator');
       } finally {
         await orch.shutdown();
       }
@@ -476,12 +524,13 @@ describe('PipelineOrchestrator', () => {
 
       await new Promise((resolve) => setTimeout(resolve, 50));
 
-      // Worker-1 session
-      const workerSession = mock.getSession(0);
-      expect(workerSession).toBeDefined();
-
-      // Wait for the message to be received
+      // Security-1 scans, then downgrades the trivial task to Worker-1-only.
+      mock.getSession(0).respond('CLASSIFICATION: SIMPLE\nNo concerns.');
       await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Worker-1 session (session 1; session 0 is Security-1)
+      const workerSession = mock.getSession(1);
+      expect(workerSession).toBeDefined();
 
       // Respond as Worker-1
       workerSession.respond('Fixed the typo in README.md');
@@ -492,17 +541,20 @@ describe('PipelineOrchestrator', () => {
       const status = orchestrator.getTeamStatus('simple');
       expect(status?.currentPhase).toBe(TeamPhase.Done);
       expect(status?.agents['Worker-1'].state).toBe(AgentState.Done);
-      expect(status?.agents['Worker-2'].state).toBe(AgentState.Spawning);
-      expect(status?.agents['Security-1'].state).toBe(AgentState.Spawning);
-      expect(status?.agents['Reviewer-1'].state).toBe(AgentState.Spawning);
+      // The SIMPLE downgrade marks the unused agents Done.
+      expect(status?.agents['Worker-2'].state).toBe(AgentState.Done);
+      expect(status?.agents['Security-1'].state).toBe(AgentState.Done);
+      expect(status?.agents['Reviewer-1'].state).toBe(AgentState.Done);
     });
 
-    it('emits task-classified with simple complexity', () => {
+    it('emits task-classified when a task is assigned', () => {
       const handler = vi.fn();
       orchestrator.on('task-classified', handler);
       orchestrator.createTeam('simple', projectDir);
       orchestrator.assignTask('simple', 'fix a typo');
-      expect(handler).toHaveBeenCalledWith('simple', 'simple', 1);
+      // Every task spawns the full agent set up front (Security-1 scans first);
+      // it may later re-emit a downgrade to 1.
+      expect(handler).toHaveBeenCalledWith('simple', 'simple', 4);
     });
 
     it('uses correct model for Worker', async () => {
@@ -537,7 +589,11 @@ describe('PipelineOrchestrator', () => {
 
       await new Promise((resolve) => setTimeout(resolve, 50));
 
-      const workerSession = mock.getSession(0);
+      // Security-1 downgrades to Worker-1-only.
+      mock.getSession(0).respond('CLASSIFICATION: SIMPLE\nNo concerns.');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const workerSession = mock.getSession(1);
       fs.writeFileSync(
         path.join(projectDir, 'new-secret.txt'),
         'api_key = "sk-proj-abcdefghijklmnopqrstuvwxyz"\n',
@@ -1083,7 +1139,8 @@ describe('PipelineOrchestrator', () => {
 
       await new Promise((resolve) => setTimeout(resolve, 50));
 
-      const workerSession = mock.getSession(mock.sessions.length - 1);
+      // Session 1 is Worker-1 (session 0 is Security-1, which scans first).
+      const workerSession = mock.getSession(1);
       expect(workerSession.options.model).toBe('claude-sonnet-4-6');
       await orch.shutdown();
     });
@@ -1101,7 +1158,8 @@ describe('PipelineOrchestrator', () => {
 
       await new Promise((resolve) => setTimeout(resolve, 50));
 
-      const workerSession = mock.getSession(mock.sessions.length - 1);
+      // Session 1 is Worker-1 (session 0 is Security-1, which scans first).
+      const workerSession = mock.getSession(1);
       expect(workerSession.options.effort).toBe('high');
       await orch.shutdown();
     });
@@ -1120,9 +1178,19 @@ describe('PipelineOrchestrator', () => {
       // Worker-2's frontmatter declares disallowedTools: Write, Edit, Bash.
       // The orchestrator must pick this up per-instance, not per-role,
       // otherwise Worker-1's empty disallowedTools would leak to Worker-2
-      // and the verifier could write/edit code despite its prompt.
+      // and the verifier could write/edit code despite its prompt. Because it is
+      // a read-only role, the network/notebook tools are also denied (a read-only
+      // role only actually is one if NotebookEdit/WebFetch/WebSearch/Task are cut).
       const tools = (orchestrator as any).disallowedTools as Record<string, string[]>;
-      expect(tools['Worker-2']).toEqual(['Write', 'Edit', 'Bash']);
+      expect(tools['Worker-2']).toEqual([
+        'Write',
+        'Edit',
+        'Bash',
+        'NotebookEdit',
+        'WebFetch',
+        'WebSearch',
+        'Task',
+      ]);
       expect(tools['Worker-1']).toEqual([]);
     });
   });
@@ -1180,8 +1248,11 @@ describe('PipelineOrchestrator', () => {
 
       await new Promise((resolve) => setTimeout(resolve, 50));
 
-      // Simple pipeline: just Worker-1
-      const worker = mock.getSession(0);
+      // Security-1 scans, then downgrades to Worker-1-only.
+      mock.getSession(0).respond('CLASSIFICATION: SIMPLE\nNo concerns.');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const worker = mock.getSession(1);
       worker.respond('Fixed the typo in README.');
       worker.complete();
 
@@ -1249,7 +1320,11 @@ describe('PipelineOrchestrator', () => {
 
       await new Promise((resolve) => setTimeout(resolve, 50));
 
-      const worker = mock.getSession(0);
+      // Security-1 scans, then downgrades to Worker-1-only.
+      mock.getSession(0).respond('CLASSIFICATION: SIMPLE\nNo concerns.');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const worker = mock.getSession(1);
       worker.respond('Fixed the typo.');
       worker.complete();
 
@@ -1364,8 +1439,16 @@ describe('PipelineOrchestrator', () => {
 
       await new Promise((resolve) => setTimeout(resolve, 50));
 
-      // Only 1 session (Worker-1), no Worker-2
-      expect(mock.sessions.length).toBe(1);
+      // Security-1 downgrades to Worker-1-only.
+      mock.getSession(0).respond('CLASSIFICATION: SIMPLE\nNo concerns.');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      mock.getSession(1).respond('Fixed the typo.');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Worker-2 (session 2) is spawned but never receives a verification prompt.
+      const worker2 = mock.getSession(2);
+      expect(worker2.receivedMessages.join('\n')).not.toContain('REQUIREMENTS VERIFICATION');
     });
   });
 

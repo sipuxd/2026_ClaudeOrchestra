@@ -177,9 +177,9 @@ describe('buildGovernanceHooks', () => {
     expect(hooks.PostToolUse).toHaveLength(1);
   });
 
-  it('PreToolUse matcher covers Read|Edit|Write|Bash', () => {
+  it('PreToolUse matcher covers Read|Edit|Write|Bash|NotebookEdit', () => {
     const hooks = buildGovernanceHooks('/tmp');
-    expect(hooks.PreToolUse![0].matcher).toBe('Read|Edit|Write|Bash');
+    expect(hooks.PreToolUse![0].matcher).toBe('Read|Edit|Write|Bash|NotebookEdit');
     expect(hooks.PreToolUse![0].hooks).toHaveLength(1);
   });
 

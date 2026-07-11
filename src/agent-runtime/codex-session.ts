@@ -168,7 +168,7 @@ export class CodexAgentSession implements AgentSession {
     if (id && this.monitoredStreamKeys.has(key)) return;
     if (id) this.monitoredStreamKeys.add(key);
 
-    const findings = evaluateCodexStreamItem(item);
+    const findings = evaluateCodexStreamItem(item, this.opts.cwd);
     if (findings.length === 0) return;
 
     const report: GuardrailReport = {

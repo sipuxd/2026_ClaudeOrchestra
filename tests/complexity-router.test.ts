@@ -68,6 +68,26 @@ describe('classifyComplexity', () => {
     expect(classifyComplexity('Create a new module for data processing')).toBe('standard');
   });
 
+  // --- Destructive intent (always standard, even when short) ---
+
+  it('routes short destructive tasks to standard', () => {
+    // These are short and keyword-free by the old rules, but destructive.
+    expect(classifyComplexity('delete every row in the users table')).toBe('standard');
+    expect(classifyComplexity('drop the schema')).toBe('standard');
+    expect(classifyComplexity('truncate the logs')).toBe('standard');
+    expect(classifyComplexity('remove the old config')).toBe('standard');
+    expect(classifyComplexity('reset the database')).toBe('standard');
+    expect(classifyComplexity('rm -rf the cache')).toBe('standard');
+    expect(classifyComplexity('rotate the API token')).toBe('standard');
+  });
+
+  it('does not misclassify words that merely contain a destructive substring', () => {
+    // Whole-word matching: 'reset' in 'preset', 'drop' in 'backdrop', etc.
+    expect(classifyComplexity('preset the layout')).toBe('simple');
+    expect(classifyComplexity('update the backdrop image')).toBe('simple');
+    expect(classifyComplexity('add a form field')).toBe('simple');
+  });
+
   // --- Standard tasks (word count trigger) ---
 
   it('classifies long descriptions as standard regardless of keywords', () => {

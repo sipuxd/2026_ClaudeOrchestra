@@ -127,7 +127,8 @@ const FORBIDDEN_COMMAND_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
     // SSH private keys and cloud credential files, wherever they live. Bash is
     // not path-contained, so a read of these outside the project (e.g.
     // `cat ~/.ssh/id_rsa`) must be blocked by content, not location.
-    pattern: /\bid_(?:rsa|dsa|ecdsa|ed25519)\b|(?:^|[\s='"/])\.ssh\/|\.aws\/credentials\b|\.config\/gcloud\b/i,
+    pattern:
+      /\bid_(?:rsa|dsa|ecdsa|ed25519)\b|(?:^|[\s='"/])\.ssh\/|\.aws\/credentials\b|\.config\/gcloud\b/i,
     reason: 'accessing SSH keys or cloud credential files is blocked',
   },
   {

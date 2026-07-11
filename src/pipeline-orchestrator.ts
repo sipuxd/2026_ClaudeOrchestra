@@ -132,7 +132,14 @@ export const READ_ONLY_DISALLOWED_TOOLS = [
 // `git diff` on large diffs (its prompt instructs this when the diff is
 // truncated). Deny writes and network/exfiltration tools, but keep Bash — the
 // guardrail hook blocks destructive and secret-exfiltration shell commands.
-export const SECURITY_REVIEW_DISALLOWED_TOOLS = ['Write', 'Edit', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Task'];
+export const SECURITY_REVIEW_DISALLOWED_TOOLS = [
+  'Write',
+  'Edit',
+  'NotebookEdit',
+  'WebFetch',
+  'WebSearch',
+  'Task',
+];
 
 // Instances that must ALWAYS be read-only, driven by role identity rather than
 // inferred from a tool list — so a config/frontmatter override can never grant

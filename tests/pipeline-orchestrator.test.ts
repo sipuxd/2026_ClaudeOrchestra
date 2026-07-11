@@ -611,6 +611,93 @@ describe('PipelineOrchestrator', () => {
     });
   });
 
+  // --- Requirements approval + editing ---
+
+  describe('requirements approval', () => {
+    it('emits requirements as editable content and honors user edits', async () => {
+      // The requirements agent prompt must exist for extraction to run.
+      fs.writeFileSync(
+        path.join(rolesDir, 'requirements.agent.md'),
+        '---\nname: requirements\nmodel: claude-opus-4-6\neffort: medium\nmaxTurns: 1\n---\n\n# Requirements\nExtract requirements.',
+      );
+
+      const orch = new PipelineOrchestrator({
+        registryPath: path.join(tmpDir, 'registry-req-edit.json'),
+        rolesDir,
+        maxConcurrentTeams: 3,
+        // skipRequirements defaults false → extraction + approval runs.
+      });
+
+      try {
+        const feedbacks: any[] = [];
+        orch.on('feedback', (_teamId, fb) => feedbacks.push(fb));
+
+        orch.createTeam('req-edit', projectDir);
+        // 'implement ...' is a standard task, so requirements extraction runs.
+        orch.assignTask('req-edit', 'implement user authentication');
+
+        await new Promise((r) => setTimeout(r, 50));
+
+        // Session 0 is the Requirements agent; respond with a numbered list.
+        mock.getSession(0).respond('1. Requirement Alpha\n2. Requirement Beta');
+
+        await new Promise((r) => setTimeout(r, 50));
+
+        // A blocking prompt is emitted with the list as editable content —
+        // not baked into the message.
+        const prompt = feedbacks.find((f) => f.title === 'Requirements Checklist');
+        expect(prompt).toBeDefined();
+        expect(prompt.editableContent).toContain('Requirement Alpha');
+        expect(prompt.message).not.toContain('Requirement Alpha');
+
+        // The user edits the requirements and approves.
+        orch.resolveFeedback('req-edit', prompt.id, 'approve', '1. Edited requirement only');
+
+        await new Promise((r) => setTimeout(r, 50));
+
+        // The edited text — not the original extraction — becomes the requirements.
+        const status = orch.getTeamStatus('req-edit');
+        expect(status?.currentTask?.requirements).toBe('1. Edited requirement only');
+      } finally {
+        await orch.shutdown();
+      }
+    });
+
+    it('uses the original requirements when approved without edits', async () => {
+      fs.writeFileSync(
+        path.join(rolesDir, 'requirements.agent.md'),
+        '---\nname: requirements\nmodel: claude-opus-4-6\neffort: medium\nmaxTurns: 1\n---\n\n# Requirements\nExtract requirements.',
+      );
+
+      const orch = new PipelineOrchestrator({
+        registryPath: path.join(tmpDir, 'registry-req-plain.json'),
+        rolesDir,
+        maxConcurrentTeams: 3,
+      });
+
+      try {
+        const feedbacks: any[] = [];
+        orch.on('feedback', (_teamId, fb) => feedbacks.push(fb));
+
+        orch.createTeam('req-plain', projectDir);
+        orch.assignTask('req-plain', 'implement user authentication');
+        await new Promise((r) => setTimeout(r, 50));
+        mock.getSession(0).respond('1. Requirement Alpha\n2. Requirement Beta');
+        await new Promise((r) => setTimeout(r, 50));
+
+        const prompt = feedbacks.find((f) => f.title === 'Requirements Checklist');
+        // Approve with no edited text → original extraction is used.
+        orch.resolveFeedback('req-plain', prompt.id, 'approve');
+        await new Promise((r) => setTimeout(r, 50));
+
+        const status = orch.getTeamStatus('req-plain');
+        expect(status?.currentTask?.requirements).toContain('Requirement Alpha');
+      } finally {
+        await orch.shutdown();
+      }
+    });
+  });
+
   // --- Standard pipeline ---
 
   describe('standard pipeline', () => {

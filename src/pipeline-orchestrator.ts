@@ -101,6 +101,12 @@ export interface FeedbackPayload {
   highlightTerms?: string[];
   detail?: string;
   metadata?: Record<string, unknown>;
+  /**
+   * Editable body for a blocking prompt (e.g. the requirements checklist). When
+   * present, the dashboard lets the user revise this text before responding; the
+   * edited text is returned to the resolver as `text`.
+   */
+  editableContent?: string;
 }
 // Agent config defaults are read from YAML frontmatter in agent .md files.
 // These fallbacks are used when frontmatter is missing a field.
@@ -408,7 +414,10 @@ interface PipelineTeamContext {
   /** Whether a pipeline is currently running */
   pipelineRunning: boolean;
   /** Pending blocking feedback requests awaiting user response */
-  pendingFeedback: Map<string, { resolve: (value: string) => void; feedback: FeedbackPayload }>;
+  pendingFeedback: Map<
+    string,
+    { resolve: (result: { value: string; text?: string }) => void; feedback: FeedbackPayload }
+  >;
   /** Active final security review session (if running) */
   securityReviewSession?: AgentSession;
   /** Whether Security-1 classified the task as COMPLEX */
@@ -970,20 +979,26 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
           return;
         }
 
-        // Show requirements for user approval
+        // Show requirements for user approval. The requirements body is passed as
+        // editableContent so the user can revise it in the dashboard before
+        // approving; the edited text (if any) comes back as response.text.
         const response = await this.askUser(
           teamId,
           'Requirements Checklist',
-          `Review the extracted requirements before agents start:\n\n${requirements}`,
+          'Review the extracted requirements before agents start. You can edit them before approving.',
           [
             { label: 'Approve', value: 'approve' },
             { label: 'Skip', value: 'skip' },
           ],
+          requirements,
         );
 
-        if (response === 'approve') {
-          ctx.state.setTaskRequirements(requirements);
-          this.persistence.persistNow(ctx.state);
+        if (response.value === 'approve') {
+          const finalRequirements = (response.text ?? requirements).trim();
+          if (finalRequirements) {
+            ctx.state.setTaskRequirements(finalRequirements);
+            this.persistence.persistNow(ctx.state);
+          }
         }
         // If 'skip', proceed without requirements
       }
@@ -2026,9 +2041,10 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     title: string,
     message: string,
     actions: Array<{ label: string; value: string }>,
-  ): Promise<string> {
+    editableContent?: string,
+  ): Promise<{ value: string; text?: string }> {
     const ctx = this.teams.get(teamId);
-    if (!ctx) return Promise.resolve('');
+    if (!ctx) return Promise.resolve({ value: '' });
 
     const id = randomUUID();
     const feedback: FeedbackPayload = {
@@ -2039,20 +2055,25 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       actions,
       blocking: true,
       timestamp: new Date().toISOString(),
+      editableContent,
     };
 
-    return new Promise<string>((resolve) => {
+    return new Promise((resolve) => {
       ctx.pendingFeedback.set(id, { resolve, feedback });
       this.emit('feedback', teamId, feedback);
     });
   }
 
-  /** Called when user responds from dashboard — resolves pending promise */
-  resolveFeedback(teamId: string, feedbackId: string, value: string): void {
+  /**
+   * Called when the user responds from the dashboard — resolves the pending
+   * promise. `text` carries an edited body when the prompt was editable (e.g. a
+   * revised requirements checklist).
+   */
+  resolveFeedback(teamId: string, feedbackId: string, value: string, text?: string): void {
     const ctx = this.teams.get(teamId);
     const pending = ctx?.pendingFeedback?.get(feedbackId);
     if (pending) {
-      pending.resolve(value);
+      pending.resolve({ value, text });
       ctx!.pendingFeedback.delete(feedbackId);
       this.emit('feedback-response', teamId, feedbackId, value);
     }

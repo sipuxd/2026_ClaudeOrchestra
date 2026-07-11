@@ -746,14 +746,19 @@ export class DashboardServer {
   ): Promise<void> {
     try {
       const body = JSON.parse(await this.readBody(req));
-      const { feedbackId, value } = body;
+      const { feedbackId, value, text } = body;
 
       if (!feedbackId || value === undefined) {
         this.sendJSON(res, { error: 'feedbackId and value are required' }, 400);
         return;
       }
 
-      this.orchestrator.resolveFeedback(teamId, feedbackId, value);
+      this.orchestrator.resolveFeedback(
+        teamId,
+        feedbackId,
+        value,
+        typeof text === 'string' ? text : undefined,
+      );
       this.sendJSON(res, { ok: true });
     } catch (err: any) {
       this.sendJSON(res, { error: err.message }, 400);

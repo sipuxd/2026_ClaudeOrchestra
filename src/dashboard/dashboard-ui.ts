@@ -262,6 +262,11 @@ a:hover{text-decoration:underline}
   max-height:120px;overflow-y:auto;white-space:pre-wrap;font-family:'SF Mono','Fira Code',monospace;
   background:var(--bg);padding:8px;border-radius:var(--radius-sm)}
 .feedback-block-actions{display:flex;gap:8px;flex-wrap:wrap}
+.feedback-block-editable{color:var(--text-secondary);font-size:.8125rem;line-height:1.5;white-space:pre-wrap;
+  margin-bottom:10px;max-height:240px;overflow-y:auto;background:var(--bg);padding:8px;border-radius:var(--radius-sm)}
+.feedback-edit-area{width:100%;box-sizing:border-box;min-height:200px;max-height:400px;resize:vertical;
+  color:var(--text-primary);background:var(--bg);border:1px solid var(--blue);border-radius:var(--radius-sm);
+  padding:8px 10px;margin-bottom:10px;font-family:'SF Mono','Fira Code',monospace;font-size:.8125rem;line-height:1.5}
 
 /* --- Summary Content --- */
 .summary-status-top{display:flex;align-items:center;gap:16px;padding:16px;margin-bottom:16px;
@@ -629,6 +634,7 @@ const state = {
   recentlyAddedProjects: new Set(), // projectPaths added via + Add Project this session
   runners: {},          // projectPath -> { state, framework, url, lastError, stdoutTail }
   feedbacks: {},       // teamId -> [ feedback objects ]
+  editingFeedback: {}, // feedbackId -> in-progress edited text (draft survives re-renders)
   liveOutput: {},      // teamId -> [ { agent, text, type } ]
   chatMessages: {},    // teamId -> [ { role, content, timestamp, verdict? } ]
   chatPending: {},     // teamId -> bool (true while a coordinator turn is in flight)
@@ -1367,23 +1373,54 @@ function feedbackBlockIcon(fb) {
   if (fb.type === 'warning' || fb.type === 'question' || fb.blocking) return '&#9888;';
   return '&#10003;';
 }
+// Locate a feedback object (and its team) by id across all teams. Lets the
+// edit handlers take only the UUID feedback id, avoiding team-name interpolation
+// in inline handlers.
+function findFeedback(feedbackId) {
+  for (var tid in state.feedbacks) {
+    var arr = state.feedbacks[tid];
+    if (!arr) continue;
+    for (var i = 0; i < arr.length; i++) {
+      if (arr[i].id === feedbackId) return { teamId: tid, fb: arr[i] };
+    }
+  }
+  return null;
+}
+
 function renderFeedbackBlocks(teamId) {
   var fbs = state.feedbacks[teamId];
   if (!fbs || fbs.length === 0) return '';
   var html = '';
   for (var i = 0; i < fbs.length; i++) {
     var fb = fbs[i];
+    var hasEditable = fb.editableContent != null;
+    var editing = Object.prototype.hasOwnProperty.call(state.editingFeedback, fb.id);
     html += '<div class="feedback-block ' + feedbackBlockClass(fb) + '">';
     html += '<div class="feedback-block-title">' + feedbackBlockIcon(fb) + ' ' + esc(fb.title || 'Status') + '</div>';
     html += '<div class="feedback-block-msg">' + esc(fb.message) + '</div>';
     if (fb.detail) {
       html += '<div class="feedback-block-detail">' + esc(fb.detail) + '</div>';
     }
+    // Editable body (e.g. the requirements checklist): read-only until the user
+    // clicks Edit, then an inline textarea whose draft survives re-renders.
+    if (hasEditable) {
+      if (editing) {
+        html += '<textarea class="feedback-edit-area" spellcheck="false" oninput="window.__api.updateFeedbackDraft(\\'' + esc(fb.id) + '\\', this.value)">' + esc(state.editingFeedback[fb.id]) + '</textarea>';
+      } else {
+        html += '<div class="feedback-block-editable">' + esc(fb.editableContent) + '</div>';
+      }
+    }
     html += '<div class="feedback-block-actions">';
-    if (fb.actions && fb.actions.length > 0) {
+    if (hasEditable && editing) {
+      html += '<button class="btn btn-sm btn-primary" onclick="window.__api.submitFeedbackEdit(\\'' + esc(fb.id) + '\\')">Save &amp; Approve</button>';
+      html += '<button class="btn btn-sm btn-ghost" onclick="window.__api.cancelFeedbackEdit(\\'' + esc(fb.id) + '\\')">Cancel</button>';
+    } else if (fb.actions && fb.actions.length > 0) {
       for (var a = 0; a < fb.actions.length; a++) {
         var act = fb.actions[a];
         html += '<button class="btn btn-sm btn-primary" onclick="window.__api.respondFeedback(\\'' + esc(teamId) + '\\',\\'' + esc(fb.id) + '\\',\\'' + esc(act.value) + '\\')">' + esc(act.label) + '</button>';
+      }
+      if (hasEditable) {
+        html += '<button class="btn btn-sm btn-secondary" onclick="window.__api.startFeedbackEdit(\\'' + esc(fb.id) + '\\')">Edit</button>';
       }
     } else {
       html += '<button class="btn btn-sm btn-primary" onclick="window.__api.respondFeedback(\\'' + esc(teamId) + '\\',\\'' + esc(fb.id) + '\\',\\'ok\\')">' + 'Acknowledge' + '</button>';
@@ -2886,25 +2923,53 @@ window.__api = {
         $('srSubmitBtn').disabled = false;
       });
   },
-  respondFeedback: function(teamId, feedbackId, value) {
+  respondFeedback: function(teamId, feedbackId, value, text) {
+    var payload = { feedbackId: feedbackId, value: value };
+    if (typeof text === 'string') payload.text = text;
     fetch('/api/teams/' + encodeURIComponent(teamId) + '/feedback', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ feedbackId: feedbackId, value: value })
+      body: JSON.stringify(payload)
     }).then(function(r) {
       if (!r.ok) return r.json().then(function(d){ throw new Error(d.error||'Failed'); });
       return r.json();
     }).then(function() {
-      // Remove the feedback from state
+      // Remove the feedback (and any edit draft) from state
       var fbs = state.feedbacks[teamId];
       if (fbs) {
         state.feedbacks[teamId] = fbs.filter(function(f){ return f.id !== feedbackId; });
       }
+      delete state.editingFeedback[feedbackId];
       showToast('Feedback sent');
       renderCurrentView();
     }).catch(function(e) {
       showToast(e.message, 'error');
     });
+  },
+  startFeedbackEdit: function(feedbackId) {
+    var found = findFeedback(feedbackId);
+    if (!found) return;
+    state.editingFeedback[feedbackId] = found.fb.editableContent || '';
+    renderCurrentView();
+  },
+  updateFeedbackDraft: function(feedbackId, text) {
+    // Keep the draft in state so it survives SSE re-renders. Do NOT re-render
+    // here — that would recreate the textarea and disrupt typing.
+    state.editingFeedback[feedbackId] = text;
+  },
+  cancelFeedbackEdit: function(feedbackId) {
+    delete state.editingFeedback[feedbackId];
+    renderCurrentView();
+  },
+  submitFeedbackEdit: function(feedbackId) {
+    var found = findFeedback(feedbackId);
+    if (!found) return;
+    var text = state.editingFeedback[feedbackId];
+    if (typeof text !== 'string' || !text.trim()) {
+      showToast('Requirements cannot be empty', 'error');
+      return;
+    }
+    this.respondFeedback(found.teamId, feedbackId, 'approve', text);
   },
   toggleSetting: function(key) {
     state.settings[key] = !state.settings[key];
@@ -3114,7 +3179,8 @@ function connectSSE() {
     if (!existing) {
       state.feedbacks[data.teamId].push({
         id: data.id, type: data.type, title: data.title, message: data.message,
-        blocking: data.blocking, actions: data.actions, detail: data.detail, timestamp: data.timestamp
+        blocking: data.blocking, actions: data.actions, detail: data.detail, timestamp: data.timestamp,
+        editableContent: data.editableContent
       });
     }
     renderCurrentView();

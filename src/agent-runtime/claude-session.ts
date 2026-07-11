@@ -168,13 +168,21 @@ export class ClaudeAgentSession implements AgentSession {
           }
         }
 
-        const text = extractSdkText(msg);
+        const text = extractAssistantText(msg);
         if (text) {
           this.accumulated += text;
           this.onProgress?.(this.accumulated);
         }
 
         if ((msg as any).type === 'result' && this.pendingResolve) {
+          // The SDK's `result` message repeats the final assistant text that was
+          // already streamed via `assistant` messages and accumulated above.
+          // Use its `result` field ONLY as a fallback when nothing streamed, so
+          // the response text is never duplicated.
+          if (!this.accumulated) {
+            const resultText = (msg as any).result;
+            if (typeof resultText === 'string') this.accumulated = resultText;
+          }
           const result = this.accumulated;
           this.accumulated = '';
           const resolve = this.pendingResolve;
@@ -196,16 +204,16 @@ export class ClaudeAgentSession implements AgentSession {
   }
 }
 
-function extractSdkText(msg: any): string | null {
+// Extracts the streamed text from an `assistant` message only. The final
+// `result` message is intentionally NOT handled here — its `result` field
+// duplicates the assistant text and is used as a fallback in consume().
+function extractAssistantText(msg: any): string | null {
   const content = msg?.message?.content ?? msg?.content;
   if (msg?.type === 'assistant' && Array.isArray(content)) {
     const textParts = content
       .filter((block: any) => block.type === 'text')
       .map((block: any) => block.text);
     return textParts.length > 0 ? textParts.join('\n') : null;
-  }
-  if (msg?.type === 'result' && msg.result) {
-    return typeof msg.result === 'string' ? msg.result : null;
   }
   return null;
 }

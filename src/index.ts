@@ -217,6 +217,16 @@ function migratePortfolioFromRegistry(registryPath: string, portfolioPath: strin
 // --- Main ---
 
 async function main(): Promise<void> {
+  // Keep the engine alive through unexpected faults. A single malformed dashboard
+  // request or a stray rejected promise must not take down the orchestrator and
+  // every running team — log and continue instead of letting Node exit.
+  process.on('uncaughtException', (err) => {
+    console.error('[engine] uncaughtException (continuing):', err);
+  });
+  process.on('unhandledRejection', (reason) => {
+    console.error('[engine] unhandledRejection (continuing):', reason);
+  });
+
   const parsed = parseArgs(process.argv);
 
   if (parsed.command === 'help' || parsed.command === '--help') {

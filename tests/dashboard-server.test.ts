@@ -217,6 +217,38 @@ describe('DashboardServer', () => {
     });
   });
 
+  // --- Crash resistance (T1) ---
+
+  describe('crash resistance', () => {
+    it('answers 400 (not a crash) for a malformed percent-encoded route param', async () => {
+      // decodeURIComponent('%') throws URIError; the handler must catch it.
+      const res = await rawRequest(port, 'GET', '/api/teams/%');
+      expect(res.status).toBe(400);
+      // Server is still alive: a normal request succeeds afterward.
+      const after = await rawRequest(port, 'GET', '/api/teams');
+      expect(after.status).toBe(200);
+    });
+
+    it('answers 400 (not a crash) for a malformed Host header', async () => {
+      // new URL('http://a b') throws; the handler must catch it before routing.
+      const res = await rawRequest(port, 'GET', '/', { headers: { Host: 'a b' } });
+      expect(res.status).toBe(400);
+      const after = await rawRequest(port, 'GET', '/api/teams');
+      expect(after.status).toBe(200);
+    });
+
+    it('rejects an oversized request body with 413', async () => {
+      const projectPath = path.join(tmpDir, 'big-body');
+      fs.mkdirSync(projectPath, { recursive: true });
+      const huge = 'x'.repeat(6 * 1024 * 1024); // 6MB > 5MB cap
+      const res = await rawRequest(port, 'POST', '/api/teams', {
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'big', projectPath, note: huge }),
+      });
+      expect(res.status).toBe(413);
+    });
+  });
+
   // --- Teams API ---
 
   describe('GET /api/teams', () => {

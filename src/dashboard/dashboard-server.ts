@@ -254,6 +254,25 @@ export class DashboardServer {
   // --- HTTP Request Handling ---
 
   private handleRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
+    try {
+      this.routeRequest(req, res);
+    } catch (err) {
+      // A malformed Host header (new URL) or malformed percent-encoding in a
+      // route param (decodeURIComponent) throws synchronously during routing.
+      // Answer 400 rather than let the exception reach http.createServer, which
+      // has no listener and would crash the whole engine — dashboard,
+      // orchestrator, and every running team share this process.
+      if (!res.headersSent && !res.writableEnded) {
+        const status = err instanceof URIError || err instanceof TypeError ? 400 : 500;
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({ error: status === 400 ? 'Bad request' : 'Internal server error' }),
+        );
+      }
+    }
+  }
+
+  private routeRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
     const pathname = url.pathname;
     const method = req.method ?? 'GET';
@@ -617,7 +636,7 @@ export class DashboardServer {
 
       this.sendJSON(res, state.snapshot, 201);
     } catch (err: any) {
-      this.sendJSON(res, { error: err.message }, 400);
+      this.sendJSON(res, { error: err.message }, err.statusCode ?? 400);
     }
   }
 
@@ -638,7 +657,7 @@ export class DashboardServer {
       this.orchestrator.assignTask(teamId, description, images);
       this.sendJSON(res, { ok: true });
     } catch (err: any) {
-      this.sendJSON(res, { error: err.message }, 400);
+      this.sendJSON(res, { error: err.message }, err.statusCode ?? 400);
     }
   }
 
@@ -647,7 +666,7 @@ export class DashboardServer {
       await this.orchestrator.terminateTeam(teamId);
       this.sendJSON(res, { ok: true });
     } catch (err: any) {
-      this.sendJSON(res, { error: err.message }, 400);
+      this.sendJSON(res, { error: err.message }, err.statusCode ?? 400);
     }
   }
 
@@ -665,7 +684,7 @@ export class DashboardServer {
       const cleared = await this.orchestrator.clearDoneTeams(projectPath);
       this.sendJSON(res, { cleared });
     } catch (err: any) {
-      this.sendJSON(res, { error: err.message }, 400);
+      this.sendJSON(res, { error: err.message }, err.statusCode ?? 400);
     }
   }
 
@@ -689,7 +708,7 @@ export class DashboardServer {
       });
       this.sendJSON(res, project);
     } catch (err: any) {
-      this.sendJSON(res, { error: err.message }, 400);
+      this.sendJSON(res, { error: err.message }, err.statusCode ?? 400);
     }
   }
 
@@ -761,7 +780,7 @@ export class DashboardServer {
       );
       this.sendJSON(res, { ok: true });
     } catch (err: any) {
-      this.sendJSON(res, { error: err.message }, 400);
+      this.sendJSON(res, { error: err.message }, err.statusCode ?? 400);
     }
   }
 
@@ -794,7 +813,7 @@ export class DashboardServer {
         });
       this.sendJSON(res, { ok: true });
     } catch (err: any) {
-      this.sendJSON(res, { error: err.message }, 400);
+      this.sendJSON(res, { error: err.message }, err.statusCode ?? 400);
     }
   }
 
@@ -846,7 +865,7 @@ export class DashboardServer {
       });
       this.sendJSON(res, { ok: true }, 202);
     } catch (err: any) {
-      this.sendJSON(res, { error: err.message }, 400);
+      this.sendJSON(res, { error: err.message }, err.statusCode ?? 400);
     }
   }
 
@@ -875,7 +894,7 @@ export class DashboardServer {
       });
       this.sendJSON(res, { ok: true });
     } catch (err: any) {
-      this.sendJSON(res, { error: err.message }, 400);
+      this.sendJSON(res, { error: err.message }, err.statusCode ?? 400);
     }
   }
 
@@ -1108,7 +1127,7 @@ ${fileListHtml}
         this.sendJSON(res, { paths: dirs.slice(0, 20) });
       });
     } catch (err: any) {
-      this.sendJSON(res, { error: err.message }, 400);
+      this.sendJSON(res, { error: err.message }, err.statusCode ?? 400);
     }
   }
 
@@ -1130,7 +1149,7 @@ ${fileListHtml}
       const status = await this.projectRunner.start(projectPath);
       this.sendJSON(res, status);
     } catch (err: any) {
-      this.sendJSON(res, { error: err.message }, 400);
+      this.sendJSON(res, { error: err.message }, err.statusCode ?? 400);
     }
   }
 
@@ -1148,7 +1167,7 @@ ${fileListHtml}
       await this.projectRunner.stop(projectPath);
       this.sendJSON(res, { stopped: true, projectPath });
     } catch (err: any) {
-      this.sendJSON(res, { error: err.message }, 400);
+      this.sendJSON(res, { error: err.message }, err.statusCode ?? 400);
     }
   }
 
@@ -1355,23 +1374,48 @@ ${fileListHtml}
     );
   }
 
+  // Cap request bodies so an oversized POST cannot balloon the heap or overflow
+  // V8's max string length (an uncaught RangeError that would crash the engine).
+  // The editable-requirements `text` field is the only legitimately large input
+  // and stays well under this.
+  private static readonly MAX_BODY_BYTES = 5 * 1024 * 1024;
+
   private readBody(req: http.IncomingMessage): Promise<string> {
     return new Promise<string>((resolve, reject) => {
-      let data = '';
+      const chunks: Buffer[] = [];
+      let total = 0;
+      let aborted = false;
       req.on('data', (chunk: Buffer) => {
-        data += chunk.toString();
+        if (aborted) return;
+        total += chunk.length;
+        if (total > DashboardServer.MAX_BODY_BYTES) {
+          // Stop buffering so an oversized body can't OOM; reject with a 413
+          // that callers map onto the response. We keep draining (rather than
+          // destroying) so the response flushes without a connection-reset race.
+          aborted = true;
+          reject(Object.assign(new Error('Request body exceeds 5MB limit'), { statusCode: 413 }));
+          return;
+        }
+        chunks.push(chunk);
       });
-      req.on('end', () => resolve(data));
+      req.on('end', () => {
+        if (!aborted) resolve(Buffer.concat(chunks).toString('utf8'));
+      });
       req.on('error', reject);
     });
   }
 
   private sendJSON(res: http.ServerResponse, data: unknown, status = 200): void {
+    // Guard against a double-write: a handler may call this after an earlier
+    // error path already responded. Writing headers twice throws and, with no
+    // process-level catch on the sync path, could take the engine down.
+    if (res.headersSent || res.writableEnded) return;
     res.writeHead(status, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(data));
   }
 
   private send404(res: http.ServerResponse): void {
+    if (res.headersSent || res.writableEnded) return;
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Not found' }));
   }

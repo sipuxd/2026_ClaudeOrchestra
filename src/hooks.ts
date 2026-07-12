@@ -56,21 +56,11 @@ function evaluateToolUse(input: HookInput, projectRoot?: string): HookJSONOutput
 }
 
 /**
- * PreToolUse hook: applies the shared guardrail policy before Claude tool use.
- * Path containment is not enforced here (no project root); use
- * {@link makeBlockTraversal} in production to bind the hook to a project root.
- */
-export async function blockTraversal(
-  input: HookInput,
-  _toolUseID: string | undefined,
-  _options: { signal: AbortSignal },
-): Promise<HookJSONOutput> {
-  return evaluateToolUse(input);
-}
-
-/**
  * Builds a PreToolUse hook bound to `cwd` (the project root), so file paths that
- * resolve outside the project are blocked in addition to the shared policy.
+ * resolve outside the project are blocked in addition to the shared policy. This
+ * is the only PreToolUse hook constructor — an unbound variant that skipped
+ * project containment was removed so a future call site can't silently wire the
+ * weaker check.
  */
 export function makeBlockTraversal(cwd: string) {
   return async function blockTraversalScoped(

@@ -534,17 +534,55 @@ describe('PipelineOrchestrator', () => {
 
       // Respond as Worker-1
       workerSession.respond('Fixed the typo in README.md');
-      workerSession.complete();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // The SIMPLE path still runs a mandatory post-work security sweep on
+      // Security-1 (session 0) before completing.
+      mock.getSession(0).respond('APPROVED — no vulnerabilities found.');
 
       await completionPromise;
 
       const status = orchestrator.getTeamStatus('simple');
       expect(status?.currentPhase).toBe(TeamPhase.Done);
       expect(status?.agents['Worker-1'].state).toBe(AgentState.Done);
-      // The SIMPLE downgrade marks the unused agents Done.
+      // Worker-2 and Reviewer-1 are skipped on the simple path; Security-1 runs
+      // the sweep and is then marked Done.
       expect(status?.agents['Worker-2'].state).toBe(AgentState.Done);
       expect(status?.agents['Security-1'].state).toBe(AgentState.Done);
       expect(status?.agents['Reviewer-1'].state).toBe(AgentState.Done);
+    });
+
+    it('runs a mandatory security sweep on the simple path', async () => {
+      orchestrator.createTeam('simple', projectDir);
+      orchestrator.assignTask('simple', 'add a hello function');
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      mock.getSession(0).respond('CLASSIFICATION: SIMPLE\nNo concerns.');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      mock.getSession(1).respond('Added the hello function.');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Security-1 (session 0) must receive a POST-WORK SWEEP — the gate is not
+      // skipped just because the task was downgraded to SIMPLE.
+      expect(mock.getSession(0).receivedMessages.join('\n')).toContain('POST-WORK SWEEP');
+    });
+
+    it('refuses the SIMPLE downgrade for a destructive task and runs the full pipeline', async () => {
+      orchestrator.createTeam('simple', projectDir);
+      // "delete" is destructive intent — the router flags it, so a Security-1
+      // SIMPLE reply must NOT downgrade; the full pipeline (Worker-2) runs.
+      orchestrator.assignTask('simple', 'delete the temp files');
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      mock.getSession(0).respond('CLASSIFICATION: SIMPLE\nLooks trivial.');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Worker-1 (session 1) implements, then Worker-2 (session 2) is asked to
+      // verify — proving the downgrade was refused.
+      mock.getSession(1).respond('Deleted the temp files.');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(mock.getSession(2).receivedMessages.join('\n')).toContain('REQUIREMENTS VERIFICATION');
     });
 
     it('emits task-classified when a task is assigned', () => {
@@ -1278,7 +1316,9 @@ describe('PipelineOrchestrator', () => {
         'WebSearch',
         'Task',
       ]);
-      expect(tools['Worker-1']).toEqual([]);
+      // Worker-1 is write-capable, but WebFetch/WebSearch are denied to every
+      // instance so the write role can't exfiltrate what it reads.
+      expect(tools['Worker-1']).toEqual(['WebFetch', 'WebSearch']);
     });
   });
 
@@ -1341,7 +1381,10 @@ describe('PipelineOrchestrator', () => {
 
       const worker = mock.getSession(1);
       worker.respond('Fixed the typo in README.');
-      worker.complete();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Mandatory post-work sweep on the simple path.
+      mock.getSession(0).respond('APPROVED — no vulnerabilities found.');
 
       await new Promise((resolve) => setTimeout(resolve, 200));
 
@@ -1413,7 +1456,10 @@ describe('PipelineOrchestrator', () => {
 
       const worker = mock.getSession(1);
       worker.respond('Fixed the typo.');
-      worker.complete();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Mandatory post-work sweep on the simple path.
+      mock.getSession(0).respond('APPROVED — no vulnerabilities found.');
 
       await completionPromise;
 

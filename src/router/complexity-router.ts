@@ -57,6 +57,15 @@ const DESTRUCTIVE_PATTERN =
 const MAX_SIMPLE_WORDS = 20;
 
 /**
+ * True when the task text carries destructive/high-risk intent. Used both by the
+ * router (to force `standard`) and by the pipeline (to refuse a Security-1 SIMPLE
+ * downgrade), so a trivial-looking destructive task can never skip the gates.
+ */
+export function hasDestructiveIntent(description: string): boolean {
+  return DESTRUCTIVE_PATTERN.test(description);
+}
+
+/**
  * Classify a task description as simple or standard.
  *
  * Simple tasks: short descriptions with no complexity markers.

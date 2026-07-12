@@ -130,7 +130,11 @@ export function buildGovernanceHooks(
   return {
     PreToolUse: [
       {
-        matcher: 'Read|Edit|Write|Bash|NotebookEdit',
+        // Grep and Glob take a `path` and can read/enumerate outside the project
+        // (their `path` param is extracted in evaluateToolUse), so they must be
+        // contained too — omitting them let any agent read off-project files
+        // (e.g. ~/.ssh, ~/.aws) that the Read tool is blocked from.
+        matcher: 'Read|Edit|Write|Bash|NotebookEdit|Grep|Glob',
         hooks: [makeBlockTraversal(cwd)],
         timeout: 5,
       },

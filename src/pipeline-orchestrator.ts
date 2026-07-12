@@ -36,7 +36,7 @@ import {
 import { Portfolio, type Project } from './portfolio.js';
 import { Registry } from './registry.js';
 import { Role, type RoleInstance } from './roles/role-types.js';
-import { classifyComplexity } from './router/complexity-router.js';
+import { classifyComplexity, hasDestructiveIntent } from './router/complexity-router.js';
 import { normalizeRuntimeError } from './runtime-errors.js';
 import { ALL_INSTANCES, INSTANCE_AGENT_FILES, INSTANCE_TO_ROLE } from './spawner/agent-files.js';
 import { parseFrontmatter } from './spawner/frontmatter-parser.js';
@@ -128,18 +128,17 @@ export const READ_ONLY_DISALLOWED_TOOLS = [
   'Task',
 ];
 
-// The security REVIEWER is read-only for the repo but needs Bash to run
-// `git diff` on large diffs (its prompt instructs this when the diff is
-// truncated). Deny writes and network/exfiltration tools, but keep Bash — the
-// guardrail hook blocks destructive and secret-exfiltration shell commands.
-export const SECURITY_REVIEW_DISALLOWED_TOOLS = [
-  'Write',
-  'Edit',
-  'NotebookEdit',
-  'WebFetch',
-  'WebSearch',
-  'Task',
-];
+// Network tools have no path containment (the guardrail hook can't scope a fetch
+// to the project), so they are an exfiltration channel even for the write-capable
+// Worker-1, which reads the whole project. Deny them to EVERY instance.
+const NETWORK_EXFIL_TOOLS = ['WebFetch', 'WebSearch'];
+
+// The final security reviewer is read-only for the repo. It works from the diff
+// supplied in its prompt (plus Grep for file content), so it does not need Bash —
+// keeping Bash let a "Do NOT modify the repo" session run `git checkout -- .`,
+// `sed -i`, etc. (the guardrail denylist doesn't block those). Deny the full
+// read-only set; Grep/Glob remain for content search.
+export const SECURITY_REVIEW_DISALLOWED_TOOLS = [...READ_ONLY_DISALLOWED_TOOLS];
 
 // Instances that must ALWAYS be read-only, driven by role identity rather than
 // inferred from a tool list — so a config/frontmatter override can never grant
@@ -501,9 +500,15 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       this.models[instance] = config.models?.[role] ?? fmDefaults.models[instance];
       this.efforts[instance] = config.efforts?.[role] ?? fmDefaults.efforts[instance];
       const baseDisallowed = config.disallowedTools?.[role] ?? fmDefaults.disallowedTools[instance];
-      this.disallowedTools[instance] = READ_ONLY_INSTANCES.includes(instance)
-        ? Array.from(new Set([...baseDisallowed, ...READ_ONLY_DISALLOWED_TOOLS]))
+      const roleDisallowed = READ_ONLY_INSTANCES.includes(instance)
+        ? [...baseDisallowed, ...READ_ONLY_DISALLOWED_TOOLS]
         : hardenReadOnlyTools(baseDisallowed);
+      // Network/exfiltration tools are denied to every instance, including the
+      // write-capable Worker-1 (which reads the whole project and could otherwise
+      // POST secrets out via WebFetch — a channel the guardrail hook can't scope).
+      this.disallowedTools[instance] = Array.from(
+        new Set([...roleDisallowed, ...NETWORK_EXFIL_TOOLS]),
+      );
       this.maxTurnsPerInstance[instance] = config.maxTurns?.[role] ?? fmDefaults.maxTurns[instance];
     }
   }
@@ -1417,9 +1422,9 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
         effort: 'high',
         maxTurns: 15,
         // The security reviewer must not modify the repo ("Do NOT implement
-        // fixes"), but it does need Bash for `git diff` on large diffs. Deny
-        // writes/network at the SDK boundary (the frontmatter restriction is not
-        // applied to ad-hoc sessions); the guardrail hook gates its Bash use.
+        // fixes"), so it is fully read-only (no Bash) — it works from the diff in
+        // its prompt plus Grep for file content. The frontmatter restriction is
+        // not applied to ad-hoc sessions, so pass the denylist explicitly.
         disallowedTools: SECURITY_REVIEW_DISALLOWED_TOOLS,
         guardrails: this.guardrails,
         onProgress: (text: string) => {
@@ -1434,7 +1439,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       if (diffText.length > MAX_DIFF_CHARS) {
         diffText =
           diffText.substring(0, MAX_DIFF_CHARS) +
-          '\n\n[DIFF TRUNCATED — use `git diff main...HEAD` via Bash to see the full diff]';
+          '\n\n[DIFF TRUNCATED — review the changes shown above; use Grep to read the ' +
+          'full content of any changed file you need more context on]';
       }
 
       const response = await session.send(
@@ -1592,54 +1598,160 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
           // Check if Security-1 classified this task as simpler than the heuristic thought
           const classification = parseClassification(scanResult);
           if (classification === 'SIMPLE') {
-            // Downgrade to simple pipeline — close unused sessions
-            worker2.close();
-            reviewer.close();
-            security.close();
-            ctx.sessions = [worker1];
+            // A SIMPLE downgrade skips Worker-2 verification and Reviewer-1 review,
+            // so it must never apply to a task the router flagged as destructive or
+            // one whose own scan raised concerns — otherwise a trivial-looking task
+            // could bypass the gates entirely. Refuse the downgrade in those cases
+            // and fall through to the full pipeline.
+            const scanVerdict = parseSecurityVerdict(scanResult).verdict;
+            const scanConcerns =
+              /\bOFF-LIMITS\b/i.test(scanResult) ||
+              scanVerdict === 'BLOCKED' ||
+              scanVerdict === 'FLAGGED';
+            const destructive = hasDestructiveIntent(task);
 
-            // Update state to reflect reclassification
-            ctx.state.setTaskComplexity('simple');
-            ctx.state.transitionAgent('Worker-2' as any, AgentState.Done);
-            ctx.state.transitionAgent('Security-1' as any, AgentState.Done);
-            ctx.state.transitionAgent('Reviewer-1' as any, AgentState.Done);
-            this.emit('task-classified', teamId, 'simple', 1);
-            this.persistence.persist(ctx.state);
+            if (destructive || scanConcerns) {
+              this.emit(
+                'agent-output',
+                teamId,
+                'Security-1' as any,
+                `[Pipeline] SIMPLE downgrade refused (${
+                  destructive ? 'router flagged destructive intent' : 'scan raised concerns'
+                }) — running the full pipeline.`,
+              );
+              // Fall through to the standard worker/sweep/review loop below.
+            } else {
+              // Trivial task: skip Worker-2 verification and Reviewer-1 review, but
+              // KEEP Security-1 for a mandatory post-work sweep. The security gate
+              // is never skipped, even on the simple path.
+              worker2.close();
+              reviewer.close();
+              ctx.sessions = [worker1, security];
 
-            this.emit(
-              'agent-output',
-              teamId,
-              'Security-1' as any,
-              `[Pipeline] Security classified task as SIMPLE — running Worker-1 only.`,
-            );
+              ctx.state.setTaskComplexity('simple');
+              ctx.state.transitionAgent('Worker-2' as any, AgentState.Done);
+              ctx.state.transitionAgent('Reviewer-1' as any, AgentState.Done);
+              this.emit('task-classified', teamId, 'simple', 2);
+              this.persistence.persist(ctx.state);
 
-            // Run Worker-1 with scan clearance included
-            const fromPhase2 = ctx.state.currentPhase;
-            this.tryTransitionPhase(
-              ctx.state,
-              teamId,
-              fromPhase2,
-              TeamPhase.Work,
-              'simple pipeline (reclassified)',
-            );
-            this.persistence.persist(ctx.state);
+              this.emit(
+                'agent-output',
+                teamId,
+                'Security-1' as any,
+                `[Pipeline] Security classified task as SIMPLE — Worker-1 + security sweep only.`,
+              );
 
-            this.emit('agent-task', teamId, 'Worker-1' as any, 'Implementing task (simple)');
-            const simpleResult = await worker1.send(
-              `TASK: ${task}\n\n` +
-                requirementsBlock +
-                `SECURITY CLEARANCE:\n${scanResult}\n\n` +
-                `Implement the assigned work within the cleared scope.`,
-              images,
-            );
-            const simpleDisplay =
-              simpleResult.trim() || worker1.lastActivityLog || '(no text output)';
-            this.emit('agent-output', teamId, 'Worker-1' as any, simpleDisplay);
-            this.runGuardrailAudit(teamId, ctx, 'simple-work-reclassified');
+              // --- Work: Worker-1 implements (stay in Work phase so the sweep can
+              // run without a Handoff→Done transition, which the machine forbids) ---
+              const fromPhase2 = ctx.state.currentPhase;
+              this.tryTransitionPhase(
+                ctx.state,
+                teamId,
+                fromPhase2,
+                TeamPhase.Work,
+                'simple pipeline (reclassified)',
+              );
+              this.persistence.persist(ctx.state);
 
-            this.markAgentDone(ctx, 'Worker-1' as any);
-            this.completePipeline(teamId, ctx, startTime);
-            return;
+              ctx.state.setAgentJob('Worker-1' as any, 'Implementing task (simple)');
+              this.emit('agent-task', teamId, 'Worker-1' as any, 'Implementing task (simple)');
+              let simpleResult = await worker1.send(
+                `TASK: ${task}\n\n` +
+                  requirementsBlock +
+                  `SECURITY CLEARANCE:\n${scanResult}\n\n` +
+                  `Implement the assigned work within the cleared scope.`,
+                images,
+              );
+              this.emit(
+                'agent-output',
+                teamId,
+                'Worker-1' as any,
+                simpleResult.trim() || worker1.lastActivityLog || '(no text output)',
+              );
+              this.runGuardrailAudit(teamId, ctx, 'simple-work-reclassified');
+              GitOps.commit(cwd, 'WIP: work phase complete (simple)');
+
+              // --- Mandatory post-work security sweep ---
+              this.emit(
+                'agent-output',
+                teamId,
+                'Security-1' as any,
+                `[Pipeline] Security sweep starting...`,
+              );
+              const sweepVerdict = await sendWithVerdict(
+                security,
+                `POST-WORK SWEEP REQUEST\n\n` +
+                  `Task: ${task}\n` +
+                  requirementsBlock +
+                  `\nWorker-1 summary:\n${simpleResult.substring(0, 2000)}\n\n` +
+                  `Sweep all changes made by Worker-1. Check for introduced vulnerabilities, ` +
+                  `leaked secrets, and scope violations. Begin your response with APPROVED, FLAGGED, or BLOCKED.`,
+                parseSecurityVerdict,
+                ['APPROVED', 'FLAGGED', 'BLOCKED'] as const,
+                {
+                  onResponse: (raw) => this.emit('agent-output', teamId, 'Security-1' as any, raw),
+                  onMalformed: (raw) =>
+                    this.emit('malformed-output', teamId, 'Security-1' as any, raw),
+                },
+                'Security-1',
+              );
+
+              if (sweepVerdict.verdict === 'BLOCKED') {
+                this.notifyUser(
+                  teamId,
+                  'warning',
+                  'Security Blocked',
+                  'Security sweep found issues on the simple task — Worker-1 is fixing them.',
+                  'Security-1',
+                  ['blocked', 'issue', 'vulnerability', 'hardcoded', 'secret', 'injection'],
+                );
+                simpleResult = await worker1.send(
+                  `SECURITY BLOCKED — FIX REQUIRED\n\n${sweepVerdict.details.substring(0, 3000)}\n\n` +
+                    `Fix the security issues above. Do not add unrelated changes.`,
+                );
+                this.emit(
+                  'agent-output',
+                  teamId,
+                  'Worker-1' as any,
+                  simpleResult.trim() || worker1.lastActivityLog || '(no text output)',
+                );
+                this.runGuardrailAudit(teamId, ctx, 'simple-work-security-fix');
+
+                const reSweep = await sendWithVerdict(
+                  security,
+                  `POST-WORK SWEEP RE-CHECK\n\nTask: ${task}\n\n` +
+                    `Worker-1 remediation:\n${simpleResult.substring(0, 2000)}\n\n` +
+                    `Re-check the previously BLOCKED issues. Begin your response with APPROVED, FLAGGED, or BLOCKED.`,
+                  parseSecurityVerdict,
+                  ['APPROVED', 'FLAGGED', 'BLOCKED'] as const,
+                  {
+                    onResponse: (raw) =>
+                      this.emit('agent-output', teamId, 'Security-1' as any, raw),
+                    onMalformed: (raw) =>
+                      this.emit('malformed-output', teamId, 'Security-1' as any, raw),
+                  },
+                  'Security-1',
+                );
+                if (reSweep.verdict === 'BLOCKED') {
+                  this.notifyUser(
+                    teamId,
+                    'warning',
+                    'Security Still Blocked',
+                    'Security sweep still reports issues after one fix pass — review before merge.',
+                    'Security-1',
+                  );
+                }
+              }
+
+              this.runGuardrailAudit(teamId, ctx, 'security-sweep');
+              GitOps.commit(cwd, 'WIP: security sweep passed (simple)');
+
+              security.close();
+              this.markAgentDone(ctx, 'Security-1' as any);
+              this.markAgentDone(ctx, 'Worker-1' as any);
+              this.completePipeline(teamId, ctx, startTime);
+              return;
+            }
           }
 
           if (classification === 'COMPLEX') {

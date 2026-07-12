@@ -177,9 +177,11 @@ describe('buildGovernanceHooks', () => {
     expect(hooks.PostToolUse).toHaveLength(1);
   });
 
-  it('PreToolUse matcher covers Read|Edit|Write|Bash|NotebookEdit', () => {
+  it('PreToolUse matcher covers all path-accepting tools including Grep and Glob', () => {
     const hooks = buildGovernanceHooks('/tmp');
-    expect(hooks.PreToolUse![0].matcher).toBe('Read|Edit|Write|Bash|NotebookEdit');
+    // Grep/Glob take a `path` and must be contained too, or an agent could read
+    // off-project files the Read tool is blocked from.
+    expect(hooks.PreToolUse![0].matcher).toBe('Read|Edit|Write|Bash|NotebookEdit|Grep|Glob');
     expect(hooks.PreToolUse![0].hooks).toHaveLength(1);
   });
 

@@ -1405,7 +1405,7 @@ function renderFeedbackBlocks(teamId) {
     // clicks Edit, then an inline textarea whose draft survives re-renders.
     if (hasEditable) {
       if (editing) {
-        html += '<textarea class="feedback-edit-area" spellcheck="false" oninput="window.__api.updateFeedbackDraft(\\'' + esc(fb.id) + '\\', this.value)">' + esc(state.editingFeedback[fb.id]) + '</textarea>';
+        html += '<textarea id="fbedit-' + esc(fb.id) + '" class="feedback-edit-area" spellcheck="false" oninput="window.__api.updateFeedbackDraft(\\'' + esc(fb.id) + '\\', this.value)">' + esc(state.editingFeedback[fb.id]) + '</textarea>';
       } else {
         html += '<div class="feedback-block-editable">' + esc(fb.editableContent) + '</div>';
       }
@@ -1607,6 +1607,18 @@ function renderPanel() {
   // Callers that want a different position set state.panelUI._scrollIntent.
   var prevThread = $('panelChatThread');
   var prevScroll = prevThread ? prevThread.scrollTop : null;
+  // Preserve focus + caret in an in-progress requirements edit: an SSE-driven
+  // innerHTML swap destroys the live <textarea>, dropping focus and the caret
+  // mid-word. Capture the active edit field's id and selection, restore below.
+  var activeEl = document.activeElement;
+  var focusRestore = null;
+  if (activeEl && activeEl.classList && activeEl.classList.contains('feedback-edit-area')) {
+    focusRestore = {
+      id: activeEl.id,
+      start: activeEl.selectionStart,
+      end: activeEl.selectionEnd,
+    };
+  }
   $('panelHeader').innerHTML = renderPanelHeader(teamId);
   $('panelAgents').innerHTML = renderPanelAgents(teamId);
   $('panelAgents').setAttribute('data-collapsed', state.panelUI.agentsCollapsed ? 'true' : 'false');
@@ -1624,6 +1636,18 @@ function renderPanel() {
         thread.scrollTop = prevScroll;
       }
       state.panelUI._scrollIntent = null;
+    }
+    // Restore focus + caret into the re-rendered requirements-edit textarea.
+    if (focusRestore && focusRestore.id) {
+      var edit = document.getElementById(focusRestore.id);
+      if (edit) {
+        edit.focus();
+        try {
+          edit.setSelectionRange(focusRestore.start, focusRestore.end);
+        } catch (e) {
+          /* selection may be out of range after an external edit — ignore */
+        }
+      }
     }
     // Wire Enter-to-send on the composer textarea. Shift+Enter still inserts a
     // newline. Skip while an IME composition is active so CJK input isn't sent
@@ -3250,6 +3274,15 @@ function connectSSE() {
       }
       delete state.teams[data.teamId];
     }
+    // Drop the team's feedbacks and any in-progress edit drafts so they don't
+    // accumulate (and get scanned by findFeedback) for the tab's lifetime.
+    var teamFbs = state.feedbacks[data.teamId];
+    if (teamFbs) {
+      for (var fi = 0; fi < teamFbs.length; fi++) {
+        delete state.editingFeedback[teamFbs[fi].id];
+      }
+      delete state.feedbacks[data.teamId];
+    }
     // Also clear any panel that was viewing this team
     if (state.panelTeamId === data.teamId) {
       state.panelOpen = false;
@@ -3313,6 +3346,9 @@ function connectSSE() {
     if (fbs && fbs.length > 0) {
       state.feedbacks[data.teamId] = fbs.filter(function(f) { return f.id !== data.feedbackId; });
     }
+    // Drop any in-progress edit draft too (e.g. resolved from another tab), so
+    // an orphaned draft doesn't linger as a phantom in-progress edit.
+    delete state.editingFeedback[data.feedbackId];
     renderCurrentView();
   });
 

@@ -151,17 +151,6 @@ const READ_ONLY_INSTANCES: readonly RoleInstance[] = [
 ];
 
 /**
- * If `disallowed` marks a role read-only (it denies any of Write/Edit/Bash),
- * union in the full read-only tool set so NotebookEdit/WebFetch/WebSearch/Task
- * can't slip through. Write-capable roles (e.g. Worker-1, with no denials) are
- * returned unchanged.
- */
-export function hardenReadOnlyTools(disallowed: string[]): string[] {
-  if (!WRITE_TOOLS.some((tool) => disallowed.includes(tool))) return disallowed;
-  return Array.from(new Set([...disallowed, ...READ_ONLY_DISALLOWED_TOOLS]));
-}
-
-/**
  * Validates a team name before it becomes a filesystem directory name, registry
  * key, and map key. Rejects anything that could escape the
  * `.claude-orchestra/teams` tree (path separators, `..`) or corrupt on-disk
@@ -257,6 +246,22 @@ export function parseVerifyVerdict(text: string): VerdictResult<VerifyVerdict> {
   const upper = trimmed.toUpperCase();
   if (upper.startsWith('GAPS_FOUND')) return { verdict: 'GAPS_FOUND', details: trimmed };
   if (upper.startsWith('COMPLETE')) return { verdict: 'COMPLETE', details: trimmed };
+  return { verdict: 'AMBIGUOUS', raw: trimmed };
+}
+
+// Final security-review gate: PASSED | CONCERNS. Strips <thinking> and leading
+// markdown-bold markers, then strict-prefix matches — never guesses on a
+// substring (which failed open when the mandated "No security concerns" phrasing
+// itself contains the word CONCERNS). Routed through sendWithVerdict so a
+// malformed response retries once then throws, like every other gate.
+export type SecurityReviewVerdict = 'PASSED' | 'CONCERNS';
+
+export function parseSecurityReviewVerdict(text: string): VerdictResult<SecurityReviewVerdict> {
+  const stripped = text.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
+  const trimmed = stripped.trimStart().replace(/^\*+\s*/, '');
+  const upper = trimmed.toUpperCase();
+  if (upper.startsWith('PASSED')) return { verdict: 'PASSED', details: trimmed };
+  if (upper.startsWith('CONCERNS')) return { verdict: 'CONCERNS', details: trimmed };
   return { verdict: 'AMBIGUOUS', raw: trimmed };
 }
 
@@ -500,9 +505,14 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       this.models[instance] = config.models?.[role] ?? fmDefaults.models[instance];
       this.efforts[instance] = config.efforts?.[role] ?? fmDefaults.efforts[instance];
       const baseDisallowed = config.disallowedTools?.[role] ?? fmDefaults.disallowedTools[instance];
+      // Read-only enforcement is driven purely by role IDENTITY, not by
+      // inferring intent from a tool list. Worker-1 (the only write-capable
+      // instance) keeps exactly its configured/frontmatter denials — so a config
+      // that denies only Bash to the shared Worker role never strips its
+      // Write/Edit and leaves it unable to implement anything.
       const roleDisallowed = READ_ONLY_INSTANCES.includes(instance)
         ? [...baseDisallowed, ...READ_ONLY_DISALLOWED_TOOLS]
-        : hardenReadOnlyTools(baseDisallowed);
+        : baseDisallowed;
       // Network/exfiltration tools are denied to every instance, including the
       // write-capable Worker-1 (which reads the whole project and could otherwise
       // POST secrets out via WebFetch — a channel the guardrail hook can't scope).
@@ -1005,8 +1015,17 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
           requirements,
         );
 
+        // The team may have been terminated while this blocking prompt was open
+        // (settlePendingFeedback resolves it with 'cancelled'); if so, stop —
+        // do not spin the pipeline back up on a torn-down team.
+        if (!this.teams.has(teamId)) return;
+
         if (response.value === 'approve') {
-          const finalRequirements = (response.text ?? requirements).trim();
+          // Fall back to the extracted requirements when the edited text is
+          // empty/whitespace — `??` alone would keep an empty string and
+          // silently drop the requirements (a non-UI client can post text: '').
+          const editedText = response.text?.trim();
+          const finalRequirements = editedText || requirements.trim();
           if (finalRequirements) {
             ctx.state.setTaskRequirements(finalRequirements);
             this.persistence.persistNow(ctx.state);
@@ -1060,6 +1079,9 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
     // Close all active sessions
     this.closeSessions(ctx);
+    // Release any blocking prompt the pipeline is suspended on so its promise
+    // settles instead of hanging with the team gone.
+    this.settlePendingFeedback(ctx);
 
     // Also close the long-running coordinator chat session if alive.
     if (ctx.coordinatorSession && !ctx.coordinatorSession.closed) {
@@ -1120,6 +1142,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
     for (const [, ctx] of this.teams) {
       this.closeSessions(ctx);
+      this.settlePendingFeedback(ctx);
       if (ctx.coordinatorSession && !ctx.coordinatorSession.closed) {
         try {
           ctx.coordinatorSession.close();
@@ -1443,17 +1466,24 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
           'full content of any changed file you need more context on]';
       }
 
-      const response = await session.send(
-        'Review the following git diff for security concerns. Analyze every change.\n\n' + diffText,
+      // Fail-loud verdict: strict PASSED/CONCERNS prefix, retry once then throw
+      // (caught below) — never infer 'passed' from a substring or an empty reply.
+      const verdict = await sendWithVerdict(
+        session,
+        'Review the following git diff for security concerns. Analyze every change. ' +
+          'Begin your response with **PASSED** (no issues) or **CONCERNS** (issues found).\n\n' +
+          diffText,
+        parseSecurityReviewVerdict,
+        ['PASSED', 'CONCERNS'] as const,
+        {
+          onResponse: (raw) => this.emit('agent-output', teamId, 'Security-1' as any, raw),
+          onMalformed: (raw) => this.emit('malformed-output', teamId, 'Security-1' as any, raw),
+        },
+        'Security-1',
       );
 
-      // Parse verdict from response
-      const upper = response.toUpperCase();
-      const hasConcerns = upper.includes('CONCERNS') && !upper.startsWith('**PASSED');
-      const status = hasConcerns ? 'concerns' : 'passed';
-
-      this.emit('agent-output', teamId, 'Security-1' as any, response);
-      this.emit('security-review', teamId, { status, result: response });
+      const status = verdict.verdict === 'CONCERNS' ? 'concerns' : 'passed';
+      this.emit('security-review', teamId, { status, result: verdict.details });
 
       session.close();
       ctx.securityReviewSession = undefined;
@@ -1518,6 +1548,23 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     }
     ctx.sessions = [];
     ctx.pipelineRunning = false;
+  }
+
+  /**
+   * Resolve every pending blocking-feedback promise (e.g. an awaited
+   * requirements checklist) with 'cancelled' and clear the map, so a pipeline
+   * suspended in askUser doesn't hang forever — and leak its closure — when the
+   * team is terminated or the engine shuts down.
+   */
+  private settlePendingFeedback(ctx: PipelineTeamContext): void {
+    for (const [, pending] of ctx.pendingFeedback) {
+      try {
+        pending.resolve({ value: 'cancelled' });
+      } catch {
+        /* best effort */
+      }
+    }
+    ctx.pendingFeedback.clear();
   }
 
   private createSession(
@@ -2181,6 +2228,21 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       ctx.pendingFeedback.set(id, { resolve, feedback });
       this.emit('feedback', teamId, feedback);
     });
+  }
+
+  /**
+   * All currently-pending blocking-feedback prompts across teams. Used by the
+   * dashboard SSE init snapshot so a page reload re-shows an open prompt (e.g.
+   * the requirements checklist) instead of orphaning the suspended pipeline.
+   */
+  getPendingFeedback(): Array<{ teamId: string; feedback: FeedbackPayload }> {
+    const out: Array<{ teamId: string; feedback: FeedbackPayload }> = [];
+    for (const [teamId, ctx] of this.teams) {
+      for (const [, pending] of ctx.pendingFeedback) {
+        out.push({ teamId, feedback: pending.feedback });
+      }
+    }
+    return out;
   }
 
   /**

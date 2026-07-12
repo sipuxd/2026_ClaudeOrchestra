@@ -112,11 +112,15 @@ const SECRET_LINE_PATTERNS: Array<{ pattern: RegExp; label: string }> = [
 const FORBIDDEN_COMMAND_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   { pattern: /\bsudo\b/, reason: 'sudo is outside the agent safety envelope' },
   {
-    // Recursive-force rm whose target begins with an absolute (`/`), home
-    // (`~`), parent (`..`), or env-var (`$`) reference — i.e. anything that can
-    // reach outside the project. Local relative deletes (`rm -rf ./build`,
-    // `rm -rf node_modules`) are intentionally still allowed.
-    pattern: /\brm\s+(?:-\S*r\S*f|-\S*f\S*r|-[rf]\s+-[rf])\S*\s+['"]?(?:\/|~|\.\.|\$)/,
+    // Recursive-force rm targeting anything that can reach outside the project
+    // (absolute `/`, home `~`, parent `..`, or env-var `$`). Two lookaheads
+    // require BOTH a recursive flag (`-r`/`-R`/`-fr`/`--recursive`) and a force
+    // flag (`-f`/`-Rf`/`--force`) in any order/position/case, so `rm -Rf /`,
+    // `rm --recursive --force /`, `rm -v -rf ~`, and `rm /path -rf` are all
+    // caught. Local relative deletes (`rm -rf ./build`, `rm -rf node_modules`)
+    // are intentionally still allowed.
+    pattern:
+      /\brm\b(?=[\s\S]{0,200}?(?:-\w*r|--recursive))(?=[\s\S]{0,200}?(?:-\w*f|--force))[\s\S]{0,200}?(?:^|\s)['"]?(?:\/|~|\.\.|\$)/i,
     reason: 'destructive recursive removal outside the project is blocked',
   },
   {
@@ -132,18 +136,30 @@ const FORBIDDEN_COMMAND_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
     reason: 'accessing SSH keys or cloud credential files is blocked',
   },
   {
-    // Uploading a local file over the network (curl/wget reading @file into a
-    // POST/upload) — the common Bash exfiltration shape.
+    // curl/wget reading a local file into a request body via the `@file` syntax.
+    // The `@` must sit at the START of a value (after whitespace, a quote, or
+    // `=`), which is what curl's @file read requires — so `-d @secrets`,
+    // `--data-binary @f`, and `-F field=@f` are caught, but a JSON body with an
+    // email (`-d '{"email":"x@y.com"}'`) is NOT (its `@` follows a letter).
     pattern:
-      /\b(?:curl|wget)\b[\s\S]{0,200}(?:--data(?:-binary|-raw|-urlencode)?|--upload-file|--form|-T|-F|-d)\b[\s\S]{0,100}@/i,
+      /\b(?:curl|wget)\b[\s\S]{0,200}(?:--data(?:-ascii|-binary|-raw|-urlencode)?|--json|--form|-d|-F)\b[\s\S]{0,100}[\s'"=]@/i,
     reason: 'exfiltrating a local file over the network is blocked',
   },
   {
-    // Any common reader referencing a `.env`/`.env.*` file. The boundary before
-    // `.env` accepts whitespace, `=`, `/`, or a quote so `cat ./.env`,
-    // `head .env`, and `less "/p/.env.local"` are all caught.
+    // curl/wget uploading a local file via a path-taking flag (no `@`):
+    // curl --upload-file/-T, wget --post-file/--body-file.
     pattern:
-      /\b(?:cat|less|more|head|tail|bat|nl|tac|xxd|od|strings|grep|rg|awk|sed|cut|sort|uniq|view|vi|vim|nano|open|code|printenv)\b[\s\S]{0,160}(?:^|[\s=/'"])\.env(?:\.[A-Za-z0-9_.-]+)?(?:['"\s]|$)/,
+      /\bcurl\b[\s\S]{0,200}(?:--upload-file\b|\s-T\b)|\b(?:curl|wget)\b[\s\S]{0,200}(?:--post-file|--body-file)\b/i,
+    reason: 'uploading a local file over the network is blocked',
+  },
+  {
+    // Any common reader/copier/interpreter referencing a `.env`/`.env.*` file.
+    // The boundary before `.env` accepts whitespace, `=`, `/`, or a quote so
+    // `cat ./.env`, `cp .env /tmp/x`, `base64 .env`, `node -e "...'.env'..."`,
+    // and `source .env` are all caught. Case-insensitive so `.ENV` on a
+    // case-insensitive filesystem (macOS) is caught too.
+    pattern:
+      /\b(?:cat|less|more|head|tail|bat|nl|tac|xxd|od|strings|grep|rg|awk|sed|cut|sort|uniq|view|vi|vim|nano|open|code|printenv|cp|mv|dd|base64|gzip|gunzip|zip|tar|scp|rsync|node|python|python3|ruby|perl|source|tee)\b[\s\S]{0,160}(?:^|[\s=/'"])\.env(?:\.[A-Za-z0-9_.-]+)?(?:['"\s]|$)/i,
     reason: 'reading environment secret files is blocked',
   },
   { pattern: /\bgit\s+reset\s+--hard\b/, reason: 'destructive git reset is blocked' },
@@ -365,15 +381,33 @@ function hasTraversal(filePath: string): boolean {
 }
 
 /**
+ * Canonicalize a path through symlinks. When the path (or its leaf) does not
+ * exist yet — e.g. a Write to a new file — realpath the deepest existing
+ * ancestor and re-append the missing tail, so a new file inside a symlinked
+ * project still resolves under the canonical root.
+ */
+function canonicalize(p: string): string {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    const parent = path.dirname(p);
+    if (parent === p) return p;
+    return path.join(canonicalize(parent), path.basename(p));
+  }
+}
+
+/**
  * True when `filePath` resolves outside `projectRoot`. A leading `~` is a home
  * reference the shell would expand outside the project, so it is treated as
- * outside without needing to expand it. Absolute paths resolve to themselves;
- * relative paths resolve against the project root.
+ * outside without needing to expand it. Both sides are canonicalized through
+ * symlinks so a project referenced via a symlinked path (e.g. macOS `/tmp` ->
+ * `/private/tmp`) doesn't classify its own in-project files as outside.
  */
 function isOutsideProject(filePath: string, projectRoot: string): boolean {
   if (/^~($|\/)/.test(filePath.trim())) return true;
-  const root = path.resolve(projectRoot);
-  const resolved = path.resolve(root, filePath);
+  const rootResolved = path.resolve(projectRoot);
+  const root = canonicalize(rootResolved);
+  const resolved = canonicalize(path.resolve(rootResolved, filePath));
   return resolved !== root && !resolved.startsWith(root + path.sep);
 }
 

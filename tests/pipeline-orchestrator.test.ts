@@ -144,12 +144,12 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => {
 
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 import {
-  hardenReadOnlyTools,
   MalformedVerdictError,
   PipelineOrchestrator,
   parseChatVerdict,
   parseClassification,
   parseReviewVerdict,
+  parseSecurityReviewVerdict,
   parseSecurityVerdict,
   parseVerifyVerdict,
   postProcessRequirements,
@@ -199,21 +199,32 @@ describe('validateTeamName', () => {
   });
 });
 
-describe('hardenReadOnlyTools', () => {
-  it('expands a read-only role to the full denial set', () => {
-    expect(hardenReadOnlyTools(['Write', 'Edit', 'Bash'])).toEqual(READ_ONLY_DISALLOWED_TOOLS);
+describe('read-only enforcement by role identity', () => {
+  it('a Bash-only Worker config leaves Worker-1 able to Write/Edit', () => {
+    // Read-only enforcement keys off role IDENTITY, so denying only Bash to the
+    // shared Worker role must NOT strip Worker-1's Write/Edit (which would make
+    // the implementing agent unable to change any file).
+    const orch = new PipelineOrchestrator({
+      registryPath: '/tmp/registry-worker-bash.json',
+      rolesDir: '/tmp/nonexistent-roles',
+      disallowedTools: { Worker: ['Bash'] } as any,
+    });
+    const tools = (orch as any).disallowedTools as Record<string, string[]>;
+    expect(tools['Worker-1']).not.toContain('Write');
+    expect(tools['Worker-1']).not.toContain('Edit');
+    expect(tools['Worker-1']).toContain('Bash');
   });
 
-  it('adds the network/notebook tools even if only one write tool is denied', () => {
-    const result = hardenReadOnlyTools(['Bash']);
-    expect(result).toContain('NotebookEdit');
-    expect(result).toContain('WebFetch');
-    expect(result).toContain('WebSearch');
-    expect(result).toContain('Task');
-  });
-
-  it('leaves write-capable roles (no denials) untouched', () => {
-    expect(hardenReadOnlyTools([])).toEqual([]);
+  it('read-only roles are denied the full set regardless of config', () => {
+    const orch = new PipelineOrchestrator({
+      registryPath: '/tmp/registry-ro.json',
+      rolesDir: '/tmp/nonexistent-roles',
+    });
+    const tools = (orch as any).disallowedTools as Record<string, string[]>;
+    for (const tool of READ_ONLY_DISALLOWED_TOOLS) {
+      expect(tools['Worker-2']).toContain(tool);
+      expect(tools['Reviewer-1']).toContain(tool);
+    }
   });
 });
 
@@ -388,6 +399,36 @@ describe('PipelineOrchestrator', () => {
     it('handles leading whitespace', () => {
       const result = parseSecurityVerdict('  BLOCKED — issue found');
       expect(result.verdict).toBe('BLOCKED');
+    });
+  });
+
+  describe('parseSecurityReviewVerdict', () => {
+    it('parses **PASSED** and **CONCERNS** with markdown bold', () => {
+      expect(parseSecurityReviewVerdict('**PASSED** — No security concerns found.').verdict).toBe(
+        'PASSED',
+      );
+      expect(parseSecurityReviewVerdict('**CONCERNS** — hardcoded key.').verdict).toBe('CONCERNS');
+    });
+
+    it('parses PASSED without bold (the old substring guess mislabeled this)', () => {
+      // "No security concerns" contains CONCERNS; the strict prefix parser must
+      // still read this as PASSED, not flag a false concern.
+      expect(parseSecurityReviewVerdict('PASSED — No security concerns found.').verdict).toBe(
+        'PASSED',
+      );
+    });
+
+    it('returns AMBIGUOUS for empty or prefixless text (no silent pass)', () => {
+      expect(parseSecurityReviewVerdict('').verdict).toBe('AMBIGUOUS');
+      expect(parseSecurityReviewVerdict('Here is my review of the diff...').verdict).toBe(
+        'AMBIGUOUS',
+      );
+    });
+
+    it('strips a leading thinking block', () => {
+      expect(
+        parseSecurityReviewVerdict('<thinking>hmm</thinking>\n**CONCERNS** — issue').verdict,
+      ).toBe('CONCERNS');
     });
   });
 

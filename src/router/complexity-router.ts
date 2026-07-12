@@ -50,8 +50,13 @@ const COMPLEX_KEYWORDS = [
  * the backdrop" aren't misclassified. This is a denylist and cannot be
  * exhaustive, which is why Security-1 also scans every task.
  */
+// Narrowed to genuinely destructive/high-risk terms. Common benign action verbs
+// (remove, reset, revert, rollback, overwrite, format) were dropped — they routed
+// trivial tasks like "remove the debug banner" or "format the README" to the
+// blocking requirements modal and stalled unattended runs. Security-1 still scans
+// every task, so this denylist is defense-in-depth, not the only gate.
 const DESTRUCTIVE_PATTERN =
-  /\b(?:delete|drop|truncate|remove|wipe|erase|destroy|purge|prune|rm|reset|revert|rollback|overwrite|format|uninstall|downgrade|force[- ]?push|sudo|chmod|chown|credentials?|secrets?|passwords?|tokens?|production|prod)\b|\bprivate key\b|\.env\b/i;
+  /\b(?:delete|drop|truncate|wipe|erase|destroy|purge|prune|rm|uninstall|downgrade|force[- ]?push|sudo|chmod|chown|credentials?|secrets?|passwords?|tokens?|production|prod)\b|\bprivate key\b|\.env\b/i;
 
 /** Word count threshold — descriptions longer than this are standard. */
 const MAX_SIMPLE_WORDS = 20;

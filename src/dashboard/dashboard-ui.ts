@@ -673,7 +673,7 @@ const state = {
 };
 
 // ---- Helpers ----
-function esc(s) { if (!s) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function esc(s) { if (!s) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 // Render the small markdown subset emitted by the security-review agent prompt.
 // Returns { verdict, body }. verdict is 'PASSED' or 'CONCERNS' if found in the
 // first non-empty line, else null. body is safe HTML — every text fragment is
@@ -2979,6 +2979,22 @@ window.__api = {
 };
 
 // ---- SSE Connection ----
+// Store a blocking-feedback payload into state (dedup by id). Shared by the live
+// 'feedback' SSE event and the init snapshot's re-hydration so a reload re-shows
+// open prompts.
+function storeFeedback(teamId, fb) {
+  if (!teamId || !fb) return;
+  if (!state.feedbacks[teamId]) state.feedbacks[teamId] = [];
+  var existing = state.feedbacks[teamId].find(function(f){ return f.id === fb.id; });
+  if (!existing) {
+    state.feedbacks[teamId].push({
+      id: fb.id, type: fb.type, title: fb.title, message: fb.message,
+      blocking: fb.blocking, actions: fb.actions, detail: fb.detail, timestamp: fb.timestamp,
+      editableContent: fb.editableContent
+    });
+  }
+}
+
 function connectSSE() {
   var es = new EventSource('/events');
   es.addEventListener('init', function(e) {
@@ -3004,6 +3020,13 @@ function connectSSE() {
         for (var k = 0; k < data.runners.length; k++) {
           var rs = data.runners[k];
           state.runners[rs.projectPath] = rs;
+        }
+      }
+      // Re-show any open blocking prompts (e.g. the requirements checklist) so a
+      // reload doesn't orphan a pipeline suspended waiting for a response.
+      if (Array.isArray(data.pendingFeedback)) {
+        for (var pf = 0; pf < data.pendingFeedback.length; pf++) {
+          storeFeedback(data.pendingFeedback[pf].teamId, data.pendingFeedback[pf].feedback);
         }
       }
       renderCurrentView();
@@ -3173,16 +3196,7 @@ function connectSSE() {
 
   es.addEventListener('feedback', function(e) {
     var data = JSON.parse(e.data);
-    if (!state.feedbacks[data.teamId]) state.feedbacks[data.teamId] = [];
-    // Avoid duplicates
-    var existing = state.feedbacks[data.teamId].find(function(f){ return f.id === data.id; });
-    if (!existing) {
-      state.feedbacks[data.teamId].push({
-        id: data.id, type: data.type, title: data.title, message: data.message,
-        blocking: data.blocking, actions: data.actions, detail: data.detail, timestamp: data.timestamp,
-        editableContent: data.editableContent
-      });
-    }
+    storeFeedback(data.teamId, data);
     renderCurrentView();
   });
 

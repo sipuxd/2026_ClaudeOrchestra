@@ -181,7 +181,14 @@ export class ClaudeAgentSession implements AgentSession {
           // the response text is never duplicated.
           if (!this.accumulated) {
             const resultText = (msg as any).result;
-            if (typeof resultText === 'string') this.accumulated = resultText;
+            if (typeof resultText === 'string') {
+              this.accumulated = resultText;
+              // The final text arrived only in the result message (a tool-only
+              // turn). Surface it to progress listeners too, matching the
+              // streamed-assistant-text path — otherwise progress-only consumers
+              // never see the response.
+              if (this.accumulated) this.onProgress?.(this.accumulated);
+            }
           }
           const result = this.accumulated;
           this.accumulated = '';
@@ -200,6 +207,17 @@ export class ClaudeAgentSession implements AgentSession {
       }
     } finally {
       this._closed = true;
+      // If the SDK stream ended without a result message while a send() was in
+      // flight (e.g. the query was closed on Stop), settle the promise with what
+      // accumulated so the caller doesn't hang forever waiting for a result.
+      if (this.pendingResolve) {
+        const resolve = this.pendingResolve;
+        const result = this.accumulated;
+        this.accumulated = '';
+        this.pendingResolve = null;
+        this.pendingReject = null;
+        resolve(result);
+      }
     }
   }
 }

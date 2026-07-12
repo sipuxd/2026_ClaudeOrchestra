@@ -17,6 +17,13 @@ export interface DashboardServerOptions {
   orchestrator: PipelineOrchestrator;
   port: number;
   host?: string;
+  /**
+   * Extra Host-header hostnames to accept while bound to loopback — e.g. a
+   * tunnel hostname (xyz.trycloudflare.com) or an /etc/hosts alias — so a
+   * reverse proxy/tunnel works WITHOUT switching to a non-loopback bind (which
+   * would disable the DNS-rebinding defense and expose the port to the LAN).
+   */
+  allowedHosts?: string[];
 }
 
 /** True when `host` binds only the local machine (no network exposure). */
@@ -28,6 +35,7 @@ export class DashboardServer {
   private readonly orchestrator: PipelineOrchestrator;
   private readonly port: number;
   private readonly host: string;
+  private readonly allowedHosts: Set<string>;
   private server: http.Server | null = null;
   private sseClients: Set<http.ServerResponse> = new Set();
   private cachedHTML: string | null = null;
@@ -52,6 +60,17 @@ export class DashboardServer {
     // run projects, and spawn agents); binding a non-loopback host exposes that
     // to the network and must be an explicit opt-in (warned about in start()).
     this.host = options.host ?? '127.0.0.1';
+    // Trusted Host-header names (in addition to the loopback set), from config
+    // and the CLAUDE_ORCHESTRA_ALLOWED_HOSTS env var (comma-separated). Let a
+    // tunnel/proxy work without dropping the loopback bind + DNS-rebinding check.
+    const envHosts = (process.env.CLAUDE_ORCHESTRA_ALLOWED_HOSTS ?? '')
+      .split(',')
+      .map((h) => h.trim().toLowerCase())
+      .filter(Boolean);
+    this.allowedHosts = new Set([
+      ...(options.allowedHosts ?? []).map((h) => h.toLowerCase()),
+      ...envHosts,
+    ]);
   }
 
   /**
@@ -528,7 +547,7 @@ export class DashboardServer {
     if (!isLoopbackHost(this.host)) return true;
     const hostHeader = (req.headers.host ?? '').toLowerCase();
     const hostname = hostHeader.replace(/:\d+$/, '').replace(/^\[|\]$/g, '');
-    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+    return isLoopbackHost(hostname) || this.allowedHosts.has(hostname);
   }
 
   // --- Route Handlers ---
@@ -553,7 +572,12 @@ export class DashboardServer {
     const runtime = this.orchestrator.getAgentRuntime();
     const portfolio = this.orchestrator.getPortfolio();
     const runners = this.projectRunner.getAllStatuses();
-    res.write(`event: init\ndata: ${JSON.stringify({ teams, runtime, portfolio, runners })}\n\n`);
+    // Include any open blocking prompts so a page reload re-shows them instead
+    // of orphaning a pipeline suspended in askUser.
+    const pendingFeedback = this.orchestrator.getPendingFeedback();
+    res.write(
+      `event: init\ndata: ${JSON.stringify({ teams, runtime, portfolio, runners, pendingFeedback })}\n\n`,
+    );
 
     this.sseClients.add(res);
 
@@ -629,9 +653,14 @@ export class DashboardServer {
       }
 
       const state = this.orchestrator.createTeam(name, projectPath);
+      // createTeam sanitizes/trims the name into the canonical teamId; use THAT
+      // for the follow-up assignTask, not the raw `name` — a name with leading/
+      // trailing whitespace would otherwise create the team but fail assignment
+      // with "team not found", leaving a half-created team.
+      const teamId = state.snapshot.teamId;
 
       if (task) {
-        this.orchestrator.assignTask(name, task, images);
+        this.orchestrator.assignTask(teamId, task, images);
       }
 
       this.sendJSON(res, state.snapshot, 201);

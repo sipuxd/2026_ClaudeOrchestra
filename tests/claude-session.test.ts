@@ -97,4 +97,32 @@ describe('ClaudeAgentSession response assembly', () => {
     expect(await p).toBe('ONLY RESULT TEXT');
     s.close();
   });
+
+  it('emits onProgress for a result-only turn (no assistant text streamed)', async () => {
+    const progress: string[] = [];
+    const s = new ClaudeAgentSession('Test', 'system prompt', {
+      runtime: { provider: 'claude', auth: 'subscription' },
+      cwd: '/tmp',
+      effort: 'medium',
+      onProgress: (acc) => progress.push(acc),
+    });
+    const p = s.send('hi');
+    await new Promise((r) => setTimeout(r, 10));
+    pushMsg?.(result('FINAL VIA RESULT'));
+    await p;
+    expect(progress).toContain('FINAL VIA RESULT');
+    s.close();
+  });
+
+  it('settles an in-flight send() when the stream is closed (no hang)', async () => {
+    const s = makeSession();
+    const p = s.send('hi');
+    await new Promise((r) => setTimeout(r, 10));
+    // Close the query mid-turn (e.g. Stop) — the stream ends with no result.
+    s.close();
+    // Must resolve rather than hang forever.
+    await expect(
+      Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('hang')), 1000))]),
+    ).resolves.toBeDefined();
+  });
 });

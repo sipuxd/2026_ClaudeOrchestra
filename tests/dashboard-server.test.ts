@@ -249,6 +249,54 @@ describe('DashboardServer', () => {
     });
   });
 
+  // --- Team creation edge cases (T3) ---
+
+  describe('team creation', () => {
+    it('creates + assigns under the trimmed teamId for a whitespace-padded name', async () => {
+      const projectPath = path.join(tmpDir, 'ws-project');
+      fs.mkdirSync(projectPath, { recursive: true });
+      const res = await rawRequest(port, 'POST', '/api/teams', {
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: '  spaced-team  ', projectPath, task: 'do X' }),
+      });
+      // createTeam trims to "spaced-team"; assignTask must use that id, not the
+      // raw padded name (which would 400 with "team not found").
+      expect(res.status).toBe(201);
+      const after = await rawRequest(port, 'GET', '/api/teams/spaced-team');
+      expect(after.status).toBe(200);
+    });
+  });
+
+  describe('allowedHosts', () => {
+    it('accepts a configured non-loopback Host header while bound to loopback', async () => {
+      const orch2 = new PipelineOrchestrator({
+        registryPath: path.join(tmpDir, 'registry-ah.json'),
+        rolesDir,
+      });
+      const p2 = getRandomPort();
+      const dash2 = new DashboardServer({
+        orchestrator: orch2,
+        port: p2,
+        allowedHosts: ['tunnel.example.com'],
+      });
+      await dash2.start();
+      try {
+        // Allowlisted host passes; a random foreign host is still 403'd.
+        const ok = await rawRequest(p2, 'GET', '/api/teams', {
+          headers: { Host: 'tunnel.example.com' },
+        });
+        expect(ok.status).toBe(200);
+        const bad = await rawRequest(p2, 'GET', '/api/teams', {
+          headers: { Host: 'evil.example.com' },
+        });
+        expect(bad.status).toBe(403);
+      } finally {
+        await dash2.close();
+        await orch2.shutdown();
+      }
+    });
+  });
+
   // --- Teams API ---
 
   describe('GET /api/teams', () => {

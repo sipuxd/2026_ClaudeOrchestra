@@ -1619,6 +1619,14 @@ function renderPanel() {
       end: activeEl.selectionEnd,
     };
   }
+  // Preserve an in-progress chat composer draft (and caret) across the same
+  // innerHTML swap: renderPanelComposer always renders an EMPTY textarea, so an
+  // SSE-driven re-render would otherwise wipe whatever the user was typing.
+  var composerEl = $('chatInput-' + teamId);
+  var composerDraft = composerEl ? composerEl.value : null;
+  var composerFocused = !!composerEl && document.activeElement === composerEl;
+  var composerStart = composerFocused ? composerEl.selectionStart : null;
+  var composerEnd = composerFocused ? composerEl.selectionEnd : null;
   $('panelHeader').innerHTML = renderPanelHeader(teamId);
   $('panelAgents').innerHTML = renderPanelAgents(teamId);
   $('panelAgents').setAttribute('data-collapsed', state.panelUI.agentsCollapsed ? 'true' : 'false');
@@ -1646,6 +1654,21 @@ function renderPanel() {
           edit.setSelectionRange(focusRestore.start, focusRestore.end);
         } catch (e) {
           /* selection may be out of range after an external edit — ignore */
+        }
+      }
+    }
+    // Restore the in-progress chat composer draft + caret after the swap.
+    if (composerDraft) {
+      var comp = $('chatInput-' + teamId);
+      if (comp && !comp.disabled) {
+        comp.value = composerDraft;
+        if (composerFocused) {
+          comp.focus();
+          try {
+            comp.setSelectionRange(composerStart, composerEnd);
+          } catch (e) {
+            /* selection may be out of range — ignore */
+          }
         }
       }
     }
@@ -3035,7 +3058,15 @@ function connectSSE() {
       if (data.teams) {
         for (var i = 0; i < data.teams.length; i++) {
           var t = data.teams[i];
-          addOrUpdateTeam(t.teamId || t.teamName, t);
+          var tid = t.teamId || t.teamName;
+          addOrUpdateTeam(tid, t);
+          // Hydrate the team chat panel from persisted history so a page reload
+          // re-shows prior messages instead of an empty thread. Live
+          // 'chat-message' events append to this same array; only seed when we
+          // have not already accumulated messages (guards SSE reconnect).
+          if (Array.isArray(t.chatHistory) && !state.chatMessages[tid]) {
+            state.chatMessages[tid] = t.chatHistory.slice();
+          }
         }
       }
       // Seed any in-flight project runners so a dashboard reload doesn't
@@ -3208,8 +3239,12 @@ function connectSSE() {
     renderCurrentView();
   });
 
-  es.addEventListener('error', function(e) {
-    var data = JSON.parse(e.data);
+  es.addEventListener('pipeline-error', function(e) {
+    // Server-sent pipeline errors arrive as 'pipeline-error' (not 'error') so
+    // they don't collide with EventSource's native connection-error event,
+    // which fires with no data. Still guard the parse defensively.
+    var data;
+    try { data = JSON.parse(e.data); } catch (err) { return; }
     if (state.teams[data.teamId]) {
       state.teams[data.teamId].currentPhase = 'errored';
     }

@@ -7,9 +7,9 @@
 // Atomic writes via temp-file + fs.renameSync() (same pattern as
 // StatePersistence).
 
-import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { writeJsonFileAtomic } from './atomic-write.js';
 
 export interface RegistryEntry {
   teamId: string;
@@ -90,13 +90,6 @@ export class Registry {
 
   private write(entries: RegistryEntry[]): void {
     const data: RegistryData = { teams: entries };
-    const json = JSON.stringify(data, null, 2);
-
-    const dir = path.dirname(this.registryPath);
-    fs.mkdirSync(dir, { recursive: true });
-
-    const tmpPath = path.join(dir, `.tmp-registry-${randomUUID()}.json`);
-    fs.writeFileSync(tmpPath, json, 'utf-8');
-    fs.renameSync(tmpPath, this.registryPath);
+    writeJsonFileAtomic(this.registryPath, data);
   }
 }

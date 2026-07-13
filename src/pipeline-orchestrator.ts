@@ -19,6 +19,7 @@ import * as path from 'node:path';
 import type { AgentRuntimeConfig, AgentSession, EffortLevel } from './agent-runtime/index.js';
 import {
   createAgentSession,
+  isEffortLevel,
   normalizeAgentRuntime,
   normalizeProviderModel,
   validateAgentRuntime,
@@ -113,6 +114,17 @@ export interface FeedbackPayload {
 const FALLBACK_MODEL = 'claude-opus-4-6';
 const FALLBACK_EFFORT: EffortLevel = 'medium';
 const FALLBACK_MAX_TURNS = 20;
+
+/**
+ * Frontmatter maxTurns is user-authored text. Accept only a positive integer;
+ * anything else (non-numeric, NaN, zero, negative, fractional) falls back to
+ * the safe default rather than reaching the SDK as an invalid turn budget.
+ */
+function parseFrontmatterMaxTurns(raw: string | undefined): number {
+  if (raw === undefined) return FALLBACK_MAX_TURNS;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : FALLBACK_MAX_TURNS;
+}
 
 // Tools that write to disk/state, and the network/exfiltration tools a read-only
 // role must also be denied. In the Claude Agent SDK `allowedTools` only
@@ -217,53 +229,81 @@ export function parseClassification(scanText: string): TaskClassification {
   return 'STANDARD';
 }
 
-// Strict prefix only. If the agent's response doesn't begin with one of
-// APPROVED|FLAGGED|BLOCKED, return AMBIGUOUS — don't guess. Guessing on a
-// security gate produces silent failure-open when the prompt drifts.
-export function parseSecurityVerdict(text: string): VerdictResult<SecurityVerdict> {
-  const trimmed = text.trimStart();
-  if (trimmed.startsWith('APPROVED')) return { verdict: 'APPROVED', details: trimmed };
-  if (trimmed.startsWith('FLAGGED')) return { verdict: 'FLAGGED', details: trimmed };
-  if (trimmed.startsWith('BLOCKED')) return { verdict: 'BLOCKED', details: trimmed };
-  return { verdict: 'AMBIGUOUS', raw: trimmed };
+// One prefix-matching verdict parser factory. Every pipeline gate parses the
+// agent's response the same way: optional structural cleanup, then a STRICT
+// prefix match against the allowed tokens, AMBIGUOUS on no match — never guess.
+// Guessing on a security gate produces silent failure-open when the prompt
+// drifts. The four gates differ only along the three switches below, so they
+// derive from this one factory instead of drifting as four hand-rolled copies.
+//
+//   stripThinking — remove <thinking>…</thinking> blocks before matching. This
+//     is structural cleanup, not fuzzy matching: providers not trained on the
+//     convention may emit literal blocks that would otherwise anchor the prefix
+//     check on the wrong content.
+//   stripBold — remove a leading run of '*' (markdown bold) before matching.
+//   caseInsensitive — upcase before comparing. `details` always preserves the
+//     original (post-cleanup) casing. The security scan stays case-SENSITIVE
+//     (its agent is mandated to emit caps); the other gates accept any case.
+interface PrefixVerdictOptions {
+  stripThinking?: boolean;
+  stripBold?: boolean;
+  caseInsensitive?: boolean;
 }
 
-// The <thinking> strip is structural cleanup, not fuzzy matching: providers
-// not trained on the convention may emit literal blocks that would otherwise
-// anchor the prefix check on the wrong content. Strip first, then strict prefix.
-export function parseReviewVerdict(text: string): VerdictResult<ReviewVerdict> {
-  const stripped = text.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
-  const trimmed = stripped.trimStart();
-  const upper = trimmed.toUpperCase();
-  if (upper.startsWith('APPROVED')) return { verdict: 'APPROVED', details: trimmed };
-  if (upper.startsWith('REVISION_NEEDED')) return { verdict: 'REVISION_NEEDED', details: trimmed };
-  if (upper.startsWith('REJECTED')) return { verdict: 'REJECTED', details: trimmed };
-  return { verdict: 'AMBIGUOUS', raw: trimmed };
+export function makePrefixVerdictParser<V extends string>(
+  tokens: readonly V[],
+  options: PrefixVerdictOptions = {},
+): (text: string) => VerdictResult<V> {
+  return (text: string): VerdictResult<V> => {
+    let cleaned = text;
+    if (options.stripThinking) {
+      cleaned = cleaned.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
+    }
+    let trimmed = cleaned.trimStart();
+    if (options.stripBold) {
+      trimmed = trimmed.replace(/^\*+\s*/, '');
+    }
+    const haystack = options.caseInsensitive ? trimmed.toUpperCase() : trimmed;
+    for (const token of tokens) {
+      const needle = options.caseInsensitive ? token.toUpperCase() : token;
+      if (haystack.startsWith(needle)) return { verdict: token, details: trimmed };
+    }
+    return { verdict: 'AMBIGUOUS', raw: trimmed };
+  };
 }
 
-export function parseVerifyVerdict(text: string): VerdictResult<VerifyVerdict> {
-  const trimmed = text.trimStart();
-  const upper = trimmed.toUpperCase();
-  if (upper.startsWith('GAPS_FOUND')) return { verdict: 'GAPS_FOUND', details: trimmed };
-  if (upper.startsWith('COMPLETE')) return { verdict: 'COMPLETE', details: trimmed };
-  return { verdict: 'AMBIGUOUS', raw: trimmed };
-}
+// Security scan/sweep gate: APPROVED | FLAGGED | BLOCKED (case-sensitive prefix).
+export const parseSecurityVerdict = makePrefixVerdictParser<SecurityVerdict>([
+  'APPROVED',
+  'FLAGGED',
+  'BLOCKED',
+]);
 
-// Final security-review gate: PASSED | CONCERNS. Strips <thinking> and leading
-// markdown-bold markers, then strict-prefix matches — never guesses on a
-// substring (which failed open when the mandated "No security concerns" phrasing
-// itself contains the word CONCERNS). Routed through sendWithVerdict so a
-// malformed response retries once then throws, like every other gate.
+// Review gate: APPROVED | REVISION_NEEDED | REJECTED (thinking-stripped, any case).
+export const parseReviewVerdict = makePrefixVerdictParser<ReviewVerdict>(
+  ['APPROVED', 'REVISION_NEEDED', 'REJECTED'],
+  { stripThinking: true, caseInsensitive: true },
+);
+
+// Worker-2 verify gate: GAPS_FOUND | COMPLETE (any case).
+export const parseVerifyVerdict = makePrefixVerdictParser<VerifyVerdict>(
+  ['GAPS_FOUND', 'COMPLETE'],
+  {
+    caseInsensitive: true,
+  },
+);
+
+// Final security-review gate: PASSED | CONCERNS. Strips <thinking> and a leading
+// bold run, then strict-prefix matches — never guesses on a substring (which
+// failed open when the mandated "No security concerns" phrasing itself contains
+// the word CONCERNS). Routed through sendWithVerdict so a malformed response
+// retries once then throws, like every other gate.
 export type SecurityReviewVerdict = 'PASSED' | 'CONCERNS';
 
-export function parseSecurityReviewVerdict(text: string): VerdictResult<SecurityReviewVerdict> {
-  const stripped = text.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
-  const trimmed = stripped.trimStart().replace(/^\*+\s*/, '');
-  const upper = trimmed.toUpperCase();
-  if (upper.startsWith('PASSED')) return { verdict: 'PASSED', details: trimmed };
-  if (upper.startsWith('CONCERNS')) return { verdict: 'CONCERNS', details: trimmed };
-  return { verdict: 'AMBIGUOUS', raw: trimmed };
-}
+export const parseSecurityReviewVerdict = makePrefixVerdictParser<SecurityReviewVerdict>(
+  ['PASSED', 'CONCERNS'],
+  { stripThinking: true, stripBold: true, caseInsensitive: true },
+);
 
 // Coordinator-1 verdict: RESPONDING | ASKING | TRIGGER_PIPELINE.
 // `details` contains everything AFTER the verdict word on the first line, plus
@@ -445,6 +485,13 @@ interface PipelineTeamContext {
    *  aborts it; the chat turn handler races send() against this signal and
    *  treats the abort as a clean cancellation (no system chat-message). */
   coordinatorAbortController?: AbortController;
+  /** Whether the current live coordinatorSession has already received the
+   *  first-turn TEAM/PROJECT/history bootstrap. The session is a single
+   *  long-lived streaming query() that retains conversation context across
+   *  send() calls, so only the first send replays history; later sends carry
+   *  just the new user message. Reset to false whenever the session is
+   *  (re)spawned. */
+  coordinatorBootstrapped?: boolean;
 }
 
 // --- PipelineOrchestrator ---
@@ -627,7 +674,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
   /**
    * Send a user message to a team's Coordinator-1. Appends to chat.jsonl,
-   * sends the full chat history to the coordinator, parses its verdict, and
+   * sends the coordinator the first-turn bootstrap (full history) or just the
+   * new message on later warm-session turns, parses its verdict, and
    * dispatches:
    *   - RESPONDING / ASKING → coordinator's reply goes back to chat
    *   - TRIGGER_PIPELINE → kicks off assignTask with the body as task
@@ -689,6 +737,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
           ctx.state.snapshot.projectPath,
           (text) => this.emit('agent-progress', teamId, 'Coordinator-1', text),
         );
+        // Fresh session holds no context yet — the next turn must bootstrap it.
+        ctx.coordinatorBootstrapped = false;
       } catch (err: any) {
         const errMsg: ChatMessage = {
           role: 'system',
@@ -702,9 +752,21 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       }
     }
 
-    // 3. Build the full-history prompt. Claude Agent SDK does not auto-persist
-    //    session state across send() calls, so we replay history every turn.
-    const prompt = this.buildCoordinatorPrompt(ctx);
+    // 3. Build the prompt. Coordinator-1 is a single long-lived streaming
+    //    session that retains conversation context across send() calls, so
+    //    replay the TEAM/PROJECT/history bootstrap ONLY on the first turn of a
+    //    session; on later turns send just the new user message. A cancelled
+    //    turn closes the session and the lazy-spawn block resets the flag, so a
+    //    respawned session gets a fresh bootstrap. Set the flag eagerly (before
+    //    send) so a malformed-twice failure — which leaves the session alive —
+    //    does not re-replay history the session already consumed.
+    let prompt: string;
+    if (!ctx.coordinatorBootstrapped) {
+      prompt = this.buildCoordinatorPrompt(ctx);
+      ctx.coordinatorBootstrapped = true;
+    } else {
+      prompt = userMessage;
+    }
 
     // 4. Send + parse verdict with the same fail-loud pattern as other gates.
     //    Race the send against an AbortController so cancelChat can interrupt
@@ -878,6 +940,14 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
       this.teams.set(entry.teamId, ctx);
       recovered.push(entry.teamId);
+
+      // A team recovered mid-PrOpen still has an open PR on GitHub; resume
+      // polling so a merge/close that happens while the engine was down is
+      // still detected and the team archived/returned to Done. startPrPolling
+      // is idempotent, so one call per recovered PrOpen team is safe.
+      if (state.snapshot.currentPhase === TeamPhase.PrOpen) {
+        this.startPrPolling();
+      }
     }
 
     return recovered;
@@ -909,10 +979,11 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       ctx.securityReviewSession = undefined;
     }
 
-    // Reset from terminal state for re-launch
-    if (ctx.state.isTerminal) {
-      ctx.state.transitionPhase(TeamPhase.PreWork);
-    }
+    // Reset from terminal state for re-launch. resetForReassignment force-sets
+    // PreWork for ANY terminal phase — a plain transitionPhase(PreWork) throws
+    // for Cancelled/Merged (dead-ends in VALID_PHASE_TRANSITIONS), which left
+    // cancelled and merged teams permanently un-reassignable.
+    ctx.state.resetForReassignment();
 
     // Clear any previous task and reset agents for re-launch
     if (ctx.state.snapshot.currentTask) {
@@ -1530,12 +1601,29 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   private ensureTeamBranch(projectPath: string, teamName: string): string {
     const branchName = GitOps.slugifyBranchName(teamName);
     const result = GitOps.createTeamBranch(projectPath, branchName);
-    if (!result.success) {
-      // Fall back: try to just stay on whatever branch we're on
-      console.warn(`[orchestra] Failed to create team branch ${branchName}: ${result.output}`);
-      return branchName;
+    if (result.success) {
+      return result.branchName;
     }
-    return result.branchName;
+    // Branch creation failed — two very different situations:
+    if (!GitOps.isGitRepo(projectPath)) {
+      // Target dir is intentionally not under version control. The engine's
+      // phase-boundary auto-commit runs `git status`/`git commit`, which no-op
+      // here (hasChanges() is false when git fails), so nothing can land on a
+      // default branch. Run the team WITHOUT a branch and warn.
+      console.warn(
+        `[orchestra] ${projectPath} is not a git repository — team will run without git auto-commit.`,
+      );
+      return '';
+    }
+    // It IS a git repo but the team branch could not be created/switched to
+    // (e.g. no "main" branch, detached HEAD, dirty tree). Continuing would
+    // leave HEAD on the current branch — typically the default branch — where
+    // phase-boundary auto-commits would silently land. Fail loud instead.
+    throw new Error(
+      `Failed to create team branch "${branchName}" in ${projectPath}: ${result.output}. ` +
+        `Refusing to start the team — auto-commits would otherwise land on the default branch. ` +
+        `Ensure the repository has a "main" branch and a clean working tree, then try again.`,
+    );
   }
 
   // --- Private: Session Management ---
@@ -1618,6 +1706,12 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
       // Outer loop: handles REJECTED verdicts (restart from scan)
       let scanResult = '';
+      // Carries the reviewer's actual findings from a REVISION_NEEDED/REJECTED
+      // verdict into the next Worker-1 instruction, so the implementer revises
+      // against concrete feedback instead of a generic "address any feedback"
+      // note. Declared in the outer scope so it survives both the inner
+      // `continue` (revision) and `continue outerLoop` (rejection) paths.
+      let reviewerFeedback = '';
       outerLoop: while (true) {
         // --- Step 1: Security Scan ---
         {
@@ -1821,7 +1915,11 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
               requirementsBlock +
               `SECURITY CLEARANCE:\n${scanResult}\n\n` +
               (revisionCount > 0
-                ? `REVISION ATTEMPT ${revisionCount + 1}:\nPrevious work needs revision. Address any feedback and fix issues.\n\n`
+                ? `REVISION ATTEMPT ${revisionCount + 1}:\nPrevious work needs revision. ` +
+                  `Address the reviewer's feedback below and fix the issues.\n\n` +
+                  (reviewerFeedback
+                    ? `REVIEWER FEEDBACK:\n${reviewerFeedback.substring(0, 3000)}\n\n`
+                    : '')
                 : '') +
               `Implement the assigned work within the cleared scope.`;
 
@@ -2056,6 +2154,10 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
             }
 
             if (reviewVerdict.verdict === 'REVISION_NEEDED') {
+              // Carry the reviewer's concrete findings into the next Worker-1
+              // instruction (see workerInstruction above), so the revision pass
+              // targets the actual issues rather than revising blind.
+              reviewerFeedback = reviewVerdict.details;
               this.emit(
                 'agent-output',
                 teamId,
@@ -2077,6 +2179,9 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
             }
 
             if (reviewVerdict.verdict === 'REJECTED') {
+              // A rejection restarts from the security scan, but the reviewer's
+              // rationale still informs the next implementation attempt.
+              reviewerFeedback = reviewVerdict.details;
               this.emit(
                 'agent-output',
                 teamId,
@@ -2486,10 +2591,13 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
         const { frontmatter } = parseFrontmatter(content);
 
         models[instance] = frontmatter.model ?? FALLBACK_MODEL;
-        efforts[instance] = (frontmatter.effort as EffortLevel) ?? FALLBACK_EFFORT;
-        maxTurns[instance] = frontmatter.maxTurns
-          ? parseInt(frontmatter.maxTurns, 10)
-          : FALLBACK_MAX_TURNS;
+        // Validate user-authored values: an unknown effort name or a
+        // non-positive-integer maxTurns falls back to the safe default rather
+        // than being cast/parsed blindly and handed to the SDK.
+        efforts[instance] = isEffortLevel(frontmatter.effort)
+          ? frontmatter.effort
+          : FALLBACK_EFFORT;
+        maxTurns[instance] = parseFrontmatterMaxTurns(frontmatter.maxTurns);
         disallowedTools[instance] = frontmatter.disallowedTools
           ? frontmatter.disallowedTools.split(',').map((t: string) => t.trim())
           : [];

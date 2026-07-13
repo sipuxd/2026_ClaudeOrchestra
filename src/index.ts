@@ -319,12 +319,16 @@ async function main(): Promise<void> {
       orchestrator.start();
 
       // Auto-exit when task reaches terminal state
-      orchestrator.on('task-complete', async (_completedTeamId, _phase, _durationMs) => {
+      orchestrator.on('task-complete', async (_completedTeamId, phase, _durationMs) => {
         // Give a moment for final log output to flush
         setTimeout(async () => {
           await orchestrator.shutdown();
           logger.dispose();
-          process.exit(0);
+          // Reflect the terminal outcome in the exit code so `assign-task` is
+          // scriptable/CI-usable: a team that ended errored or cancelled is a
+          // failure, not a success.
+          const failed = phase === TeamPhase.Errored || phase === TeamPhase.Cancelled;
+          process.exit(failed ? 1 : 0);
         }, 2000);
       });
 

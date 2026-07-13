@@ -145,6 +145,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => {
 import { query as sdkQuery } from '@anthropic-ai/claude-agent-sdk';
 import {
   MalformedVerdictError,
+  makePrefixVerdictParser,
   PipelineOrchestrator,
   parseChatVerdict,
   parseClassification,
@@ -344,6 +345,24 @@ describe('PipelineOrchestrator', () => {
       orchestrator.createTeam('team-x', projectDir);
       expect(handler).toHaveBeenCalledWith('team-x');
     });
+
+    it('throws (fail loud) when the project is a git repo but the team branch cannot be created', () => {
+      // Fresh git repo, NO commits / NO main branch → createTeamBranch's
+      // `git checkout main` fails. The engine must refuse rather than leave HEAD
+      // on the default branch where phase-boundary auto-commits would land.
+      const gitDir = path.join(tmpDir, 'branchless-git');
+      fs.mkdirSync(gitDir, { recursive: true });
+      execSync('git init', { cwd: gitDir, stdio: 'pipe' });
+      expect(() => orchestrator.createTeam('branchless', gitDir)).toThrow(/team branch/i);
+    });
+
+    it('creates a team without a branch (no throw) when the project is not a git repo', () => {
+      const plainDir = path.join(tmpDir, 'no-vcs');
+      fs.mkdirSync(plainDir, { recursive: true });
+      const state = orchestrator.createTeam('no-vcs', plainDir);
+      expect(state.currentPhase).toBe(TeamPhase.PreWork);
+      expect(state.snapshot.branchName).toBe('');
+    });
   });
 
   // --- Recovery ---
@@ -482,6 +501,53 @@ describe('PipelineOrchestrator', () => {
         '<thinking>code is well-implemented but missing tests would normally need revision</thinking>\n\nAPPROVED — tests cover the same paths via consumers',
       );
       expect(result.verdict).toBe('APPROVED');
+    });
+  });
+
+  describe('makePrefixVerdictParser', () => {
+    it('strict-prefix matches a token and preserves the trimmed original as details', () => {
+      const parse = makePrefixVerdictParser(['YES', 'NO'] as const);
+      const result = parse('  YES — do it');
+      expect(result).toEqual({ verdict: 'YES', details: 'YES — do it' });
+    });
+
+    it('returns AMBIGUOUS (never guesses) when no token prefixes the response', () => {
+      const parse = makePrefixVerdictParser(['YES', 'NO'] as const);
+      const result = parse('maybe YES later');
+      expect(result.verdict).toBe('AMBIGUOUS');
+    });
+
+    it('is case-sensitive by default so a lowercased token does not match', () => {
+      const parse = makePrefixVerdictParser(['APPROVED'] as const);
+      expect(parse('approved — lower').verdict).toBe('AMBIGUOUS');
+    });
+
+    it('matches any case when caseInsensitive is set, keeping original-case details', () => {
+      const parse = makePrefixVerdictParser(['APPROVED'] as const, { caseInsensitive: true });
+      const result = parse('approved — lower');
+      expect(result.verdict).toBe('APPROVED');
+      expect((result as { details: string }).details).toBe('approved — lower');
+    });
+
+    it('strips <thinking> and a leading bold run before matching when enabled', () => {
+      const parse = makePrefixVerdictParser(['PASSED', 'CONCERNS'] as const, {
+        stripThinking: true,
+        stripBold: true,
+        caseInsensitive: true,
+      });
+      expect(parse('<thinking>hmm</thinking>\n**CONCERNS** — issue').verdict).toBe('CONCERNS');
+    });
+
+    // The four production parsers are derived from the factory; these assert the
+    // switch wiring per gate stayed intact after the refactor.
+    it('keeps parseSecurityVerdict case-sensitive (no <thinking> strip)', () => {
+      expect(parseSecurityVerdict('approved — lower').verdict).toBe('AMBIGUOUS');
+      expect(parseSecurityVerdict('APPROVED — caps').verdict).toBe('APPROVED');
+    });
+
+    it('keeps parseVerifyVerdict case-insensitive', () => {
+      expect(parseVerifyVerdict('complete — done').verdict).toBe('COMPLETE');
+      expect(parseVerifyVerdict('gaps_found — missing x').verdict).toBe('GAPS_FOUND');
     });
   });
 
@@ -881,6 +947,60 @@ describe('PipelineOrchestrator', () => {
       expect(phases).toContain(TeamPhase.Done);
     });
 
+    it('threads reviewer feedback into Worker-1 on a REVISION_NEEDED pass', async () => {
+      const completionPromise = new Promise<void>((resolve) => {
+        orchestrator.on('task-complete', () => resolve());
+      });
+
+      orchestrator.createTeam('rev', projectDir);
+      orchestrator.assignTask(
+        'rev',
+        'implement user authentication with JWT tokens and database integration',
+      );
+
+      await new Promise((r) => setTimeout(r, 50));
+      const security = mock.getSession(0);
+      const worker1 = mock.getSession(1);
+      const worker2 = mock.getSession(2);
+      const reviewer = mock.getSession(3);
+
+      await new Promise((r) => setTimeout(r, 80));
+      security.respond('SAFE: all files\nNo issues found.');
+      await new Promise((r) => setTimeout(r, 80));
+      worker1.respond('Implemented JWT auth (first attempt).');
+      await new Promise((r) => setTimeout(r, 80));
+      worker2.respond('COMPLETE — all requirements implemented.');
+      await new Promise((r) => setTimeout(r, 80));
+      security.respond('APPROVED — no vulnerabilities found.');
+      await new Promise((r) => setTimeout(r, 80));
+      // Reviewer requests a revision with a specific, checkable finding.
+      reviewer.respond(
+        'REVISION_NEEDED — the token expiry is not validated; add an exp check in verifyToken().',
+      );
+      await new Promise((r) => setTimeout(r, 80));
+
+      // Second pass — drive it to completion.
+      worker1.respond('Added exp validation.');
+      await new Promise((r) => setTimeout(r, 80));
+      worker2.respond('COMPLETE — all requirements implemented.');
+      await new Promise((r) => setTimeout(r, 80));
+      security.respond('APPROVED — no vulnerabilities found.');
+      await new Promise((r) => setTimeout(r, 80));
+      reviewer.respond('APPROVED — expiry now validated.');
+
+      security.complete();
+      worker1.complete();
+      worker2.complete();
+      reviewer.complete();
+      await completionPromise;
+
+      // The reviewer's concrete finding must reach Worker-1's revision prompt,
+      // not just a generic "address any feedback" note.
+      const worker1Prompts = worker1.receivedMessages.join('\n---\n');
+      expect(worker1Prompts).toContain('REVIEWER FEEDBACK');
+      expect(worker1Prompts).toContain('token expiry is not validated');
+    });
+
     it('uses opus model for all agents', async () => {
       orchestrator.createTeam('standard', projectDir);
       orchestrator.assignTask(
@@ -930,6 +1050,28 @@ describe('PipelineOrchestrator', () => {
       expect(mock.getSession(1).options.effort).toBe('high'); // Worker-1 (implementer)
       expect(mock.getSession(2).options.effort).toBe('medium'); // Worker-2 (verifier)
       expect(mock.getSession(3).options.effort).toBe('low'); // Reviewer
+    });
+
+    it('falls back to safe defaults for invalid frontmatter effort/maxTurns', () => {
+      // Overwrite a role file with a bogus effort name and a negative maxTurns.
+      fs.writeFileSync(
+        path.join(rolesDir, 'worker-1.agent.md'),
+        '---\nname: worker-1\nmodel: claude-opus-4-6\neffort: turbo\nmaxTurns: -5\n---\n\n# Worker-1\nYou execute coding tasks.',
+      );
+      const orch = new PipelineOrchestrator({
+        registryPath: path.join(tmpDir, 'registry-badfm.json'),
+        portfolioPath: path.join(tmpDir, 'projects-badfm.json'),
+        rolesDir,
+        skipRequirements: true,
+      });
+      const efforts = (orch as any).efforts as Record<string, string>;
+      const maxTurns = (orch as any).maxTurnsPerInstance as Record<string, number>;
+      // Unknown effort name 'turbo' rejected → FALLBACK_EFFORT.
+      expect(efforts['Worker-1']).toBe('medium');
+      // Negative maxTurns rejected → FALLBACK_MAX_TURNS.
+      expect(maxTurns['Worker-1']).toBe(20);
+      // A valid sibling role is untouched (guard only rewrites bad values).
+      expect(efforts['Worker-2']).toBe('medium');
     });
   });
 
@@ -1068,6 +1210,42 @@ describe('PipelineOrchestrator', () => {
       // The cancelled turn must NOT have produced a coordinator or system
       // reply — chat is left in a clean "user sent, no response" state.
       expect(messages.filter((m) => m.role !== 'user')).toHaveLength(0);
+    });
+  });
+
+  describe('sendChatMessage warm-session prompting', () => {
+    it('replays the full bootstrap on turn 1 but sends only the new message on turn 2+', async () => {
+      orchestrator.createTeam('chat-warm', projectDir);
+
+      const waitFor = async (pred: () => boolean, label: string) => {
+        const start = Date.now();
+        while (!pred()) {
+          if (Date.now() - start > 2000) throw new Error(`timeout: ${label}`);
+          await new Promise((r) => setTimeout(r, 5));
+        }
+      };
+
+      // Turn 1: lazy-spawns Coordinator-1 (mock session 0) + sends full bootstrap.
+      const t1 = orchestrator.sendChatMessage('chat-warm', 'first message');
+      await waitFor(
+        () => mock.sessions.length > 0 && mock.getSession(0).receivedMessages.length >= 1,
+        'turn-1 prompt',
+      );
+      mock.getSession(0).respond('RESPONDING — hi there');
+      await t1;
+
+      // Turn 2: reuses the SAME warm session; must carry ONLY the new message.
+      const t2 = orchestrator.sendChatMessage('chat-warm', 'second message');
+      await waitFor(() => mock.getSession(0).receivedMessages.length >= 2, 'turn-2 prompt');
+      mock.getSession(0).respond('RESPONDING — sure');
+      await t2;
+
+      const coordinator = mock.getSession(0);
+      expect(mock.sessions).toHaveLength(1); // warm reuse, no respawn
+      expect(coordinator.receivedMessages[0]).toContain('CONVERSATION HISTORY:');
+      expect(coordinator.receivedMessages[0]).toContain('first message');
+      expect(coordinator.receivedMessages[1]).toBe('second message');
+      expect(coordinator.receivedMessages[1]).not.toContain('CONVERSATION HISTORY:');
     });
   });
 

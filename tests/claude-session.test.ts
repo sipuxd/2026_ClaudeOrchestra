@@ -64,6 +64,9 @@ function assistant(text: string) {
 function result(text: string) {
   return { type: 'result', subtype: 'success', result: text };
 }
+function errorResult(subtype: string, errors?: string[]) {
+  return { type: 'result', subtype, is_error: true, ...(errors ? { errors } : {}) };
+}
 
 describe('ClaudeAgentSession response assembly', () => {
   it('does not duplicate the response when the result repeats the assistant text', async () => {
@@ -124,5 +127,33 @@ describe('ClaudeAgentSession response assembly', () => {
     await expect(
       Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('hang')), 1000))]),
     ).resolves.toBeDefined();
+  });
+
+  it('rejects send() when the result reports an error subtype (no silent partial success)', async () => {
+    const s = makeSession();
+    const p = s.send('hi');
+    await new Promise((r) => setTimeout(r, 10));
+    // The SDK streamed some partial text, then the turn failed (e.g. max turns).
+    // The partial text must NOT be resolved as a successful response.
+    pushMsg?.(assistant('partial work...'));
+    pushMsg?.(errorResult('error_max_turns', ['turn limit reached']));
+    await expect(p).rejects.toThrow(/error_max_turns/);
+    s.close();
+  });
+
+  it('rejects with a NormalizedRuntimeError carrying the subtype and errors[]', async () => {
+    const s = makeSession();
+    const p = s.send('hi');
+    await new Promise((r) => setTimeout(r, 10));
+    pushMsg?.(errorResult('error_during_execution', ['boom']));
+    await expect(p).rejects.toMatchObject({
+      name: 'NormalizedRuntimeError',
+      data: {
+        category: 'provider',
+        retryable: false,
+        evidence: { subtype: 'error_during_execution', errors: ['boom'] },
+      },
+    });
+    s.close();
   });
 });

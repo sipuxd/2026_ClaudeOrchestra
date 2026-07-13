@@ -86,4 +86,32 @@ describe('CodexAgentSession guardrails', () => {
     expect(progress.join('\n')).toContain('Guardrail post-detection');
     expect(progress.join('\n')).toContain('piped remote script');
   });
+
+  it('re-sends the system prompt when the first turn fails', async () => {
+    // First turn fails mid-stream → send() throws; systemPromptSent must stay
+    // false so the retry still carries the system prompt.
+    codexMocks.runStreamed.mockResolvedValueOnce({
+      events: eventsFrom([{ type: 'turn.failed', error: { message: 'boom' } }]),
+    });
+    // Second turn succeeds.
+    codexMocks.runStreamed.mockResolvedValueOnce({
+      events: eventsFrom([
+        { type: 'item.completed', item: { id: 'msg-1', type: 'agent_message', text: 'done' } },
+        { type: 'turn.completed', usage: null },
+      ]),
+    });
+
+    const session = makeSession(3);
+    await expect(session.send('first')).rejects.toThrow('boom');
+    await expect(session.send('second')).resolves.toBe('done');
+
+    expect(codexMocks.runStreamed).toHaveBeenCalledTimes(2);
+    const firstInput = codexMocks.runStreamed.mock.calls[0][0] as string;
+    const secondInput = codexMocks.runStreamed.mock.calls[1][0] as string;
+    // No images → prepareInput returns a plain string; BOTH turns must carry
+    // the system prompt (before the fix, the failed first turn flipped the flag
+    // and the retry dropped it).
+    expect(firstInput).toContain('system prompt');
+    expect(secondInput).toContain('system prompt');
+  });
 });

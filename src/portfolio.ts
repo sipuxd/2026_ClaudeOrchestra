@@ -6,9 +6,9 @@
 //
 // Atomic writes via temp-file + fs.renameSync() (same pattern as Registry).
 
-import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { writeJsonFileAtomic } from './atomic-write.js';
 
 export interface Project {
   projectPath: string; // Absolute path on disk
@@ -82,13 +82,6 @@ export class Portfolio {
 
   private write(projects: Project[]): void {
     const data: PortfolioData = { projects };
-    const json = JSON.stringify(data, null, 2);
-
-    const dir = path.dirname(this.portfolioPath);
-    fs.mkdirSync(dir, { recursive: true });
-
-    const tmpPath = path.join(dir, `.tmp-portfolio-${randomUUID()}.json`);
-    fs.writeFileSync(tmpPath, json, 'utf-8');
-    fs.renameSync(tmpPath, this.portfolioPath);
+    writeJsonFileAtomic(this.portfolioPath, data);
   }
 }

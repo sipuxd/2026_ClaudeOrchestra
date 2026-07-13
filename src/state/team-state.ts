@@ -448,6 +448,22 @@ export class TeamState {
     );
   }
 
+  /**
+   * Force any terminal phase back to PreWork so the team can be reassigned a new
+   * task. Unlike {@link transitionPhase}, this bypasses VALID_PHASE_TRANSITIONS:
+   * Merged and Cancelled are dead-ends there (`[]`), so a plain
+   * `transitionPhase(PreWork)` throws for those phases and leaves the team
+   * permanently un-reassignable. Resets the backward-transition counters since
+   * the next run starts fresh. No-op when the team is not in a terminal phase.
+   */
+  resetForReassignment(): void {
+    if (!this.isTerminal) return;
+    this.data.currentPhase = TeamPhase.PreWork;
+    this.data.counters = { revisions: 0, rejections: 0, totalBackwardTransitions: 0 };
+    this.phaseTransitioned = true;
+    this.touch();
+  }
+
   // --- Branch & PR management ---
 
   setBranchName(name: string): void {

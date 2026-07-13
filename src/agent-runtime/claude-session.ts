@@ -1,9 +1,20 @@
 import type { Query, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { buildGovernanceHooks } from '../hooks.js';
+import { NormalizedRuntimeError } from '../runtime-errors.js';
 import { buildClaudeSubscriptionEnv } from './auth.js';
 import { toClaudeEffort } from './effort.js';
 import type { AgentInputImage, AgentSession, AgentSessionOptions } from './types.js';
+
+// SDK `result` messages carry one of these subtypes when a turn FAILED. We
+// reject send() on any of them instead of resolving the partial accumulated
+// text as if the turn had succeeded.
+const ERROR_RESULT_SUBTYPES = new Set([
+  'error_max_turns',
+  'error_during_execution',
+  'error_max_budget_usd',
+  'error_max_structured_output_retries',
+]);
 
 class PromptChannel {
   private queue: SDKUserMessage[] = [];
@@ -175,6 +186,30 @@ export class ClaudeAgentSession implements AgentSession {
         }
 
         if ((msg as any).type === 'result' && this.pendingResolve) {
+          // A result message can report a FAILED turn via its subtype
+          // (max-turns, execution error, budget, structured-output retries).
+          // Reject send() with a normalized error carrying the subtype instead
+          // of resolving the partial text as success — silently returning
+          // partial output made provider failures indistinguishable from a
+          // clean turn and let the pipeline proceed on truncated work.
+          const subtype = (msg as any).subtype;
+          if (typeof subtype === 'string' && ERROR_RESULT_SUBTYPES.has(subtype)) {
+            const reject = this.pendingReject;
+            this.accumulated = '';
+            this.pendingResolve = null;
+            this.pendingReject = null;
+            const err = new NormalizedRuntimeError({
+              provider: 'claude',
+              phase: this.name,
+              category: 'provider',
+              retryable: false,
+              message: `Claude agent "${this.name}" turn failed (${subtype}).`,
+              evidence: { subtype, errors: (msg as any).errors },
+            });
+            if (reject) reject(err);
+            else throw err;
+            continue;
+          }
           // The SDK's `result` message repeats the final assistant text that was
           // already streamed via `assistant` messages and accumulated above.
           // Use its `result` field ONLY as a fallback when nothing streamed, so

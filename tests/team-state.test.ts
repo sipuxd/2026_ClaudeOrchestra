@@ -202,6 +202,57 @@ describe('phase transitions', () => {
 });
 
 // =============================================
+// resetForReassignment — reassign terminal teams
+// =============================================
+
+describe('resetForReassignment', () => {
+  it('force-resets a cancelled team to pre_work (which transitionPhase cannot)', () => {
+    const team = TeamState.create('t', 'p', '/path');
+    team.transitionPhase(TeamPhase.Cancelled);
+    // A plain transition throws (see "rejects transitions from cancelled") —
+    // that dead-end is exactly what stranded cancelled teams as un-reassignable.
+    expect(() => team.transitionPhase(TeamPhase.PreWork)).toThrow(TransitionError);
+
+    team.resetForReassignment();
+    expect(team.currentPhase).toBe(TeamPhase.PreWork);
+    expect(team.isTerminal).toBe(false);
+  });
+
+  it('force-resets a merged team to pre_work', () => {
+    const team = TeamState.create('t', 'p', '/path');
+    team.transitionPhase(TeamPhase.Work);
+    team.transitionPhase(TeamPhase.Handoff);
+    team.transitionPhase(TeamPhase.Review);
+    team.transitionPhase(TeamPhase.Done);
+    team.transitionPhase(TeamPhase.PrOpen);
+    team.transitionPhase(TeamPhase.Merged);
+    expect(team.currentPhase).toBe(TeamPhase.Merged);
+
+    team.resetForReassignment();
+    expect(team.currentPhase).toBe(TeamPhase.PreWork);
+  });
+
+  it('resets backward-transition counters', () => {
+    const team = TeamState.create('t', 'p', '/path');
+    team.transitionPhase(TeamPhase.Work);
+    team.transitionPhase(TeamPhase.Handoff);
+    team.transitionPhase(TeamPhase.Work); // backward → revisions++
+    expect(team.counters.revisions).toBe(1);
+    team.transitionPhase(TeamPhase.Cancelled);
+
+    team.resetForReassignment();
+    expect(team.counters).toEqual({ revisions: 0, rejections: 0, totalBackwardTransitions: 0 });
+  });
+
+  it('is a no-op for a non-terminal (active) team', () => {
+    const team = TeamState.create('t', 'p', '/path');
+    team.transitionPhase(TeamPhase.Work);
+    team.resetForReassignment();
+    expect(team.currentPhase).toBe(TeamPhase.Work);
+  });
+});
+
+// =============================================
 // Loop limits
 // =============================================
 

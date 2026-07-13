@@ -21,19 +21,19 @@ import {
 } from './guardrails.js';
 
 /**
- * PreToolUse hook: applies the shared guardrail policy before Claude tool use.
+ * Core PreToolUse policy check. When `projectRoot` is supplied, file paths are
+ * also required to stay inside that root (see evaluatePathAccess containment).
  */
-export async function blockTraversal(
-  input: HookInput,
-  _toolUseID: string | undefined,
-  _options: { signal: AbortSignal },
-): Promise<HookJSONOutput> {
+function evaluateToolUse(input: HookInput, projectRoot?: string): HookJSONOutput {
   const pi = input as PreToolUseHookInput;
   const toolInput = pi.tool_input as Record<string, unknown> | undefined;
-  const filePath = (toolInput?.file_path ?? toolInput?.path ?? '') as string;
+  const filePath = (toolInput?.file_path ??
+    toolInput?.path ??
+    toolInput?.notebook_path ??
+    '') as string;
   const command = (toolInput?.command ?? '') as string;
   const findings = [
-    ...evaluatePathAccess(filePath),
+    ...evaluatePathAccess(filePath, projectRoot),
     ...(pi.tool_name === 'Bash' ? evaluateCommand(command) : []),
   ];
   const report: GuardrailReport = {
@@ -53,6 +53,23 @@ export async function blockTraversal(
     };
   }
   return {};
+}
+
+/**
+ * Builds a PreToolUse hook bound to `cwd` (the project root), so file paths that
+ * resolve outside the project are blocked in addition to the shared policy. This
+ * is the only PreToolUse hook constructor — an unbound variant that skipped
+ * project containment was removed so a future call site can't silently wire the
+ * weaker check.
+ */
+export function makeBlockTraversal(cwd: string) {
+  return async function blockTraversalScoped(
+    input: HookInput,
+    _toolUseID: string | undefined,
+    _options: { signal: AbortSignal },
+  ): Promise<HookJSONOutput> {
+    return evaluateToolUse(input, cwd);
+  };
 }
 
 /**
@@ -103,8 +120,12 @@ export function buildGovernanceHooks(
   return {
     PreToolUse: [
       {
-        matcher: 'Read|Edit|Write|Bash',
-        hooks: [blockTraversal],
+        // Grep and Glob take a `path` and can read/enumerate outside the project
+        // (their `path` param is extracted in evaluateToolUse), so they must be
+        // contained too — omitting them let any agent read off-project files
+        // (e.g. ~/.ssh, ~/.aws) that the Read tool is blocked from.
+        matcher: 'Read|Edit|Write|Bash|NotebookEdit|Grep|Glob',
+        hooks: [makeBlockTraversal(cwd)],
         timeout: 5,
       },
     ],

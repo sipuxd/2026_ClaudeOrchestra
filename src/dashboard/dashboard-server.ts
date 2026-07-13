@@ -17,12 +17,25 @@ export interface DashboardServerOptions {
   orchestrator: PipelineOrchestrator;
   port: number;
   host?: string;
+  /**
+   * Extra Host-header hostnames to accept while bound to loopback — e.g. a
+   * tunnel hostname (xyz.trycloudflare.com) or an /etc/hosts alias — so a
+   * reverse proxy/tunnel works WITHOUT switching to a non-loopback bind (which
+   * would disable the DNS-rebinding defense and expose the port to the LAN).
+   */
+  allowedHosts?: string[];
+}
+
+/** True when `host` binds only the local machine (no network exposure). */
+export function isLoopbackHost(host: string): boolean {
+  return host === '127.0.0.1' || host === 'localhost' || host === '::1';
 }
 
 export class DashboardServer {
   private readonly orchestrator: PipelineOrchestrator;
   private readonly port: number;
   private readonly host: string;
+  private readonly allowedHosts: Set<string>;
   private server: http.Server | null = null;
   private sseClients: Set<http.ServerResponse> = new Set();
   private cachedHTML: string | null = null;
@@ -42,7 +55,22 @@ export class DashboardServer {
   constructor(options: DashboardServerOptions) {
     this.orchestrator = options.orchestrator;
     this.port = options.port;
-    this.host = options.host ?? '0.0.0.0';
+    // Default to loopback so the dashboard is reachable only from this machine.
+    // The dashboard is an unauthenticated control surface (it can create teams,
+    // run projects, and spawn agents); binding a non-loopback host exposes that
+    // to the network and must be an explicit opt-in (warned about in start()).
+    this.host = options.host ?? '127.0.0.1';
+    // Trusted Host-header names (in addition to the loopback set), from config
+    // and the CLAUDE_ORCHESTRA_ALLOWED_HOSTS env var (comma-separated). Let a
+    // tunnel/proxy work without dropping the loopback bind + DNS-rebinding check.
+    const envHosts = (process.env.CLAUDE_ORCHESTRA_ALLOWED_HOSTS ?? '')
+      .split(',')
+      .map((h) => h.trim().toLowerCase())
+      .filter(Boolean);
+    this.allowedHosts = new Set([
+      ...(options.allowedHosts ?? []).map((h) => h.toLowerCase()),
+      ...envHosts,
+    ]);
   }
 
   /**
@@ -67,6 +95,13 @@ export class DashboardServer {
       this.server.on('error', reject);
 
       this.server.listen(this.port, this.host, () => {
+        if (!isLoopbackHost(this.host)) {
+          console.warn(
+            `[dashboard] WARNING: binding to non-loopback host ${this.host}. ` +
+              'The dashboard has no authentication — anyone who can reach ' +
+              `${this.host}:${this.port} can create teams, run projects, and spawn agents.`,
+          );
+        }
         resolve();
       });
     });
@@ -238,19 +273,74 @@ export class DashboardServer {
   // --- HTTP Request Handling ---
 
   private handleRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
+    try {
+      this.routeRequest(req, res);
+    } catch (err) {
+      // A malformed Host header (new URL) or malformed percent-encoding in a
+      // route param (decodeURIComponent) throws synchronously during routing.
+      // Answer 400 rather than let the exception reach http.createServer, which
+      // has no listener and would crash the whole engine — dashboard,
+      // orchestrator, and every running team share this process.
+      if (!res.headersSent && !res.writableEnded) {
+        const status = err instanceof URIError || err instanceof TypeError ? 400 : 500;
+        res.writeHead(status, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({ error: status === 400 ? 'Bad request' : 'Internal server error' }),
+        );
+      }
+    }
+  }
+
+  private routeRequest(req: http.IncomingMessage, res: http.ServerResponse): void {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
     const pathname = url.pathname;
     const method = req.method ?? 'GET';
 
-    // CORS headers
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    // DNS-rebinding defense: applies to ALL methods (a rebound GET could read
+    // data too). The loopback bind and Origin check both fail against DNS
+    // rebinding, where the victim's own browser sends a matching Origin AND Host
+    // for the attacker's domain; validating the Host header against a loopback
+    // allowlist is what actually closes it.
+    if (!this.isAllowedHost(req)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Host not allowed' }));
+      return;
+    }
 
+    // The dashboard SPA is served same-origin from this same server, so it needs
+    // no CORS headers. We deliberately do NOT advertise
+    // Access-Control-Allow-Origin — a wildcard would let any website read this
+    // server's responses, and any cross-origin preflight should simply fail.
     if (method === 'OPTIONS') {
       res.writeHead(204);
       res.end();
       return;
+    }
+
+    // CSRF / cross-site defense (primary): reject any state-changing request that
+    // carries an Origin header from a different host. Same-origin SPA calls send a
+    // matching Origin (or none); a malicious page in the user's browser sends its
+    // own foreign Origin and is blocked. CLI clients (curl) send no Origin and are
+    // unaffected. Combined with loopback binding this closes the "any website can
+    // POST to localhost and spawn a process" vector.
+    if (method !== 'GET' && method !== 'HEAD' && this.isCrossOriginRequest(req)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Cross-origin request refused' }));
+      return;
+    }
+
+    // Content-type hardening (defense-in-depth): a cross-site "simple request"
+    // POST uses text/plain to skip the CORS preflight. With the wildcard CORS
+    // removed, requiring application/json for any mutating request that declares
+    // a body content-type rejects that path too. Body-less mutations (no
+    // content-type) are still covered by the Origin check above.
+    if (method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE') {
+      const contentType = req.headers['content-type'];
+      if (contentType && !/^application\/json\b/i.test(contentType)) {
+        res.writeHead(415, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Unsupported Media Type: application/json required' }));
+        return;
+      }
     }
 
     // Route matching
@@ -428,6 +518,38 @@ export class DashboardServer {
     this.send404(res);
   }
 
+  /**
+   * True when the request carries an Origin header whose host differs from the
+   * server's host — i.e. a cross-site request from a page in the user's browser.
+   * A missing Origin (curl, other CLI clients) is treated as same-origin because
+   * those are not CSRF vectors. A malformed Origin is treated as cross-origin.
+   */
+  private isCrossOriginRequest(req: http.IncomingMessage): boolean {
+    const origin = req.headers.origin;
+    if (!origin) return false;
+    let originHost: string;
+    try {
+      originHost = new URL(origin).host;
+    } catch {
+      return true;
+    }
+    return originHost !== (req.headers.host ?? '');
+  }
+
+  /**
+   * DNS-rebinding defense. When bound to loopback (the default), only accept
+   * requests whose Host header is a loopback name; a rebound attacker request
+   * carries Host: attacker.example and is refused even though its Origin and
+   * Host agree. Skipped when the user opts into network exposure via --host,
+   * where the Host header legitimately varies (LAN IP / hostname).
+   */
+  private isAllowedHost(req: http.IncomingMessage): boolean {
+    if (!isLoopbackHost(this.host)) return true;
+    const hostHeader = (req.headers.host ?? '').toLowerCase();
+    const hostname = hostHeader.replace(/:\d+$/, '').replace(/^\[|\]$/g, '');
+    return isLoopbackHost(hostname) || this.allowedHosts.has(hostname);
+  }
+
   // --- Route Handlers ---
 
   private serveHTML(res: http.ServerResponse): void {
@@ -450,7 +572,12 @@ export class DashboardServer {
     const runtime = this.orchestrator.getAgentRuntime();
     const portfolio = this.orchestrator.getPortfolio();
     const runners = this.projectRunner.getAllStatuses();
-    res.write(`event: init\ndata: ${JSON.stringify({ teams, runtime, portfolio, runners })}\n\n`);
+    // Include any open blocking prompts so a page reload re-shows them instead
+    // of orphaning a pipeline suspended in askUser.
+    const pendingFeedback = this.orchestrator.getPendingFeedback();
+    res.write(
+      `event: init\ndata: ${JSON.stringify({ teams, runtime, portfolio, runners, pendingFeedback })}\n\n`,
+    );
 
     this.sseClients.add(res);
 
@@ -526,14 +653,19 @@ export class DashboardServer {
       }
 
       const state = this.orchestrator.createTeam(name, projectPath);
+      // createTeam sanitizes/trims the name into the canonical teamId; use THAT
+      // for the follow-up assignTask, not the raw `name` — a name with leading/
+      // trailing whitespace would otherwise create the team but fail assignment
+      // with "team not found", leaving a half-created team.
+      const teamId = state.snapshot.teamId;
 
       if (task) {
-        this.orchestrator.assignTask(name, task, images);
+        this.orchestrator.assignTask(teamId, task, images);
       }
 
       this.sendJSON(res, state.snapshot, 201);
     } catch (err: any) {
-      this.sendJSON(res, { error: err.message }, 400);
+      this.sendJSON(res, { error: err.message }, err.statusCode ?? 400);
     }
   }
 
@@ -554,7 +686,7 @@ export class DashboardServer {
       this.orchestrator.assignTask(teamId, description, images);
       this.sendJSON(res, { ok: true });
     } catch (err: any) {
-      this.sendJSON(res, { error: err.message }, 400);
+      this.sendJSON(res, { error: err.message }, err.statusCode ?? 400);
     }
   }
 
@@ -563,7 +695,7 @@ export class DashboardServer {
       await this.orchestrator.terminateTeam(teamId);
       this.sendJSON(res, { ok: true });
     } catch (err: any) {
-      this.sendJSON(res, { error: err.message }, 400);
+      this.sendJSON(res, { error: err.message }, err.statusCode ?? 400);
     }
   }
 
@@ -581,7 +713,7 @@ export class DashboardServer {
       const cleared = await this.orchestrator.clearDoneTeams(projectPath);
       this.sendJSON(res, { cleared });
     } catch (err: any) {
-      this.sendJSON(res, { error: err.message }, 400);
+      this.sendJSON(res, { error: err.message }, err.statusCode ?? 400);
     }
   }
 
@@ -605,7 +737,7 @@ export class DashboardServer {
       });
       this.sendJSON(res, project);
     } catch (err: any) {
-      this.sendJSON(res, { error: err.message }, 400);
+      this.sendJSON(res, { error: err.message }, err.statusCode ?? 400);
     }
   }
 
@@ -662,17 +794,22 @@ export class DashboardServer {
   ): Promise<void> {
     try {
       const body = JSON.parse(await this.readBody(req));
-      const { feedbackId, value } = body;
+      const { feedbackId, value, text } = body;
 
       if (!feedbackId || value === undefined) {
         this.sendJSON(res, { error: 'feedbackId and value are required' }, 400);
         return;
       }
 
-      this.orchestrator.resolveFeedback(teamId, feedbackId, value);
+      this.orchestrator.resolveFeedback(
+        teamId,
+        feedbackId,
+        value,
+        typeof text === 'string' ? text : undefined,
+      );
       this.sendJSON(res, { ok: true });
     } catch (err: any) {
-      this.sendJSON(res, { error: err.message }, 400);
+      this.sendJSON(res, { error: err.message }, err.statusCode ?? 400);
     }
   }
 
@@ -705,7 +842,7 @@ export class DashboardServer {
         });
       this.sendJSON(res, { ok: true });
     } catch (err: any) {
-      this.sendJSON(res, { error: err.message }, 400);
+      this.sendJSON(res, { error: err.message }, err.statusCode ?? 400);
     }
   }
 
@@ -757,7 +894,7 @@ export class DashboardServer {
       });
       this.sendJSON(res, { ok: true }, 202);
     } catch (err: any) {
-      this.sendJSON(res, { error: err.message }, 400);
+      this.sendJSON(res, { error: err.message }, err.statusCode ?? 400);
     }
   }
 
@@ -786,7 +923,7 @@ export class DashboardServer {
       });
       this.sendJSON(res, { ok: true });
     } catch (err: any) {
-      this.sendJSON(res, { error: err.message }, 400);
+      this.sendJSON(res, { error: err.message }, err.statusCode ?? 400);
     }
   }
 
@@ -1019,7 +1156,7 @@ ${fileListHtml}
         this.sendJSON(res, { paths: dirs.slice(0, 20) });
       });
     } catch (err: any) {
-      this.sendJSON(res, { error: err.message }, 400);
+      this.sendJSON(res, { error: err.message }, err.statusCode ?? 400);
     }
   }
 
@@ -1041,7 +1178,7 @@ ${fileListHtml}
       const status = await this.projectRunner.start(projectPath);
       this.sendJSON(res, status);
     } catch (err: any) {
-      this.sendJSON(res, { error: err.message }, 400);
+      this.sendJSON(res, { error: err.message }, err.statusCode ?? 400);
     }
   }
 
@@ -1059,7 +1196,7 @@ ${fileListHtml}
       await this.projectRunner.stop(projectPath);
       this.sendJSON(res, { stopped: true, projectPath });
     } catch (err: any) {
-      this.sendJSON(res, { error: err.message }, 400);
+      this.sendJSON(res, { error: err.message }, err.statusCode ?? 400);
     }
   }
 
@@ -1266,23 +1403,48 @@ ${fileListHtml}
     );
   }
 
+  // Cap request bodies so an oversized POST cannot balloon the heap or overflow
+  // V8's max string length (an uncaught RangeError that would crash the engine).
+  // The editable-requirements `text` field is the only legitimately large input
+  // and stays well under this.
+  private static readonly MAX_BODY_BYTES = 5 * 1024 * 1024;
+
   private readBody(req: http.IncomingMessage): Promise<string> {
     return new Promise<string>((resolve, reject) => {
-      let data = '';
+      const chunks: Buffer[] = [];
+      let total = 0;
+      let aborted = false;
       req.on('data', (chunk: Buffer) => {
-        data += chunk.toString();
+        if (aborted) return;
+        total += chunk.length;
+        if (total > DashboardServer.MAX_BODY_BYTES) {
+          // Stop buffering so an oversized body can't OOM; reject with a 413
+          // that callers map onto the response. We keep draining (rather than
+          // destroying) so the response flushes without a connection-reset race.
+          aborted = true;
+          reject(Object.assign(new Error('Request body exceeds 5MB limit'), { statusCode: 413 }));
+          return;
+        }
+        chunks.push(chunk);
       });
-      req.on('end', () => resolve(data));
+      req.on('end', () => {
+        if (!aborted) resolve(Buffer.concat(chunks).toString('utf8'));
+      });
       req.on('error', reject);
     });
   }
 
   private sendJSON(res: http.ServerResponse, data: unknown, status = 200): void {
+    // Guard against a double-write: a handler may call this after an earlier
+    // error path already responded. Writing headers twice throws and, with no
+    // process-level catch on the sync path, could take the engine down.
+    if (res.headersSent || res.writableEnded) return;
     res.writeHead(status, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(data));
   }
 
   private send404(res: http.ServerResponse): void {
+    if (res.headersSent || res.writableEnded) return;
     res.writeHead(404, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ error: 'Not found' }));
   }

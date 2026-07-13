@@ -36,7 +36,7 @@ import {
 import { Portfolio, type Project } from './portfolio.js';
 import { Registry } from './registry.js';
 import { Role, type RoleInstance } from './roles/role-types.js';
-import { classifyComplexity } from './router/complexity-router.js';
+import { classifyComplexity, hasDestructiveIntent } from './router/complexity-router.js';
 import { normalizeRuntimeError } from './runtime-errors.js';
 import { ALL_INSTANCES, INSTANCE_AGENT_FILES, INSTANCE_TO_ROLE } from './spawner/agent-files.js';
 import { parseFrontmatter } from './spawner/frontmatter-parser.js';
@@ -101,12 +101,76 @@ export interface FeedbackPayload {
   highlightTerms?: string[];
   detail?: string;
   metadata?: Record<string, unknown>;
+  /**
+   * Editable body for a blocking prompt (e.g. the requirements checklist). When
+   * present, the dashboard lets the user revise this text before responding; the
+   * edited text is returned to the resolver as `text`.
+   */
+  editableContent?: string;
 }
 // Agent config defaults are read from YAML frontmatter in agent .md files.
 // These fallbacks are used when frontmatter is missing a field.
 const FALLBACK_MODEL = 'claude-opus-4-6';
 const FALLBACK_EFFORT: EffortLevel = 'medium';
 const FALLBACK_MAX_TURNS = 20;
+
+// Tools that write to disk/state, and the network/exfiltration tools a read-only
+// role must also be denied. In the Claude Agent SDK `allowedTools` only
+// auto-approves; `disallowedTools` is the only hard removal ("removed from the
+// model's context and cannot be used"). So a role is only truly read-only if
+// every one of these is disallowed — not just Write/Edit/Bash.
+const WRITE_TOOLS = ['Write', 'Edit', 'Bash'];
+export const READ_ONLY_DISALLOWED_TOOLS = [
+  ...WRITE_TOOLS,
+  'NotebookEdit',
+  'WebFetch',
+  'WebSearch',
+  'Task',
+];
+
+// Network tools have no path containment (the guardrail hook can't scope a fetch
+// to the project), so they are an exfiltration channel even for the write-capable
+// Worker-1, which reads the whole project. Deny them to EVERY instance.
+const NETWORK_EXFIL_TOOLS = ['WebFetch', 'WebSearch'];
+
+// The final security reviewer is read-only for the repo. It works from the diff
+// supplied in its prompt (plus Grep for file content), so it does not need Bash —
+// keeping Bash let a "Do NOT modify the repo" session run `git checkout -- .`,
+// `sed -i`, etc. (the guardrail denylist doesn't block those). Deny the full
+// read-only set; Grep/Glob remain for content search.
+export const SECURITY_REVIEW_DISALLOWED_TOOLS = [...READ_ONLY_DISALLOWED_TOOLS];
+
+// Instances that must ALWAYS be read-only, driven by role identity rather than
+// inferred from a tool list — so a config/frontmatter override can never grant
+// one of them write access. Worker-1 is the only write-capable instance.
+const READ_ONLY_INSTANCES: readonly RoleInstance[] = [
+  'Security-1',
+  'Worker-2',
+  'Reviewer-1',
+  'Coordinator-1',
+];
+
+/**
+ * Validates a team name before it becomes a filesystem directory name, registry
+ * key, and map key. Rejects anything that could escape the
+ * `.claude-orchestra/teams` tree (path separators, `..`) or corrupt on-disk
+ * state (control characters, empty, over-long). Throws a user-facing message.
+ */
+export function validateTeamName(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed) throw new Error('Team name must not be empty.');
+  if (trimmed.length > 100) throw new Error('Team name must be 100 characters or fewer.');
+  if (trimmed.includes('..')) throw new Error('Team name must not contain "..".');
+  if (/[/\\]/.test(trimmed)) throw new Error('Team name must not contain "/" or "\\".');
+  if (trimmed === '.') throw new Error('Team name must not be ".".');
+  for (let i = 0; i < trimmed.length; i++) {
+    if (trimmed.charCodeAt(i) < 0x20) {
+      throw new Error('Team name must not contain control characters.');
+    }
+  }
+  // The trimmed value is what becomes the on-disk directory and registry key.
+  return trimmed;
+}
 
 // --- Verdict types ---
 
@@ -182,6 +246,22 @@ export function parseVerifyVerdict(text: string): VerdictResult<VerifyVerdict> {
   const upper = trimmed.toUpperCase();
   if (upper.startsWith('GAPS_FOUND')) return { verdict: 'GAPS_FOUND', details: trimmed };
   if (upper.startsWith('COMPLETE')) return { verdict: 'COMPLETE', details: trimmed };
+  return { verdict: 'AMBIGUOUS', raw: trimmed };
+}
+
+// Final security-review gate: PASSED | CONCERNS. Strips <thinking> and leading
+// markdown-bold markers, then strict-prefix matches — never guesses on a
+// substring (which failed open when the mandated "No security concerns" phrasing
+// itself contains the word CONCERNS). Routed through sendWithVerdict so a
+// malformed response retries once then throws, like every other gate.
+export type SecurityReviewVerdict = 'PASSED' | 'CONCERNS';
+
+export function parseSecurityReviewVerdict(text: string): VerdictResult<SecurityReviewVerdict> {
+  const stripped = text.replace(/<thinking>[\s\S]*?<\/thinking>/gi, '');
+  const trimmed = stripped.trimStart().replace(/^\*+\s*/, '');
+  const upper = trimmed.toUpperCase();
+  if (upper.startsWith('PASSED')) return { verdict: 'PASSED', details: trimmed };
+  if (upper.startsWith('CONCERNS')) return { verdict: 'CONCERNS', details: trimmed };
   return { verdict: 'AMBIGUOUS', raw: trimmed };
 }
 
@@ -345,7 +425,10 @@ interface PipelineTeamContext {
   /** Whether a pipeline is currently running */
   pipelineRunning: boolean;
   /** Pending blocking feedback requests awaiting user response */
-  pendingFeedback: Map<string, { resolve: (value: string) => void; feedback: FeedbackPayload }>;
+  pendingFeedback: Map<
+    string,
+    { resolve: (result: { value: string; text?: string }) => void; feedback: FeedbackPayload }
+  >;
   /** Active final security review session (if running) */
   securityReviewSession?: AgentSession;
   /** Whether Security-1 classified the task as COMPLEX */
@@ -421,8 +504,21 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       const role = INSTANCE_TO_ROLE[instance];
       this.models[instance] = config.models?.[role] ?? fmDefaults.models[instance];
       this.efforts[instance] = config.efforts?.[role] ?? fmDefaults.efforts[instance];
-      this.disallowedTools[instance] =
-        config.disallowedTools?.[role] ?? fmDefaults.disallowedTools[instance];
+      const baseDisallowed = config.disallowedTools?.[role] ?? fmDefaults.disallowedTools[instance];
+      // Read-only enforcement is driven purely by role IDENTITY, not by
+      // inferring intent from a tool list. Worker-1 (the only write-capable
+      // instance) keeps exactly its configured/frontmatter denials — so a config
+      // that denies only Bash to the shared Worker role never strips its
+      // Write/Edit and leaves it unable to implement anything.
+      const roleDisallowed = READ_ONLY_INSTANCES.includes(instance)
+        ? [...baseDisallowed, ...READ_ONLY_DISALLOWED_TOOLS]
+        : baseDisallowed;
+      // Network/exfiltration tools are denied to every instance, including the
+      // write-capable Worker-1 (which reads the whole project and could otherwise
+      // POST secrets out via WebFetch — a channel the guardrail hook can't scope).
+      this.disallowedTools[instance] = Array.from(
+        new Set([...roleDisallowed, ...NETWORK_EXFIL_TOOLS]),
+      );
       this.maxTurnsPerInstance[instance] = config.maxTurns?.[role] ?? fmDefaults.maxTurns[instance];
     }
   }
@@ -438,7 +534,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       throw new Error('Orchestrator is shutting down');
     }
 
-    const teamId = name;
+    const teamId = validateTeamName(name);
     if (this.teams.has(teamId)) {
       throw new Error(`Team "${teamId}" already exists`);
     }
@@ -829,17 +925,20 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     const complexity = classifyComplexity(taskDescription);
     ctx.state.setTaskComplexity(complexity);
 
-    const agentCount = complexity === 'simple' ? 1 : 4;
+    // Every task now runs the scan-first pipeline: Security-1 always scans and
+    // is the sole authority that may downgrade a genuinely trivial task to a
+    // Worker-1-only run. So all four agents are activated up front (Security-1
+    // marks the unused ones Done if it downgrades). The heuristic router no
+    // longer decides whether the security scan runs.
+    const agentCount = 4;
     this.emit('task-classified', teamId, complexity, agentCount);
     this.emit('task-assigned', teamId, taskDescription);
 
     // Register agents in state
     ctx.state.transitionAgent('Worker-1' as any, AgentState.Active);
-    if (complexity === 'standard') {
-      ctx.state.transitionAgent('Worker-2' as any, AgentState.Active);
-      ctx.state.transitionAgent('Security-1' as any, AgentState.Active);
-      ctx.state.transitionAgent('Reviewer-1' as any, AgentState.Active);
-    }
+    ctx.state.transitionAgent('Worker-2' as any, AgentState.Active);
+    ctx.state.transitionAgent('Security-1' as any, AgentState.Active);
+    ctx.state.transitionAgent('Reviewer-1' as any, AgentState.Active);
 
     this.persistence.persistNow(ctx.state);
 
@@ -855,8 +954,12 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     complexity: 'simple' | 'standard' | 'complex',
     images?: Array<{ media_type: string; data: string }>,
   ): Promise<void> {
+    // 'simple' no longer bypasses the security scan. Keep the fast path (no
+    // requirements extraction), but run the scan-first standard pipeline;
+    // Security-1 downgrades to a Worker-1-only run when the task is genuinely
+    // trivial (see runStandardPipeline's SIMPLE reclassification path).
     if (complexity === 'simple') {
-      this.runSimplePipeline(teamId, ctx, task, images);
+      this.runStandardPipeline(teamId, ctx, task, images);
       return;
     }
 
@@ -898,20 +1001,35 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
           return;
         }
 
-        // Show requirements for user approval
+        // Show requirements for user approval. The requirements body is passed as
+        // editableContent so the user can revise it in the dashboard before
+        // approving; the edited text (if any) comes back as response.text.
         const response = await this.askUser(
           teamId,
           'Requirements Checklist',
-          `Review the extracted requirements before agents start:\n\n${requirements}`,
+          'Review the extracted requirements before agents start. You can edit them before approving.',
           [
             { label: 'Approve', value: 'approve' },
             { label: 'Skip', value: 'skip' },
           ],
+          requirements,
         );
 
-        if (response === 'approve') {
-          ctx.state.setTaskRequirements(requirements);
-          this.persistence.persistNow(ctx.state);
+        // The team may have been terminated while this blocking prompt was open
+        // (settlePendingFeedback resolves it with 'cancelled'); if so, stop —
+        // do not spin the pipeline back up on a torn-down team.
+        if (!this.teams.has(teamId)) return;
+
+        if (response.value === 'approve') {
+          // Fall back to the extracted requirements when the edited text is
+          // empty/whitespace — `??` alone would keep an empty string and
+          // silently drop the requirements (a non-UI client can post text: '').
+          const editedText = response.text?.trim();
+          const finalRequirements = editedText || requirements.trim();
+          if (finalRequirements) {
+            ctx.state.setTaskRequirements(finalRequirements);
+            this.persistence.persistNow(ctx.state);
+          }
         }
         // If 'skip', proceed without requirements
       }
@@ -961,6 +1079,9 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
     // Close all active sessions
     this.closeSessions(ctx);
+    // Release any blocking prompt the pipeline is suspended on so its promise
+    // settles instead of hanging with the team gone.
+    this.settlePendingFeedback(ctx);
 
     // Also close the long-running coordinator chat session if alive.
     if (ctx.coordinatorSession && !ctx.coordinatorSession.closed) {
@@ -1021,6 +1142,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
     for (const [, ctx] of this.teams) {
       this.closeSessions(ctx);
+      this.settlePendingFeedback(ctx);
       if (ctx.coordinatorSession && !ctx.coordinatorSession.closed) {
         try {
           ctx.coordinatorSession.close();
@@ -1322,6 +1444,12 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
         cwd,
         effort: 'high',
         maxTurns: 15,
+        // The security reviewer must not modify the repo ("Do NOT implement
+        // fixes"), so it is fully read-only (no Bash) — it works from the diff in
+        // its prompt plus Grep for file content. The frontmatter restriction is
+        // not applied to ad-hoc sessions, so pass the denylist explicitly.
+        disallowedTools: SECURITY_REVIEW_DISALLOWED_TOOLS,
+        guardrails: this.guardrails,
         onProgress: (text: string) => {
           this.emit('agent-progress', teamId, 'Security-1' as any, text);
         },
@@ -1334,20 +1462,28 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       if (diffText.length > MAX_DIFF_CHARS) {
         diffText =
           diffText.substring(0, MAX_DIFF_CHARS) +
-          '\n\n[DIFF TRUNCATED — use `git diff main...HEAD` via Bash to see the full diff]';
+          '\n\n[DIFF TRUNCATED — review the changes shown above; use Grep to read the ' +
+          'full content of any changed file you need more context on]';
       }
 
-      const response = await session.send(
-        'Review the following git diff for security concerns. Analyze every change.\n\n' + diffText,
+      // Fail-loud verdict: strict PASSED/CONCERNS prefix, retry once then throw
+      // (caught below) — never infer 'passed' from a substring or an empty reply.
+      const verdict = await sendWithVerdict(
+        session,
+        'Review the following git diff for security concerns. Analyze every change. ' +
+          'Begin your response with **PASSED** (no issues) or **CONCERNS** (issues found).\n\n' +
+          diffText,
+        parseSecurityReviewVerdict,
+        ['PASSED', 'CONCERNS'] as const,
+        {
+          onResponse: (raw) => this.emit('agent-output', teamId, 'Security-1' as any, raw),
+          onMalformed: (raw) => this.emit('malformed-output', teamId, 'Security-1' as any, raw),
+        },
+        'Security-1',
       );
 
-      // Parse verdict from response
-      const upper = response.toUpperCase();
-      const hasConcerns = upper.includes('CONCERNS') && !upper.startsWith('**PASSED');
-      const status = hasConcerns ? 'concerns' : 'passed';
-
-      this.emit('agent-output', teamId, 'Security-1' as any, response);
-      this.emit('security-review', teamId, { status, result: response });
+      const status = verdict.verdict === 'CONCERNS' ? 'concerns' : 'passed';
+      this.emit('security-review', teamId, { status, result: verdict.details });
 
       session.close();
       ctx.securityReviewSession = undefined;
@@ -1414,6 +1550,23 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     ctx.pipelineRunning = false;
   }
 
+  /**
+   * Resolve every pending blocking-feedback promise (e.g. an awaited
+   * requirements checklist) with 'cancelled' and clear the map, so a pipeline
+   * suspended in askUser doesn't hang forever — and leak its closure — when the
+   * team is terminated or the engine shuts down.
+   */
+  private settlePendingFeedback(ctx: PipelineTeamContext): void {
+    for (const [, pending] of ctx.pendingFeedback) {
+      try {
+        pending.resolve({ value: 'cancelled' });
+      } catch {
+        /* best effort */
+      }
+    }
+    ctx.pendingFeedback.clear();
+  }
+
   private createSession(
     name: RoleInstance,
     cwd: string,
@@ -1432,53 +1585,6 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       guardrails: this.guardrails,
       onProgress,
     });
-  }
-
-  // --- Private: Simple Pipeline ---
-
-  private async runSimplePipeline(
-    teamId: string,
-    ctx: PipelineTeamContext,
-    task: string,
-    images?: Array<{ media_type: string; data: string }>,
-  ): Promise<void> {
-    const startTime = Date.now();
-
-    try {
-      // Phase: Work
-      const fromPhase = ctx.state.currentPhase;
-      this.tryTransitionPhase(
-        ctx.state,
-        teamId,
-        fromPhase,
-        TeamPhase.Work,
-        'simple pipeline start',
-      );
-
-      // Create Worker-1 session
-      const worker = this.createSession('Worker-1', ctx.state.snapshot.projectPath, (text) =>
-        this.emit('agent-progress', teamId, 'Worker-1' as any, text),
-      );
-      ctx.sessions.push(worker);
-
-      ctx.state.setAgentJob('Worker-1' as any, 'Implementing task (simple)');
-      this.emit('agent-task', teamId, 'Worker-1' as any, 'Implementing task (simple)');
-      this.emit('agent-output', teamId, 'Worker-1' as any, `[Pipeline] Starting simple task...`);
-
-      // Send task to worker (with approved requirements if present)
-      const requirements = ctx.state.snapshot.currentTask?.requirements;
-      const fullPrompt = requirements ? `${task}\n\nAPPROVED REQUIREMENTS:\n${requirements}` : task;
-      const result = await worker.send(fullPrompt, images);
-      const simpleDisplay = result.trim() || worker.lastActivityLog || '(no text output)';
-      this.emit('agent-output', teamId, 'Worker-1' as any, simpleDisplay);
-      this.runGuardrailAudit(teamId, ctx, 'simple-work');
-
-      // Done — keep session alive for Q&A
-      this.markAgentDone(ctx, 'Worker-1' as any);
-      this.completePipeline(teamId, ctx, startTime);
-    } catch (err: any) {
-      this.failPipeline(teamId, ctx, err, startTime);
-    }
   }
 
   // --- Private: Standard Pipeline ---
@@ -1539,54 +1645,160 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
           // Check if Security-1 classified this task as simpler than the heuristic thought
           const classification = parseClassification(scanResult);
           if (classification === 'SIMPLE') {
-            // Downgrade to simple pipeline — close unused sessions
-            worker2.close();
-            reviewer.close();
-            security.close();
-            ctx.sessions = [worker1];
+            // A SIMPLE downgrade skips Worker-2 verification and Reviewer-1 review,
+            // so it must never apply to a task the router flagged as destructive or
+            // one whose own scan raised concerns — otherwise a trivial-looking task
+            // could bypass the gates entirely. Refuse the downgrade in those cases
+            // and fall through to the full pipeline.
+            const scanVerdict = parseSecurityVerdict(scanResult).verdict;
+            const scanConcerns =
+              /\bOFF-LIMITS\b/i.test(scanResult) ||
+              scanVerdict === 'BLOCKED' ||
+              scanVerdict === 'FLAGGED';
+            const destructive = hasDestructiveIntent(task);
 
-            // Update state to reflect reclassification
-            ctx.state.setTaskComplexity('simple');
-            ctx.state.transitionAgent('Worker-2' as any, AgentState.Done);
-            ctx.state.transitionAgent('Security-1' as any, AgentState.Done);
-            ctx.state.transitionAgent('Reviewer-1' as any, AgentState.Done);
-            this.emit('task-classified', teamId, 'simple', 1);
-            this.persistence.persist(ctx.state);
+            if (destructive || scanConcerns) {
+              this.emit(
+                'agent-output',
+                teamId,
+                'Security-1' as any,
+                `[Pipeline] SIMPLE downgrade refused (${
+                  destructive ? 'router flagged destructive intent' : 'scan raised concerns'
+                }) — running the full pipeline.`,
+              );
+              // Fall through to the standard worker/sweep/review loop below.
+            } else {
+              // Trivial task: skip Worker-2 verification and Reviewer-1 review, but
+              // KEEP Security-1 for a mandatory post-work sweep. The security gate
+              // is never skipped, even on the simple path.
+              worker2.close();
+              reviewer.close();
+              ctx.sessions = [worker1, security];
 
-            this.emit(
-              'agent-output',
-              teamId,
-              'Security-1' as any,
-              `[Pipeline] Security classified task as SIMPLE — running Worker-1 only.`,
-            );
+              ctx.state.setTaskComplexity('simple');
+              ctx.state.transitionAgent('Worker-2' as any, AgentState.Done);
+              ctx.state.transitionAgent('Reviewer-1' as any, AgentState.Done);
+              this.emit('task-classified', teamId, 'simple', 2);
+              this.persistence.persist(ctx.state);
 
-            // Run Worker-1 with scan clearance included
-            const fromPhase2 = ctx.state.currentPhase;
-            this.tryTransitionPhase(
-              ctx.state,
-              teamId,
-              fromPhase2,
-              TeamPhase.Work,
-              'simple pipeline (reclassified)',
-            );
-            this.persistence.persist(ctx.state);
+              this.emit(
+                'agent-output',
+                teamId,
+                'Security-1' as any,
+                `[Pipeline] Security classified task as SIMPLE — Worker-1 + security sweep only.`,
+              );
 
-            this.emit('agent-task', teamId, 'Worker-1' as any, 'Implementing task (simple)');
-            const simpleResult = await worker1.send(
-              `TASK: ${task}\n\n` +
-                requirementsBlock +
-                `SECURITY CLEARANCE:\n${scanResult}\n\n` +
-                `Implement the assigned work within the cleared scope.`,
-              images,
-            );
-            const simpleDisplay =
-              simpleResult.trim() || worker1.lastActivityLog || '(no text output)';
-            this.emit('agent-output', teamId, 'Worker-1' as any, simpleDisplay);
-            this.runGuardrailAudit(teamId, ctx, 'simple-work-reclassified');
+              // --- Work: Worker-1 implements (stay in Work phase so the sweep can
+              // run without a Handoff→Done transition, which the machine forbids) ---
+              const fromPhase2 = ctx.state.currentPhase;
+              this.tryTransitionPhase(
+                ctx.state,
+                teamId,
+                fromPhase2,
+                TeamPhase.Work,
+                'simple pipeline (reclassified)',
+              );
+              this.persistence.persist(ctx.state);
 
-            this.markAgentDone(ctx, 'Worker-1' as any);
-            this.completePipeline(teamId, ctx, startTime);
-            return;
+              ctx.state.setAgentJob('Worker-1' as any, 'Implementing task (simple)');
+              this.emit('agent-task', teamId, 'Worker-1' as any, 'Implementing task (simple)');
+              let simpleResult = await worker1.send(
+                `TASK: ${task}\n\n` +
+                  requirementsBlock +
+                  `SECURITY CLEARANCE:\n${scanResult}\n\n` +
+                  `Implement the assigned work within the cleared scope.`,
+                images,
+              );
+              this.emit(
+                'agent-output',
+                teamId,
+                'Worker-1' as any,
+                simpleResult.trim() || worker1.lastActivityLog || '(no text output)',
+              );
+              this.runGuardrailAudit(teamId, ctx, 'simple-work-reclassified');
+              GitOps.commit(cwd, 'WIP: work phase complete (simple)');
+
+              // --- Mandatory post-work security sweep ---
+              this.emit(
+                'agent-output',
+                teamId,
+                'Security-1' as any,
+                `[Pipeline] Security sweep starting...`,
+              );
+              const sweepVerdict = await sendWithVerdict(
+                security,
+                `POST-WORK SWEEP REQUEST\n\n` +
+                  `Task: ${task}\n` +
+                  requirementsBlock +
+                  `\nWorker-1 summary:\n${simpleResult.substring(0, 2000)}\n\n` +
+                  `Sweep all changes made by Worker-1. Check for introduced vulnerabilities, ` +
+                  `leaked secrets, and scope violations. Begin your response with APPROVED, FLAGGED, or BLOCKED.`,
+                parseSecurityVerdict,
+                ['APPROVED', 'FLAGGED', 'BLOCKED'] as const,
+                {
+                  onResponse: (raw) => this.emit('agent-output', teamId, 'Security-1' as any, raw),
+                  onMalformed: (raw) =>
+                    this.emit('malformed-output', teamId, 'Security-1' as any, raw),
+                },
+                'Security-1',
+              );
+
+              if (sweepVerdict.verdict === 'BLOCKED') {
+                this.notifyUser(
+                  teamId,
+                  'warning',
+                  'Security Blocked',
+                  'Security sweep found issues on the simple task — Worker-1 is fixing them.',
+                  'Security-1',
+                  ['blocked', 'issue', 'vulnerability', 'hardcoded', 'secret', 'injection'],
+                );
+                simpleResult = await worker1.send(
+                  `SECURITY BLOCKED — FIX REQUIRED\n\n${sweepVerdict.details.substring(0, 3000)}\n\n` +
+                    `Fix the security issues above. Do not add unrelated changes.`,
+                );
+                this.emit(
+                  'agent-output',
+                  teamId,
+                  'Worker-1' as any,
+                  simpleResult.trim() || worker1.lastActivityLog || '(no text output)',
+                );
+                this.runGuardrailAudit(teamId, ctx, 'simple-work-security-fix');
+
+                const reSweep = await sendWithVerdict(
+                  security,
+                  `POST-WORK SWEEP RE-CHECK\n\nTask: ${task}\n\n` +
+                    `Worker-1 remediation:\n${simpleResult.substring(0, 2000)}\n\n` +
+                    `Re-check the previously BLOCKED issues. Begin your response with APPROVED, FLAGGED, or BLOCKED.`,
+                  parseSecurityVerdict,
+                  ['APPROVED', 'FLAGGED', 'BLOCKED'] as const,
+                  {
+                    onResponse: (raw) =>
+                      this.emit('agent-output', teamId, 'Security-1' as any, raw),
+                    onMalformed: (raw) =>
+                      this.emit('malformed-output', teamId, 'Security-1' as any, raw),
+                  },
+                  'Security-1',
+                );
+                if (reSweep.verdict === 'BLOCKED') {
+                  this.notifyUser(
+                    teamId,
+                    'warning',
+                    'Security Still Blocked',
+                    'Security sweep still reports issues after one fix pass — review before merge.',
+                    'Security-1',
+                  );
+                }
+              }
+
+              this.runGuardrailAudit(teamId, ctx, 'security-sweep');
+              GitOps.commit(cwd, 'WIP: security sweep passed (simple)');
+
+              security.close();
+              this.markAgentDone(ctx, 'Security-1' as any);
+              this.markAgentDone(ctx, 'Worker-1' as any);
+              this.completePipeline(teamId, ctx, startTime);
+              return;
+            }
           }
 
           if (classification === 'COMPLEX') {
@@ -1995,9 +2207,10 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
     title: string,
     message: string,
     actions: Array<{ label: string; value: string }>,
-  ): Promise<string> {
+    editableContent?: string,
+  ): Promise<{ value: string; text?: string }> {
     const ctx = this.teams.get(teamId);
-    if (!ctx) return Promise.resolve('');
+    if (!ctx) return Promise.resolve({ value: '' });
 
     const id = randomUUID();
     const feedback: FeedbackPayload = {
@@ -2008,20 +2221,40 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       actions,
       blocking: true,
       timestamp: new Date().toISOString(),
+      editableContent,
     };
 
-    return new Promise<string>((resolve) => {
+    return new Promise((resolve) => {
       ctx.pendingFeedback.set(id, { resolve, feedback });
       this.emit('feedback', teamId, feedback);
     });
   }
 
-  /** Called when user responds from dashboard — resolves pending promise */
-  resolveFeedback(teamId: string, feedbackId: string, value: string): void {
+  /**
+   * All currently-pending blocking-feedback prompts across teams. Used by the
+   * dashboard SSE init snapshot so a page reload re-shows an open prompt (e.g.
+   * the requirements checklist) instead of orphaning the suspended pipeline.
+   */
+  getPendingFeedback(): Array<{ teamId: string; feedback: FeedbackPayload }> {
+    const out: Array<{ teamId: string; feedback: FeedbackPayload }> = [];
+    for (const [teamId, ctx] of this.teams) {
+      for (const [, pending] of ctx.pendingFeedback) {
+        out.push({ teamId, feedback: pending.feedback });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Called when the user responds from the dashboard — resolves the pending
+   * promise. `text` carries an edited body when the prompt was editable (e.g. a
+   * revised requirements checklist).
+   */
+  resolveFeedback(teamId: string, feedbackId: string, value: string, text?: string): void {
     const ctx = this.teams.get(teamId);
     const pending = ctx?.pendingFeedback?.get(feedbackId);
     if (pending) {
-      pending.resolve(value);
+      pending.resolve({ value, text });
       ctx!.pendingFeedback.delete(feedbackId);
       this.emit('feedback-response', teamId, feedbackId, value);
     }
@@ -2219,6 +2452,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       cwd,
       effort: 'medium',
       maxTurns: 1,
+      // Requirements extraction is read-only — it must not touch the repo.
+      disallowedTools: READ_ONLY_DISALLOWED_TOOLS,
       guardrails: this.guardrails,
     });
 

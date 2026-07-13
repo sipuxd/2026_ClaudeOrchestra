@@ -3,9 +3,13 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { PostToolUseHookInput, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { describe, expect, it } from 'vitest';
-import { blockTraversal, buildGovernanceHooks, makeTypeCheckHook } from '../src/hooks.js';
+import { buildGovernanceHooks, makeBlockTraversal, makeTypeCheckHook } from '../src/hooks.js';
 
 const signal = new AbortController().signal;
+// The production PreToolUse hook is always project-root-bound; relative in-project
+// paths resolve inside this fixture root, so these traversal/policy assertions
+// behave exactly as the (removed) unbound variant did.
+const blockTraversal = makeBlockTraversal(os.tmpdir());
 
 function preToolInput(filePath: string): PreToolUseHookInput {
   return {
@@ -44,9 +48,9 @@ function postToolInput(filePath: string): PostToolUseHookInput {
   } as PostToolUseHookInput;
 }
 
-// --- blockTraversal ---
+// --- makeBlockTraversal (PreToolUse policy) ---
 
-describe('blockTraversal', () => {
+describe('makeBlockTraversal', () => {
   it('denies paths containing ..', async () => {
     const result = await blockTraversal(preToolInput('../etc/passwd'), 'test-1', { signal });
     const output = result.hookSpecificOutput as any;
@@ -177,9 +181,11 @@ describe('buildGovernanceHooks', () => {
     expect(hooks.PostToolUse).toHaveLength(1);
   });
 
-  it('PreToolUse matcher covers Read|Edit|Write|Bash', () => {
+  it('PreToolUse matcher covers all path-accepting tools including Grep and Glob', () => {
     const hooks = buildGovernanceHooks('/tmp');
-    expect(hooks.PreToolUse![0].matcher).toBe('Read|Edit|Write|Bash');
+    // Grep/Glob take a `path` and must be contained too, or an agent could read
+    // off-project files the Read tool is blocked from.
+    expect(hooks.PreToolUse![0].matcher).toBe('Read|Edit|Write|Bash|NotebookEdit|Grep|Glob');
     expect(hooks.PreToolUse![0].hooks).toHaveLength(1);
   });
 

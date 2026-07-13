@@ -100,6 +100,11 @@ ${colors.bold}Commands:${colors.reset}
 
 ${colors.bold}Flags:${colors.reset}
   --port <n>                 Dashboard port (default: 3460)
+  --host <addr>              Dashboard bind host (default: 127.0.0.1; use 0.0.0.0
+                             to expose to your network — the dashboard is UNAUTHENTICATED)
+  --allowed-hosts <a,b>      Extra Host-header names to accept on loopback (e.g. a
+                             tunnel hostname), so a proxy/tunnel works without
+                             dropping the DNS-rebinding defense
   --registry <path>          Registry file path (default: ./registry.json)
   --max-teams <n>            Max concurrent teams (default: 5)
   --provider <name>          Agent provider: claude or codex
@@ -215,6 +220,16 @@ function migratePortfolioFromRegistry(registryPath: string, portfolioPath: strin
 // --- Main ---
 
 async function main(): Promise<void> {
+  // Keep the engine alive through unexpected faults. A single malformed dashboard
+  // request or a stray rejected promise must not take down the orchestrator and
+  // every running team — log and continue instead of letting Node exit.
+  process.on('uncaughtException', (err) => {
+    console.error('[engine] uncaughtException (continuing):', err);
+  });
+  process.on('unhandledRejection', (reason) => {
+    console.error('[engine] unhandledRejection (continuing):', reason);
+  });
+
   const parsed = parseArgs(process.argv);
 
   if (parsed.command === 'help' || parsed.command === '--help') {
@@ -275,8 +290,10 @@ async function main(): Promise<void> {
         logError('Usage: create-team <name> <project-path>');
         process.exit(1);
       }
-      orchestrator.createTeam(name, projectPath);
-      showStatus(orchestrator, name);
+      // createTeam sanitizes/trims the name into the canonical teamId; use THAT
+      // for the status lookup, not the raw arg (which may have whitespace).
+      const created = orchestrator.createTeam(name, projectPath);
+      showStatus(orchestrator, created.snapshot.teamId);
       break;
     }
 
@@ -347,6 +364,15 @@ async function main(): Promise<void> {
 
     case 'dashboard': {
       const port = parseInt(parsed.flags['--port'] ?? '3460', 10);
+      // Bind host: defaults to loopback inside DashboardServer. Opt in to network
+      // exposure with `--host 0.0.0.0` (the server logs a warning when it does).
+      const host = parsed.flags['--host'] || undefined;
+      // Trusted Host-header names for a tunnel/proxy while staying on loopback
+      // (also settable via CLAUDE_ORCHESTRA_ALLOWED_HOSTS). Comma-separated.
+      const allowedHosts = (parsed.flags['--allowed-hosts'] ?? '')
+        .split(',')
+        .map((h) => h.trim())
+        .filter(Boolean);
 
       // Recover existing teams
       recoverTeams(orchestrator);
@@ -355,6 +381,8 @@ async function main(): Promise<void> {
       const dashboard = new DashboardServer({
         orchestrator,
         port,
+        host,
+        allowedHosts,
       });
 
       await dashboard.start();

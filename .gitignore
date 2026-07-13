@@ -146,6 +146,7 @@ registry.json
 
 # Engine portfolio (project pointers, not committed — like registry.json)
 projects.json
+projects.json.bak-*
 
 # Project-local code-server data (user-data-dir + extensions-dir for embedded code-view)
 .code-server-data/

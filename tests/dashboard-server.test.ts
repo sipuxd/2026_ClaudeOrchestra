@@ -15,7 +15,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   }),
 }));
 
-import { DashboardServer } from '../src/dashboard/dashboard-server.js';
+import { DashboardServer, isLoopbackHost } from '../src/dashboard/dashboard-server.js';
 import { PipelineOrchestrator } from '../src/pipeline-orchestrator.js';
 
 const GUARDED_ENV_KEYS = [
@@ -60,6 +60,32 @@ function httpRequest(
 
 function getRandomPort(): number {
   return 30000 + Math.floor(Math.random() * 20000);
+}
+
+/** Like httpRequest but exposes response headers and lets tests set headers/raw body. */
+function rawRequest(
+  port: number,
+  method: string,
+  urlPath: string,
+  opts: { headers?: Record<string, string>; body?: string } = {},
+): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      { hostname: '127.0.0.1', port, path: urlPath, method, headers: opts.headers ?? {} },
+      (res) => {
+        let data = '';
+        res.on('data', (chunk: Buffer) => {
+          data += chunk.toString();
+        });
+        res.on('end', () =>
+          resolve({ status: res.statusCode ?? 500, headers: res.headers, body: data }),
+        );
+      },
+    );
+    req.on('error', reject);
+    if (opts.body !== undefined) req.write(opts.body);
+    req.end();
+  });
 }
 
 // --- Tests ---
@@ -120,6 +146,154 @@ describe('DashboardServer', () => {
       expect(res.status).toBe(200);
       expect(res.body).toContain('<!DOCTYPE html>');
       expect(res.body).toContain('ClaudeOrchestra');
+    });
+  });
+
+  // --- Security hardening ---
+
+  describe('security hardening', () => {
+    it('recognizes loopback vs network-exposed hosts', () => {
+      expect(isLoopbackHost('127.0.0.1')).toBe(true);
+      expect(isLoopbackHost('localhost')).toBe(true);
+      expect(isLoopbackHost('::1')).toBe(true);
+      expect(isLoopbackHost('0.0.0.0')).toBe(false);
+      expect(isLoopbackHost('192.168.1.5')).toBe(false);
+    });
+
+    it('does not advertise a wildcard CORS origin', async () => {
+      const res = await rawRequest(port, 'GET', '/');
+      expect(res.headers['access-control-allow-origin']).toBeUndefined();
+    });
+
+    it('rejects a cross-origin mutating request with 403', async () => {
+      const res = await rawRequest(port, 'POST', '/api/teams', {
+        headers: { 'Content-Type': 'application/json', Origin: 'http://evil.example' },
+        body: JSON.stringify({ name: 'x', projectPath: tmpDir }),
+      });
+      expect(res.status).toBe(403);
+    });
+
+    it('rejects a request with a foreign Host header (DNS-rebinding defense)', async () => {
+      // Simulate a DNS-rebinding request: connects to loopback but carries the
+      // attacker's Host (and Origin), which the Origin==Host check alone would
+      // allow. The Host allowlist refuses it.
+      const res = await rawRequest(port, 'POST', '/api/teams', {
+        headers: {
+          'Content-Type': 'application/json',
+          Host: 'evil.example:' + port,
+          Origin: 'http://evil.example:' + port,
+        },
+        body: JSON.stringify({ name: 'x', projectPath: tmpDir }),
+      });
+      expect(res.status).toBe(403);
+    });
+
+    it('rejects a non-JSON mutating request with 415', async () => {
+      const res = await rawRequest(port, 'POST', '/api/teams', {
+        headers: { 'Content-Type': 'text/plain' },
+        body: 'name=x',
+      });
+      expect(res.status).toBe(415);
+    });
+
+    it('allows a same-origin JSON POST (no foreign Origin)', async () => {
+      const projectPath = path.join(tmpDir, 'ok-project');
+      fs.mkdirSync(projectPath, { recursive: true });
+      const res = await rawRequest(port, 'POST', '/api/teams', {
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'allowed-team', projectPath }),
+      });
+      // Not blocked by CSRF/content-type guards — team is created.
+      expect(res.status).toBe(201);
+    });
+
+    it('rejects a path-traversal team name with 400', async () => {
+      const res = await rawRequest(port, 'POST', '/api/teams', {
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: '../evil', projectPath: tmpDir }),
+      });
+      expect(res.status).toBe(400);
+      expect(res.body).toContain('..');
+    });
+  });
+
+  // --- Crash resistance (T1) ---
+
+  describe('crash resistance', () => {
+    it('answers 400 (not a crash) for a malformed percent-encoded route param', async () => {
+      // decodeURIComponent('%') throws URIError; the handler must catch it.
+      const res = await rawRequest(port, 'GET', '/api/teams/%');
+      expect(res.status).toBe(400);
+      // Server is still alive: a normal request succeeds afterward.
+      const after = await rawRequest(port, 'GET', '/api/teams');
+      expect(after.status).toBe(200);
+    });
+
+    it('answers 400 (not a crash) for a malformed Host header', async () => {
+      // new URL('http://a b') throws; the handler must catch it before routing.
+      const res = await rawRequest(port, 'GET', '/', { headers: { Host: 'a b' } });
+      expect(res.status).toBe(400);
+      const after = await rawRequest(port, 'GET', '/api/teams');
+      expect(after.status).toBe(200);
+    });
+
+    it('rejects an oversized request body with 413', async () => {
+      const projectPath = path.join(tmpDir, 'big-body');
+      fs.mkdirSync(projectPath, { recursive: true });
+      const huge = 'x'.repeat(6 * 1024 * 1024); // 6MB > 5MB cap
+      const res = await rawRequest(port, 'POST', '/api/teams', {
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'big', projectPath, note: huge }),
+      });
+      expect(res.status).toBe(413);
+    });
+  });
+
+  // --- Team creation edge cases (T3) ---
+
+  describe('team creation', () => {
+    it('creates + assigns under the trimmed teamId for a whitespace-padded name', async () => {
+      const projectPath = path.join(tmpDir, 'ws-project');
+      fs.mkdirSync(projectPath, { recursive: true });
+      const res = await rawRequest(port, 'POST', '/api/teams', {
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: '  spaced-team  ', projectPath, task: 'do X' }),
+      });
+      // createTeam trims to "spaced-team"; assignTask must use that id, not the
+      // raw padded name (which would 400 with "team not found").
+      expect(res.status).toBe(201);
+      const after = await rawRequest(port, 'GET', '/api/teams/spaced-team');
+      expect(after.status).toBe(200);
+    });
+  });
+
+  describe('allowedHosts', () => {
+    it('accepts a configured non-loopback Host header while bound to loopback', async () => {
+      const orch2 = new PipelineOrchestrator({
+        registryPath: path.join(tmpDir, 'registry-ah.json'),
+        rolesDir,
+      });
+      const p2 = getRandomPort();
+      const dash2 = new DashboardServer({
+        orchestrator: orch2,
+        port: p2,
+        allowedHosts: ['tunnel.example.com'],
+      });
+      await dash2.start();
+      try {
+        // Allowlisted host passes; a random foreign host is still 403'd.
+        const ok = await rawRequest(p2, 'GET', '/api/teams', {
+          headers: { Host: 'tunnel.example.com' },
+        });
+        expect(ok.status).toBe(200);
+        const bad = await rawRequest(p2, 'GET', '/api/teams', {
+          headers: { Host: 'evil.example.com' },
+        });
+        expect(bad.status).toBe(403);
+      } finally {
+        await dash2.close();
+        await orch2.shutdown();
+      }
     });
   });
 

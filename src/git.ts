@@ -120,6 +120,16 @@ export class GitOps {
   }
 
   /**
+   * Whether `projectPath` is inside a git working tree. Distinguishes a genuine
+   * "no version control here" directory from a git repo whose team-branch setup
+   * failed — the two need opposite handling in the orchestrator (skip vs. fail).
+   */
+  static isGitRepo(projectPath: string): boolean {
+    const result = git(projectPath, ['rev-parse', '--is-inside-work-tree']);
+    return result.success && result.output.trim() === 'true';
+  }
+
+  /**
    * Create a new branch off main for a team.
    * Checks out main, pulls latest (best-effort), creates branch.
    * Returns the final branch name (may have suffix if collision).

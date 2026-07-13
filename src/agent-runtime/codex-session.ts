@@ -92,6 +92,11 @@ export class CodexAgentSession implements AgentSession {
         }
       }
 
+      // Only now that the turn streamed to completion without throwing do we
+      // consider the system prompt delivered. Placing this in `finally` would
+      // (wrongly) mark it sent on failure too, reintroducing the drop-on-retry
+      // bug.
+      this.systemPromptSent = true;
       return this.accumulated;
     } finally {
       this.abortController = null;
@@ -139,8 +144,10 @@ export class CodexAgentSession implements AgentSession {
   }
 
   private prepareInput(message: string, images?: AgentInputImage[]): CodexInput {
+    // NB: do NOT set systemPromptSent here. It flips only after a turn fully
+    // succeeds (see send()), so a failed first turn re-includes the system
+    // prompt on retry instead of permanently dropping it.
     const prompt = this.systemPromptSent ? message : `${this.systemPrompt}\n\n---\n\n${message}`;
-    this.systemPromptSent = true;
 
     if (!images || images.length === 0) return prompt;
 

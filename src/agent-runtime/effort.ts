@@ -26,3 +26,15 @@ export function toProviderEffort(
 ): ClaudeEffortLevel | CodexReasoningEffort {
   return provider === 'claude' ? toClaudeEffort(effort) : toCodexReasoningEffort(effort);
 }
+
+/** Every effort name accepted across providers (Claude `max` + Codex `minimal`/`xhigh`). */
+const EFFORT_LEVELS = new Set<string>(['minimal', 'low', 'medium', 'high', 'max', 'xhigh']);
+
+/**
+ * Type guard: true only for a recognized effort name. Used to reject bogus
+ * user-authored frontmatter effort values (e.g. `effort: turbo`) before they
+ * reach the SDK, which has no default case and would forward them verbatim.
+ */
+export function isEffortLevel(value: string | undefined): value is EffortLevel {
+  return value !== undefined && EFFORT_LEVELS.has(value);
+}

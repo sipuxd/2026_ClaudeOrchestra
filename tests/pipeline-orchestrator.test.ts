@@ -345,6 +345,24 @@ describe('PipelineOrchestrator', () => {
       orchestrator.createTeam('team-x', projectDir);
       expect(handler).toHaveBeenCalledWith('team-x');
     });
+
+    it('throws (fail loud) when the project is a git repo but the team branch cannot be created', () => {
+      // Fresh git repo, NO commits / NO main branch → createTeamBranch's
+      // `git checkout main` fails. The engine must refuse rather than leave HEAD
+      // on the default branch where phase-boundary auto-commits would land.
+      const gitDir = path.join(tmpDir, 'branchless-git');
+      fs.mkdirSync(gitDir, { recursive: true });
+      execSync('git init', { cwd: gitDir, stdio: 'pipe' });
+      expect(() => orchestrator.createTeam('branchless', gitDir)).toThrow(/team branch/i);
+    });
+
+    it('creates a team without a branch (no throw) when the project is not a git repo', () => {
+      const plainDir = path.join(tmpDir, 'no-vcs');
+      fs.mkdirSync(plainDir, { recursive: true });
+      const state = orchestrator.createTeam('no-vcs', plainDir);
+      expect(state.currentPhase).toBe(TeamPhase.PreWork);
+      expect(state.snapshot.branchName).toBe('');
+    });
   });
 
   // --- Recovery ---
@@ -1033,6 +1051,28 @@ describe('PipelineOrchestrator', () => {
       expect(mock.getSession(2).options.effort).toBe('medium'); // Worker-2 (verifier)
       expect(mock.getSession(3).options.effort).toBe('low'); // Reviewer
     });
+
+    it('falls back to safe defaults for invalid frontmatter effort/maxTurns', () => {
+      // Overwrite a role file with a bogus effort name and a negative maxTurns.
+      fs.writeFileSync(
+        path.join(rolesDir, 'worker-1.agent.md'),
+        '---\nname: worker-1\nmodel: claude-opus-4-6\neffort: turbo\nmaxTurns: -5\n---\n\n# Worker-1\nYou execute coding tasks.',
+      );
+      const orch = new PipelineOrchestrator({
+        registryPath: path.join(tmpDir, 'registry-badfm.json'),
+        portfolioPath: path.join(tmpDir, 'projects-badfm.json'),
+        rolesDir,
+        skipRequirements: true,
+      });
+      const efforts = (orch as any).efforts as Record<string, string>;
+      const maxTurns = (orch as any).maxTurnsPerInstance as Record<string, number>;
+      // Unknown effort name 'turbo' rejected → FALLBACK_EFFORT.
+      expect(efforts['Worker-1']).toBe('medium');
+      // Negative maxTurns rejected → FALLBACK_MAX_TURNS.
+      expect(maxTurns['Worker-1']).toBe(20);
+      // A valid sibling role is untouched (guard only rewrites bad values).
+      expect(efforts['Worker-2']).toBe('medium');
+    });
   });
 
   // --- Error handling ---
@@ -1170,6 +1210,42 @@ describe('PipelineOrchestrator', () => {
       // The cancelled turn must NOT have produced a coordinator or system
       // reply — chat is left in a clean "user sent, no response" state.
       expect(messages.filter((m) => m.role !== 'user')).toHaveLength(0);
+    });
+  });
+
+  describe('sendChatMessage warm-session prompting', () => {
+    it('replays the full bootstrap on turn 1 but sends only the new message on turn 2+', async () => {
+      orchestrator.createTeam('chat-warm', projectDir);
+
+      const waitFor = async (pred: () => boolean, label: string) => {
+        const start = Date.now();
+        while (!pred()) {
+          if (Date.now() - start > 2000) throw new Error(`timeout: ${label}`);
+          await new Promise((r) => setTimeout(r, 5));
+        }
+      };
+
+      // Turn 1: lazy-spawns Coordinator-1 (mock session 0) + sends full bootstrap.
+      const t1 = orchestrator.sendChatMessage('chat-warm', 'first message');
+      await waitFor(
+        () => mock.sessions.length > 0 && mock.getSession(0).receivedMessages.length >= 1,
+        'turn-1 prompt',
+      );
+      mock.getSession(0).respond('RESPONDING — hi there');
+      await t1;
+
+      // Turn 2: reuses the SAME warm session; must carry ONLY the new message.
+      const t2 = orchestrator.sendChatMessage('chat-warm', 'second message');
+      await waitFor(() => mock.getSession(0).receivedMessages.length >= 2, 'turn-2 prompt');
+      mock.getSession(0).respond('RESPONDING — sure');
+      await t2;
+
+      const coordinator = mock.getSession(0);
+      expect(mock.sessions).toHaveLength(1); // warm reuse, no respawn
+      expect(coordinator.receivedMessages[0]).toContain('CONVERSATION HISTORY:');
+      expect(coordinator.receivedMessages[0]).toContain('first message');
+      expect(coordinator.receivedMessages[1]).toBe('second message');
+      expect(coordinator.receivedMessages[1]).not.toContain('CONVERSATION HISTORY:');
     });
   });
 

@@ -493,6 +493,95 @@ describe('DashboardServer', () => {
         });
       });
     });
+
+    it('init event teams include chatHistory for panel hydration', async () => {
+      const projectPath = path.join(tmpDir, 'hydrate-project');
+      fs.mkdirSync(projectPath, { recursive: true });
+      orchestrator.createTeam('chat-hydrate', projectPath);
+      // getTeamStatus returns the live snapshot (this.data by reference), so the
+      // push reaches the array the init snapshot serializes.
+      (orchestrator.getTeamStatus('chat-hydrate') as any).chatHistory.push({
+        role: 'user',
+        content: 'hello',
+        timestamp: new Date().toISOString(),
+      });
+
+      return new Promise<void>((resolve) => {
+        const req = http.get(`http://localhost:${port}/events`, (res) => {
+          let data = '';
+          res.on('data', (chunk: Buffer) => {
+            data += chunk.toString();
+            if (data.includes('event: init')) {
+              const match = data.match(/data: (.+)\n/);
+              if (match) {
+                const parsed = JSON.parse(match[1]);
+                expect(Array.isArray(parsed.teams[0].chatHistory)).toBe(true);
+                expect(parsed.teams[0].chatHistory).toContainEqual(
+                  expect.objectContaining({ role: 'user', content: 'hello' }),
+                );
+                req.destroy();
+                resolve();
+              }
+            }
+          });
+        });
+      });
+    });
+
+    it('broadcasts pipeline errors as a "pipeline-error" event (not native "error")', async () => {
+      return new Promise<void>((resolve) => {
+        const req = http.get(`http://localhost:${port}/events`, (res) => {
+          let data = '';
+          let gotInit = false;
+          res.on('data', (chunk: Buffer) => {
+            data += chunk.toString();
+            if (!gotInit && data.includes('event: init')) {
+              gotInit = true;
+              // Emitting the orchestrator 'error' must reach the client as an SSE
+              // 'pipeline-error' event — naming it 'error' would collide with
+              // EventSource's native connection-error event.
+              orchestrator.emit('error', 'some-team', new Error('boom'));
+            }
+            if (gotInit && data.includes('event: pipeline-error')) {
+              expect(data).not.toContain('event: error\n');
+              expect(data).toContain('boom');
+              req.destroy();
+              resolve();
+            }
+          });
+        });
+      });
+    });
+  });
+
+  // --- Preview file route ---
+
+  describe('GET /preview/:teamId/:file', () => {
+    it('blocks path traversal to a sibling directory with 403', async () => {
+      const siteDir = path.join(tmpDir, 'site');
+      fs.mkdirSync(siteDir, { recursive: true });
+      fs.writeFileSync(path.join(siteDir, 'index.html'), '<h1>site</h1>');
+      const evilDir = path.join(tmpDir, 'site-evil');
+      fs.mkdirSync(evilDir, { recursive: true });
+      fs.writeFileSync(path.join(evilDir, 'secret.txt'), 'TOPSECRET');
+      orchestrator.createTeam('previewteam', siteDir);
+
+      // `<root>-evil/secret.txt` would pass a bare startsWith(root) check.
+      const res = await rawRequest(port, 'GET', '/preview/previewteam/..%2fsite-evil%2fsecret.txt');
+      expect(res.status).toBe(403);
+      expect(res.body).not.toContain('TOPSECRET');
+    });
+
+    it('resolves a percent-encoded filename (spaces) with 200', async () => {
+      const siteDir = path.join(tmpDir, 'site2');
+      fs.mkdirSync(siteDir, { recursive: true });
+      fs.writeFileSync(path.join(siteDir, 'my page.html'), '<h1>hello preview</h1>');
+      orchestrator.createTeam('previewteam2', siteDir);
+
+      const res = await rawRequest(port, 'GET', '/preview/previewteam2/my%20page.html');
+      expect(res.status).toBe(200);
+      expect(res.body).toContain('hello preview');
+    });
   });
 
   // --- 404 ---

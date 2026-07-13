@@ -6,9 +6,9 @@
 // target project's .claude-orchestra/teams/{teamId}/ directory,
 // not in a single global data/ directory.
 
-import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { writeJsonFileAtomic } from '../atomic-write.js';
 import type { ChatMessage, TeamState, TeamStateData } from './team-state.js';
 
 export interface PersistenceOptions {
@@ -204,17 +204,13 @@ export class StatePersistence {
         `No directory registered for team "${state.teamId}". Call registerTeamDir() first.`,
       );
     }
-    fs.mkdirSync(dir, { recursive: true });
-
     const finalPath = path.join(dir, 'state.json');
-    const tmpPath = path.join(dir, `.tmp-state-${randomUUID()}.json`);
 
     // chatHistory lives in chat.jsonl (append-only) — exclude from state.json
     // so we don't rewrite the entire conversation on every dirty-state flush.
+    // writeJsonFileAtomic creates the parent dir, fsyncs, then renames.
     const { chatHistory: _omit, ...withoutChat } = state.snapshot;
-    const json = JSON.stringify(withoutChat, null, 2);
-    fs.writeFileSync(tmpPath, json, 'utf-8');
-    fs.renameSync(tmpPath, finalPath);
+    writeJsonFileAtomic(finalPath, withoutChat);
 
     state.markPersisted();
   }

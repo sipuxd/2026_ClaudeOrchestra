@@ -189,7 +189,11 @@ export class DashboardServer {
     });
 
     this.orchestrator.on('error', (teamId, error) => {
-      this.broadcast('error', { teamId, message: error.message });
+      // Named 'pipeline-error', NOT 'error': EventSource fires a native 'error'
+      // event on connection trouble, so a server-sent event also named 'error'
+      // collides with the client's connection-error handler (and arrives with
+      // no data). Keep the app-level channel distinct.
+      this.broadcast('pipeline-error', { teamId, message: error.message });
     });
 
     this.orchestrator.on('feedback', (teamId, feedback) => {
@@ -511,7 +515,16 @@ export class DashboardServer {
     }
     const previewMatch = pathname.match(/^\/preview\/([^/]+)\/(.+)$/);
     if (previewMatch && method === 'GET') {
-      this.handlePreview(decodeURIComponent(previewMatch[1]), previewMatch[2], res);
+      // Decode BOTH params — the filename is percent-encoded in the URL (the
+      // browse view emits encodeURIComponent(name) links), so a file named
+      // "my page.html" arrives as "my%20page.html" and must be decoded to
+      // resolve on disk. Malformed encoding throws URIError, which handleRequest
+      // already answers 400.
+      this.handlePreview(
+        decodeURIComponent(previewMatch[1]),
+        decodeURIComponent(previewMatch[2]),
+        res,
+      );
       return;
     }
 
@@ -1032,9 +1045,14 @@ ${fileListHtml}
       return;
     }
 
-    // Resolve and validate the file path stays within the project
-    const resolved = path.resolve(projectPath, filePath);
-    if (!resolved.startsWith(path.resolve(projectPath))) {
+    // Resolve and validate the file path stays within the project. Compare
+    // against `resolvedRoot + path.sep` (not a bare startsWith of the root),
+    // else a sibling like `<root>-evil/secret` passes the prefix test and
+    // escapes the project. Allow the root itself so a request resolving exactly
+    // to the root falls through to readFileSync (404) rather than a new 403.
+    const resolvedRoot = path.resolve(projectPath);
+    const resolved = path.resolve(resolvedRoot, filePath);
+    if (resolved !== resolvedRoot && !resolved.startsWith(resolvedRoot + path.sep)) {
       this.sendJSON(res, { error: 'Invalid path' }, 403);
       return;
     }

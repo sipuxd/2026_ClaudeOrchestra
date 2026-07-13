@@ -34,10 +34,13 @@ export function loadConfig(configPath: string): Partial<PipelineOrchestraConfig>
       if (parsed.agentRuntime.model) config.agentRuntime.model = parsed.agentRuntime.model;
     }
     if (
-      parsed.limits?.maxRevisions ||
-      parsed.limits?.maxRejections ||
-      parsed.limits?.maxTotalBackwardTransitions
+      parsed.limits?.maxRevisions !== undefined ||
+      parsed.limits?.maxRejections !== undefined ||
+      parsed.limits?.maxTotalBackwardTransitions !== undefined
     ) {
+      // Presence check (!== undefined), not truthiness: an explicit 0 is a
+      // valid limit ("never allow a revision") and must survive rather than
+      // being dropped to the default by a falsy `||`.
       config.limits = {
         maxRevisions: parsed.limits.maxRevisions ?? 3,
         maxRejections: parsed.limits.maxRejections ?? 2,

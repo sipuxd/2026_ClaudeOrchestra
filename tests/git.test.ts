@@ -62,6 +62,22 @@ describe('GitOps', () => {
     });
   });
 
+  describe('isGitRepo', () => {
+    it('returns true inside a git working tree', () => {
+      initGitRepo(tmpDir);
+      expect(GitOps.isGitRepo(tmpDir)).toBe(true);
+    });
+
+    it('returns false for a non-git directory', () => {
+      const nonGit = fs.mkdtempSync(path.join(os.tmpdir(), 'non-git-'));
+      try {
+        expect(GitOps.isGitRepo(nonGit)).toBe(false);
+      } finally {
+        fs.rmSync(nonGit, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('currentBranch', () => {
     it('returns the current branch name', () => {
       initGitRepo(tmpDir);

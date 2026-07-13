@@ -19,6 +19,7 @@ import * as path from 'node:path';
 import type { AgentRuntimeConfig, AgentSession, EffortLevel } from './agent-runtime/index.js';
 import {
   createAgentSession,
+  isEffortLevel,
   normalizeAgentRuntime,
   normalizeProviderModel,
   validateAgentRuntime,
@@ -113,6 +114,17 @@ export interface FeedbackPayload {
 const FALLBACK_MODEL = 'claude-opus-4-6';
 const FALLBACK_EFFORT: EffortLevel = 'medium';
 const FALLBACK_MAX_TURNS = 20;
+
+/**
+ * Frontmatter maxTurns is user-authored text. Accept only a positive integer;
+ * anything else (non-numeric, NaN, zero, negative, fractional) falls back to
+ * the safe default rather than reaching the SDK as an invalid turn budget.
+ */
+function parseFrontmatterMaxTurns(raw: string | undefined): number {
+  if (raw === undefined) return FALLBACK_MAX_TURNS;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : FALLBACK_MAX_TURNS;
+}
 
 // Tools that write to disk/state, and the network/exfiltration tools a read-only
 // role must also be denied. In the Claude Agent SDK `allowedTools` only
@@ -473,6 +485,13 @@ interface PipelineTeamContext {
    *  aborts it; the chat turn handler races send() against this signal and
    *  treats the abort as a clean cancellation (no system chat-message). */
   coordinatorAbortController?: AbortController;
+  /** Whether the current live coordinatorSession has already received the
+   *  first-turn TEAM/PROJECT/history bootstrap. The session is a single
+   *  long-lived streaming query() that retains conversation context across
+   *  send() calls, so only the first send replays history; later sends carry
+   *  just the new user message. Reset to false whenever the session is
+   *  (re)spawned. */
+  coordinatorBootstrapped?: boolean;
 }
 
 // --- PipelineOrchestrator ---
@@ -655,7 +674,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
 
   /**
    * Send a user message to a team's Coordinator-1. Appends to chat.jsonl,
-   * sends the full chat history to the coordinator, parses its verdict, and
+   * sends the coordinator the first-turn bootstrap (full history) or just the
+   * new message on later warm-session turns, parses its verdict, and
    * dispatches:
    *   - RESPONDING / ASKING → coordinator's reply goes back to chat
    *   - TRIGGER_PIPELINE → kicks off assignTask with the body as task
@@ -717,6 +737,8 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
           ctx.state.snapshot.projectPath,
           (text) => this.emit('agent-progress', teamId, 'Coordinator-1', text),
         );
+        // Fresh session holds no context yet — the next turn must bootstrap it.
+        ctx.coordinatorBootstrapped = false;
       } catch (err: any) {
         const errMsg: ChatMessage = {
           role: 'system',
@@ -730,9 +752,21 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       }
     }
 
-    // 3. Build the full-history prompt. Claude Agent SDK does not auto-persist
-    //    session state across send() calls, so we replay history every turn.
-    const prompt = this.buildCoordinatorPrompt(ctx);
+    // 3. Build the prompt. Coordinator-1 is a single long-lived streaming
+    //    session that retains conversation context across send() calls, so
+    //    replay the TEAM/PROJECT/history bootstrap ONLY on the first turn of a
+    //    session; on later turns send just the new user message. A cancelled
+    //    turn closes the session and the lazy-spawn block resets the flag, so a
+    //    respawned session gets a fresh bootstrap. Set the flag eagerly (before
+    //    send) so a malformed-twice failure — which leaves the session alive —
+    //    does not re-replay history the session already consumed.
+    let prompt: string;
+    if (!ctx.coordinatorBootstrapped) {
+      prompt = this.buildCoordinatorPrompt(ctx);
+      ctx.coordinatorBootstrapped = true;
+    } else {
+      prompt = userMessage;
+    }
 
     // 4. Send + parse verdict with the same fail-loud pattern as other gates.
     //    Race the send against an AbortController so cancelChat can interrupt
@@ -1567,12 +1601,29 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   private ensureTeamBranch(projectPath: string, teamName: string): string {
     const branchName = GitOps.slugifyBranchName(teamName);
     const result = GitOps.createTeamBranch(projectPath, branchName);
-    if (!result.success) {
-      // Fall back: try to just stay on whatever branch we're on
-      console.warn(`[orchestra] Failed to create team branch ${branchName}: ${result.output}`);
-      return branchName;
+    if (result.success) {
+      return result.branchName;
     }
-    return result.branchName;
+    // Branch creation failed — two very different situations:
+    if (!GitOps.isGitRepo(projectPath)) {
+      // Target dir is intentionally not under version control. The engine's
+      // phase-boundary auto-commit runs `git status`/`git commit`, which no-op
+      // here (hasChanges() is false when git fails), so nothing can land on a
+      // default branch. Run the team WITHOUT a branch and warn.
+      console.warn(
+        `[orchestra] ${projectPath} is not a git repository — team will run without git auto-commit.`,
+      );
+      return '';
+    }
+    // It IS a git repo but the team branch could not be created/switched to
+    // (e.g. no "main" branch, detached HEAD, dirty tree). Continuing would
+    // leave HEAD on the current branch — typically the default branch — where
+    // phase-boundary auto-commits would silently land. Fail loud instead.
+    throw new Error(
+      `Failed to create team branch "${branchName}" in ${projectPath}: ${result.output}. ` +
+        `Refusing to start the team — auto-commits would otherwise land on the default branch. ` +
+        `Ensure the repository has a "main" branch and a clean working tree, then try again.`,
+    );
   }
 
   // --- Private: Session Management ---
@@ -2540,10 +2591,13 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
         const { frontmatter } = parseFrontmatter(content);
 
         models[instance] = frontmatter.model ?? FALLBACK_MODEL;
-        efforts[instance] = (frontmatter.effort as EffortLevel) ?? FALLBACK_EFFORT;
-        maxTurns[instance] = frontmatter.maxTurns
-          ? parseInt(frontmatter.maxTurns, 10)
-          : FALLBACK_MAX_TURNS;
+        // Validate user-authored values: an unknown effort name or a
+        // non-positive-integer maxTurns falls back to the safe default rather
+        // than being cast/parsed blindly and handed to the SDK.
+        efforts[instance] = isEffortLevel(frontmatter.effort)
+          ? frontmatter.effort
+          : FALLBACK_EFFORT;
+        maxTurns[instance] = parseFrontmatterMaxTurns(frontmatter.maxTurns);
         disallowedTools[instance] = frontmatter.disallowedTools
           ? frontmatter.disallowedTools.split(',').map((t: string) => t.trim())
           : [];

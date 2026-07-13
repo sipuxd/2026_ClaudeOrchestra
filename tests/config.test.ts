@@ -118,6 +118,30 @@ describe('config loading', () => {
     expect(config.skipRequirements).toBe(true);
   });
 
+  it('honors explicit zero limits instead of falling back to defaults', () => {
+    const configPath = path.join(tmpDir, 'orchestra.config.json');
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        limits: {
+          maxRevisions: 0,
+          maxRejections: 0,
+          maxTotalBackwardTransitions: 0,
+        },
+      }),
+      'utf-8',
+    );
+
+    const config = loadConfig(configPath);
+    // A truthiness guard/merge would drop these zeros to 3/2/5; the ?? merge
+    // must preserve the explicit 0 ("never allow a revision").
+    expect(config.limits).toEqual({
+      maxRevisions: 0,
+      maxRejections: 0,
+      maxTotalBackwardTransitions: 0,
+    });
+  });
+
   it('uses CLI flags as value overrides after loading the selected config file', () => {
     const config = applyCliOverrides(
       {

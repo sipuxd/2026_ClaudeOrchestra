@@ -59,19 +59,6 @@ describe('config loading', () => {
           enabled: true,
           abortCodexOnForbiddenStreamEvent: false,
         },
-        contracts: {
-          mode: 'phased-fallback',
-          validationRetries: 1,
-        },
-        review: {
-          complexFileThreshold: 8,
-          complexDiffLineThreshold: 600,
-          maxFilesPerBatch: 5,
-        },
-        recovery: {
-          maxProviderRetries: 2,
-          initialBackoffMs: 1000,
-        },
         skipRequirements: true,
       }),
       'utf-8',
@@ -101,19 +88,6 @@ describe('config loading', () => {
     expect(config.guardrails).toEqual({
       enabled: true,
       abortCodexOnForbiddenStreamEvent: false,
-    });
-    expect(config.contracts).toEqual({
-      mode: 'phased-fallback',
-      validationRetries: 1,
-    });
-    expect(config.review).toEqual({
-      complexFileThreshold: 8,
-      complexDiffLineThreshold: 600,
-      maxFilesPerBatch: 5,
-    });
-    expect(config.recovery).toEqual({
-      maxProviderRetries: 2,
-      initialBackoffMs: 1000,
     });
     expect(config.skipRequirements).toBe(true);
   });
@@ -190,9 +164,6 @@ describe('config loading', () => {
       guardrails: {
         enabled: true,
       },
-      contracts: {
-        mode: 'phased-fallback',
-      },
     });
 
     expect(config.rolesDir).toBe(path.resolve('./custom-agents'));
@@ -201,7 +172,6 @@ describe('config loading', () => {
     expect(config.maxTurns?.[Role.Worker]).toBe(25);
     expect(config.skipRequirements).toBe(true);
     expect(config.guardrails?.enabled).toBe(true);
-    expect(config.contracts?.mode).toBe('phased-fallback');
   });
 
   it('selects the config file path before applying value overrides', () => {

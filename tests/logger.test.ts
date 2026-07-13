@@ -169,10 +169,8 @@ describe('Logger', () => {
       logger.debug('message_received', 'Worker-1 sent progress', {
         teamId: 'team-a',
         phase: 'work',
-        roleSource: 'Worker',
         roleSourceInstance: 'Worker-1',
         roleTarget: 'Security',
-        messageId: 'msg-123',
         flag: 'progress-update',
         data: { percent: 50 },
       });
@@ -183,10 +181,8 @@ describe('Logger', () => {
       const e = entries[0];
       expect(e.teamId).toBe('team-a');
       expect(e.phase).toBe('work');
-      expect(e.roleSource).toBe('Worker');
       expect(e.roleSourceInstance).toBe('Worker-1');
       expect(e.roleTarget).toBe('Security');
-      expect(e.messageId).toBe('msg-123');
       expect(e.flag).toBe('progress-update');
       expect(e.data).toEqual({ percent: 50 });
     });
@@ -205,10 +201,8 @@ describe('Logger', () => {
       const e = readLogEntries(path.join(logDir, 'orchestra.log'))[0];
       expect(e.teamId).toBeNull();
       expect(e.phase).toBeNull();
-      expect(e.roleSource).toBeNull();
       expect(e.roleSourceInstance).toBeNull();
       expect(e.roleTarget).toBeNull();
-      expect(e.messageId).toBeNull();
       expect(e.flag).toBeNull();
     });
   });

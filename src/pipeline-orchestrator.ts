@@ -92,7 +92,7 @@ export interface OrchestratorEvents {
 
 export interface FeedbackPayload {
   id: string;
-  type: 'info' | 'warning' | 'question' | 'decision';
+  type: 'info' | 'warning' | 'question' | 'decision' | 'error';
   title: string;
   message: string;
   actions?: Array<{ label: string; value: string }>;
@@ -430,22 +430,6 @@ export interface PipelineOrchestraConfig {
   skipRequirements?: boolean;
   /** Provider-neutral guardrail policy and Codex stream detection controls */
   guardrails?: Partial<GuardrailRuntimeConfig>;
-  /** Future structured-output rollout controls */
-  contracts?: {
-    mode?: 'phased-fallback' | 'strict' | 'observe';
-    validationRetries?: number;
-  };
-  /** Future complex-review routing controls */
-  review?: {
-    complexFileThreshold?: number;
-    complexDiffLineThreshold?: number;
-    maxFilesPerBatch?: number;
-  };
-  /** Future provider retry and recovery controls */
-  recovery?: {
-    maxProviderRetries?: number;
-    initialBackoffMs?: number;
-  };
 }
 
 const DEFAULT_PIPELINE_CONFIG = {
@@ -1314,17 +1298,6 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
   // --- Git Operations (user-initiated) ---
 
   /**
-   * @deprecated Use createPr() instead.
-   */
-  pushAndMerge(teamId: string): import('./git.js').GitResult {
-    const ctx = this.teams.get(teamId);
-    if (!ctx) {
-      return { success: false, output: `Team "${teamId}" not found` };
-    }
-    return GitOps.pushAndMerge(ctx.state.snapshot.projectPath);
-  }
-
-  /**
    * Push the team's branch and create a GitHub PR. User-initiated.
    * Transitions team from Done → PrOpen on success.
    */
@@ -1562,7 +1535,7 @@ export class PipelineOrchestrator extends EventEmitter<OrchestratorEvents> {
       this.emit('security-review', teamId, { status: 'idle' });
       this.emit('feedback', teamId, {
         id: randomUUID(),
-        type: 'error' as any,
+        type: 'error',
         title: 'Security review failed',
         message: err.message || 'Unknown error',
         blocking: false,

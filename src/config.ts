@@ -81,34 +81,6 @@ export function loadConfig(configPath: string): Partial<PipelineOrchestraConfig>
           parsed.guardrails.abortCodexOnForbiddenStreamEvent;
       }
     }
-    if (parsed.contracts) {
-      config.contracts = {};
-      if (parsed.contracts.mode) config.contracts.mode = parsed.contracts.mode;
-      if (typeof parsed.contracts.validationRetries === 'number') {
-        config.contracts.validationRetries = parsed.contracts.validationRetries;
-      }
-    }
-    if (parsed.review) {
-      config.review = {};
-      if (typeof parsed.review.complexFileThreshold === 'number') {
-        config.review.complexFileThreshold = parsed.review.complexFileThreshold;
-      }
-      if (typeof parsed.review.complexDiffLineThreshold === 'number') {
-        config.review.complexDiffLineThreshold = parsed.review.complexDiffLineThreshold;
-      }
-      if (typeof parsed.review.maxFilesPerBatch === 'number') {
-        config.review.maxFilesPerBatch = parsed.review.maxFilesPerBatch;
-      }
-    }
-    if (parsed.recovery) {
-      config.recovery = {};
-      if (typeof parsed.recovery.maxProviderRetries === 'number') {
-        config.recovery.maxProviderRetries = parsed.recovery.maxProviderRetries;
-      }
-      if (typeof parsed.recovery.initialBackoffMs === 'number') {
-        config.recovery.initialBackoffMs = parsed.recovery.initialBackoffMs;
-      }
-    }
     return config;
   } catch {
     return {};
@@ -161,8 +133,5 @@ export function buildPipelineConfig(
     limits: config.limits,
     skipRequirements: config.skipRequirements,
     guardrails: config.guardrails,
-    contracts: config.contracts,
-    review: config.review,
-    recovery: config.recovery,
   };
 }

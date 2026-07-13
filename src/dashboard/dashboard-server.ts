@@ -372,10 +372,6 @@ export class DashboardServer {
       this.handlePickDirectory(res);
       return;
     }
-    if (method === 'POST' && pathname === '/api/resolve-directory') {
-      this.handleResolveDirectory(req, res);
-      return;
-    }
     if (method === 'POST' && pathname === '/api/projects/clear-done') {
       this.handleClearDoneTeams(req, res);
       return;
@@ -456,12 +452,6 @@ export class DashboardServer {
     const createPrMatch = pathname.match(/^\/api\/teams\/([^/]+)\/create-pr$/);
     if (createPrMatch && method === 'POST') {
       this.handleCreatePr(decodeURIComponent(createPrMatch[1]), res);
-      return;
-    }
-
-    const pushMergeMatch = pathname.match(/^\/api\/teams\/([^/]+)\/push-merge$/);
-    if (pushMergeMatch && method === 'POST') {
-      this.handlePushMerge(decodeURIComponent(pushMergeMatch[1]), res);
       return;
     }
 
@@ -779,21 +769,6 @@ export class DashboardServer {
       }
 
       const result = this.orchestrator.createPr(teamId);
-      this.sendJSON(res, result, result.success ? 200 : 500);
-    } catch (err: any) {
-      this.sendJSON(res, { error: err.message }, 500);
-    }
-  }
-
-  private handlePushMerge(teamId: string, res: http.ServerResponse): void {
-    try {
-      const status = this.orchestrator.getTeamStatus(teamId);
-      if (!status) {
-        this.sendJSON(res, { error: `Team "${teamId}" not found` }, 404);
-        return;
-      }
-
-      const result = this.orchestrator.pushAndMerge(teamId);
       this.sendJSON(res, result, result.success ? 200 : 500);
     } catch (err: any) {
       this.sendJSON(res, { error: err.message }, 500);
@@ -1126,56 +1101,6 @@ ${fileListHtml}
 
       this.sendJSON(res, { cancelled: true, path: null, durationMs });
     });
-  }
-
-  // Resolves the absolute disk path of a directory chosen via the browser-
-  // native HTML5 directory picker (<input type="file" webkitdirectory>).
-  // The browser refuses, by design, to give JS the absolute filesystem path
-  // of any selected file/dir — we only learn the directory's NAME (from the
-  // first file's webkitRelativePath). Spotlight (mdfind) then locates the
-  // matching directory on disk in ~50-200ms. Result: same instant native
-  // picker as Phone-test's file-upload pattern, with no subprocess-spawn cost.
-  private async handleResolveDirectory(
-    req: http.IncomingMessage,
-    res: http.ServerResponse,
-  ): Promise<void> {
-    try {
-      const body = JSON.parse(await this.readBody(req));
-      const name = typeof body?.name === 'string' ? body.name.trim() : '';
-      if (!name) {
-        this.sendJSON(res, { error: 'name is required' }, 400);
-        return;
-      }
-      // Escape any double quotes in the name to keep the mdfind query well-formed
-      const safeName = name.replace(/"/g, '\\"');
-      const query = `kMDItemFSName == "${safeName}"`;
-      execFile('mdfind', [query], { timeout: 8000 }, (err, stdout) => {
-        if (err) {
-          this.sendJSON(res, {
-            paths: [],
-            error: 'Spotlight search failed; paste the path manually.',
-          });
-          return;
-        }
-        const candidates = stdout
-          .split('\n')
-          .map((p) => p.trim())
-          .filter(Boolean);
-        // Filter to existing directories only (mdfind returns files too)
-        const dirs = candidates.filter((p) => {
-          try {
-            return fs.statSync(p).isDirectory();
-          } catch {
-            return false;
-          }
-        });
-        // Cap to keep the response small even if the user has dozens of
-        // identically-named directories (rare in practice)
-        this.sendJSON(res, { paths: dirs.slice(0, 20) });
-      });
-    } catch (err: any) {
-      this.sendJSON(res, { error: err.message }, err.statusCode ?? 400);
-    }
   }
 
   // --- ProjectRunner (Run in Browser) ---

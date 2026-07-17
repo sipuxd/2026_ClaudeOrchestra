@@ -187,7 +187,6 @@ Automatic:
 User initiated:
 
 - Create GitHub PR with `gh pr create`.
-- Legacy push-and-merge endpoint remains for compatibility.
 
 Polling:
 
@@ -268,29 +267,18 @@ Claude example:
 }
 ```
 
-Guardrail and roadmap controls:
+Guardrail controls:
 
 ```json
 {
   "guardrails": {
     "enabled": true,
     "abortCodexOnForbiddenStreamEvent": true
-  },
-  "contracts": {
-    "mode": "phased-fallback",
-    "validationRetries": 1
-  },
-  "review": {
-    "complexFileThreshold": 8,
-    "complexDiffLineThreshold": 600,
-    "maxFilesPerBatch": 5
-  },
-  "recovery": {
-    "maxProviderRetries": 2,
-    "initialBackoffMs": 1000
   }
 }
 ```
+
+(`agentRuntime`, `limits`, `efforts`, and `guardrails` are the only sections the config loader reads — anything else in the file is ignored.)
 
 Guardrail enforcement is layered:
 

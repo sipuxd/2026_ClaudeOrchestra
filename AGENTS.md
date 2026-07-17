@@ -109,7 +109,7 @@ Tests use Vitest with mocked SDK behavior. The pipeline tests simulate agent ses
 - `src/pipeline-orchestrator.ts` - deterministic pipeline engine
 - `src/agent-runtime/` - provider abstraction, auth guards, SDK adapters, effort mapping
 - `src/dashboard/` - HTTP/SSE dashboard
-- `src/git.ts` - commit, push, and merge workflow
+- `src/git.ts` - commit, branch, and PR workflow
 - `src/registry.ts` - lightweight JSON registry of active teams
 - `src/router/complexity-router.ts` - heuristic task classifier
 - `agents/*.agent.md` - role prompts sent to spawned runtime agents

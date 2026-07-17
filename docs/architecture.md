@@ -269,7 +269,7 @@ User-initiated git actions:
 - Poll PR state every 60 seconds while a team is in `pr_open`.
 - Archive merged teams by closing sessions, deleting local branch, removing registry entry, and transitioning to `merged`.
 
-Legacy `pushAndMerge()` remains for compatibility but `createPr()` is the preferred workflow.
+The legacy direct-merge-to-main flow was removed in July 2026; `createPr()` is the only merge path.
 
 ---
 

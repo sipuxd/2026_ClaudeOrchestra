@@ -79,13 +79,13 @@ Each team also has a `Coordinator-1` chat session (lazy-spawned on first message
 | **Build** | Worker-1 implements task within cleared scope. Worker-2 verifies completeness against original requirements. If gaps found, Worker-1 fixes and Worker-2 re-checks (max 2 passes). |
 | **Sweep** | Security-1 re-scans for introduced vulnerabilities, leaked secrets, unauthorized file changes. BLOCKED sends workers back; APPROVED/FLAGGED proceeds. |
 | **Review** | Reviewer-1 evaluates quality and correctness. APPROVED completes the pipeline. REVISION_NEEDED loops back to Build. REJECTED restarts from Scan. |
-| **Done** | Task complete. Push & Merge to main available from dashboard. |
+| **Done** | Task complete. Create PR from the dashboard opens a GitHub PR via `gh`; the engine polls it and archives the team when it merges. |
 
 ### Smart Routing
 
 Tasks are automatically classified by complexity before the pipeline starts:
 
-- **Simple** (typo fix, single-file change) — Spawns only Worker-1. Skips security scan, completeness verification, sweep, and review. Straight to Work → Done.
+- **Simple** (typo fix, single-file change) — Security-1 still scans first; if it confirms the task is trivial and flags no concerns, the run downgrades to Worker-1 plus a post-work security sweep, skipping Worker-2 verification and review. Destructive or scan-flagged tasks refuse the downgrade and run the full pipeline.
 - **Standard** (feature implementation, multi-file work) — Full 4-agent pipeline: Security-1, Worker-1, Worker-2, Reviewer-1 with all gates and loop-backs.
 
 ### Runtime Data Separation
@@ -102,7 +102,7 @@ A live browser dashboard at `localhost:3460`. Built with Node.js built-in `http`
 - **Coordinator chat (per team)** — The composer talks to a persistent `Coordinator-1` session. The coordinator decides per turn whether to RESPOND, ASK a clarifying question, or emit `TRIGGER_PIPELINE` to kick off a fresh Security-1 → Worker-1/2 → Reviewer-1 run. Chat history persists in `.claude-orchestra/teams/<id>/chat.jsonl`.
 - **Code tab** — Top-tab toggle that embeds a project-local `code-server` (Microsoft VS Code in the browser). Locked-down config: chat disabled, telemetry off.
 - **Run / Open / Stop** — Per-project dev-server controls. Click **Run** to detect the framework (Vite, Next, Storybook, etc.) and spawn it; a placeholder browser tab opens synchronously on the click and redirects to the dev URL once ready.
-- **Push & Merge** — One-click git push to main when a team's task is `done`.
+- **Create PR** — One-click branch push + GitHub PR creation (via `gh`) when a team's task is `done`; the engine polls the PR and archives the team once it merges.
 - **Auth pill** — Top-right of the Portfolio header surfaces Claude account state (`● email · subscription tier`). Click to sign in / sign out through the dashboard; the engine delegates OAuth to the official `claude` CLI.
 - **⋮ overflow menu** — Side panel header + inline-detail card header both have a ⋮ menu housing destructive actions (Terminate, Delete) behind a confirm dialog.
 - **Feedback prompts** — Inline action blocks inside the Agents region when the pipeline needs input.
@@ -306,7 +306,7 @@ src/
 ├── index.ts                       # CLI entry point & command routing
 ├── config.ts                      # Config file loading and CLI override merging
 ├── pipeline-orchestrator.ts       # Core pipeline engine (standard + simple)
-├── git.ts                         # Git commit, push & merge operations
+├── git.ts                         # Git commit, branch & PR operations
 ├── registry.ts                    # Cross-project team registry
 ├── agent-runtime/
 │   ├── types.ts                   # Provider-agnostic AgentSession interface

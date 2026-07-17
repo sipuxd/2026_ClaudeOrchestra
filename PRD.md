@@ -189,7 +189,6 @@ Built-in Node.js `http` server. No Express, no frameworks. Auto-starts with the 
 | POST   | `/api/teams/:id/task` | Assign a task `{ description, images? }` (also called internally by Coordinator-1's `TRIGGER_PIPELINE`) |
 | POST   | `/api/teams/:id/stop` | Terminate a team |
 | POST   | `/api/teams/:id/create-pr` | Push team branch + open GitHub PR via `gh` |
-| POST   | `/api/teams/:id/push-merge` | Legacy push & merge (deprecated, kept for back-compat) |
 | POST   | `/api/teams/:id/feedback` | Respond to a blocking feedback request `{ feedbackId, value }` |
 | POST   | `/api/teams/:id/ask` | Steer message to active agent `{ message, targetInstance?, images? }` |
 | GET    | `/api/teams/:id/chat` | Full chat history for a team |
@@ -206,7 +205,6 @@ Built-in Node.js `http` server. No Express, no frameworks. Auto-starts with the 
 | GET    | `/api/code-server/status` | Embedded code-server status |
 | POST   | `/api/code-server/start` | Lazy-spawn code-server |
 | POST   | `/api/pick-directory` | Open native macOS NSOpenPanel folder picker (returns selected path) |
-| POST   | `/api/resolve-directory` | Spotlight-resolve a folder name to its full path |
 | GET    | `/preview/:id` | Legacy static-HTML auto-redirect to newest `.html` in project root |
 | GET    | `/preview/:id?browse` | Legacy static-HTML file browser |
 | GET    | `/preview/:id/:file` | Serve a specific HTML file (path-traversal protected) |
@@ -371,8 +369,7 @@ Three tiers:
 - `GitOps.createPullRequest(projectPath, branchName, title, body)` — pushes the team branch and runs `gh pr create --base main --head <branch> --title … --body …`. Returns `{ prNumber, prUrl }` on success. Wired to the **Create PR** button.
 - `GitOps.checkPrState(projectPath, prNumber)` — `gh pr view <n> --json state,merged`. Engine polls open PRs and emits `team-archived` when a PR merges.
 
-**3. Legacy:**
-- `GitOps.pushAndMerge(projectPath)` — `@deprecated`. Old `dev` → `main` rebase-merge flow. Kept for back-compat (the dashboard's legacy `/api/teams/:id/push-merge` route still calls it), but new work uses `createPullRequest` to open a real GitHub PR instead.
+The old direct-merge-to-main flow (and its dashboard route) was removed in July 2026 — the team-branch + GitHub-PR flow above is the only merge path.
 
 All git commands have a 30-second timeout. `gh` availability is detected lazily and cached; if `gh` is missing, the **Create PR** path surfaces an install hint instead of failing silently.
 
@@ -508,14 +505,14 @@ The optional per-role `models` block remains available for Claude tuning. For al
 
 ## Testing
 
-**311 tests across 14 test files** — all passing. Tests use Vitest with mocked SDK behaviour; the pipeline tests simulate agent sessions without real provider calls.
+**383 tests across 16 test files** — all passing. Tests use Vitest with mocked SDK behaviour; the pipeline tests simulate agent sessions without real provider calls.
 
 Notable suites:
 - `pipeline-orchestrator.test.ts` — full pipeline, simple-pipeline shortcut, security BLOCKED loops, revision loops, rejection loops, loop-limit enforcement, requirements extraction, chat cancellation.
 - `dashboard-server.test.ts` — HTTP routes, SSE streaming, team CRUD, task assignment, portfolio endpoints.
 - `portfolio.test.ts` — Portfolio CRUD, atomic writes, idempotent add, path normalization.
 - `project-runner.test.ts` — full framework-detection truth table + dev-server lifecycle (start → ready → stop) + error states (process exited, ready timeout) + stopAll.
-- `git.test.ts` — commit, push, merge, team-branch creation, PR creation via `gh`.
+- `git.test.ts` — change detection (`hasChanges`), repo detection (`isGitRepo`), current branch, commit checkpoints, checkout, merge, and error handling.
 - `team-state.test.ts` — phase transitions (valid/invalid), agent state transitions, loop counters, limits.
 - `config.test.ts`, `logger.test.ts`, `registry.test.ts`, `complexity-router.test.ts`, `agent-runtime.test.ts`, `hooks.test.ts`, and others.
 

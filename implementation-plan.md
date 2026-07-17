@@ -341,6 +341,7 @@ After all milestones are complete, the full cycle test is:
 7. Dashboard shows real-time progress, verdicts, and
    feedback notifications
 8. Human can push & merge completed work from dashboard
+   *(superseded July 2026: replaced by the Create PR → poll → archive flow)*
 
 ---
 

@@ -154,3 +154,6 @@ projects.json.bak-*
 # Auto-generated project context (per-session, not source code)
 .claude/project-context.md
 .claude/context-history/
+
+# Local study material — not project content
+Claude+Certified*.pdf

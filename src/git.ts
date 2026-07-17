@@ -9,8 +9,6 @@
 //
 //   3. Polling: checkPrState() — checks if a PR has been merged on GitHub.
 //      Called by the engine's PR polling loop.
-//
-//   Legacy: pushAndMerge() — @deprecated, kept for backward compatibility.
 
 import { execFileSync } from 'node:child_process';
 
@@ -259,70 +257,5 @@ export class GitOps {
    */
   static deleteLocalBranch(projectPath: string, branchName: string): GitResult {
     return git(projectPath, ['branch', '-d', branchName]);
-  }
-
-  // --- Legacy ---
-
-  /**
-   * @deprecated Use createPullRequest() instead. Kept for backward compatibility.
-   *
-   * Full push-and-merge workflow. User-initiated only.
-   *
-   * 1. git push origin dev
-   * 2. git checkout main && git pull origin main
-   * 3. git merge dev
-   * 4. git push origin main
-   * 5. git checkout dev
-   *
-   * Returns combined output from all steps. Stops on first failure.
-   */
-  static pushAndMerge(projectPath: string): GitResult {
-    const devBranch = GitOps.currentBranch(projectPath);
-    const outputs: string[] = [];
-
-    // Step 1: Push dev
-    const pushDev = git(projectPath, ['push', 'origin', devBranch]);
-    outputs.push(`[push ${devBranch}] ${pushDev.output}`);
-    if (!pushDev.success) {
-      return { success: false, output: outputs.join('\n') };
-    }
-
-    // Step 2: Checkout main, pull latest, and merge dev
-    const checkoutMain = git(projectPath, ['checkout', 'main']);
-    outputs.push(`[checkout main] ${checkoutMain.output}`);
-    if (!checkoutMain.success) {
-      return { success: false, output: outputs.join('\n') };
-    }
-
-    const pullMain = git(projectPath, ['pull', 'origin', 'main']);
-    outputs.push(`[pull main] ${pullMain.output}`);
-    if (!pullMain.success) {
-      git(projectPath, ['checkout', devBranch]);
-      return { success: false, output: outputs.join('\n') };
-    }
-
-    const mergeDev = git(projectPath, ['merge', devBranch]);
-    outputs.push(`[merge ${devBranch}] ${mergeDev.output}`);
-    if (!mergeDev.success) {
-      // Abort merge and return to dev on failure
-      git(projectPath, ['merge', '--abort']);
-      git(projectPath, ['checkout', devBranch]);
-      return { success: false, output: outputs.join('\n') };
-    }
-
-    // Step 3: Push main
-    const pushMain = git(projectPath, ['push', 'origin', 'main']);
-    outputs.push(`[push main] ${pushMain.output}`);
-    if (!pushMain.success) {
-      // Return to dev even if push fails
-      git(projectPath, ['checkout', devBranch]);
-      return { success: false, output: outputs.join('\n') };
-    }
-
-    // Step 4: Return to dev
-    const checkoutDev = git(projectPath, ['checkout', devBranch]);
-    outputs.push(`[checkout ${devBranch}] ${checkoutDev.output}`);
-
-    return { success: checkoutDev.success, output: outputs.join('\n') };
   }
 }

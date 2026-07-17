@@ -66,10 +66,8 @@ export interface LogEntry {
   level: string;
   teamId: string | null;
   phase: string | null;
-  roleSource: string | null;
   roleSourceInstance: string | null;
   roleTarget: string | null;
-  messageId: string | null;
   flag: string | null;
   event: LogEvent;
   message: string;
@@ -180,10 +178,8 @@ export class Logger {
     context?: {
       teamId?: string;
       phase?: string;
-      roleSource?: string;
       roleSourceInstance?: string;
       roleTarget?: string;
-      messageId?: string;
       flag?: string;
       data?: Record<string, unknown>;
     },
@@ -195,10 +191,8 @@ export class Logger {
       level: LOG_LEVEL_NAMES[level],
       teamId: context?.teamId ?? null,
       phase: context?.phase ?? null,
-      roleSource: context?.roleSource ?? null,
       roleSourceInstance: context?.roleSourceInstance ?? null,
       roleTarget: context?.roleTarget ?? null,
-      messageId: context?.messageId ?? null,
       flag: context?.flag ?? null,
       event,
       message,

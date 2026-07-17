@@ -1,6 +1,16 @@
 // SDK governance hooks for agent query() sessions.
 // Ports the logic from .claude/hooks/block-traversal.js and tsc.js
 // into callback hooks that fire at runtime on spawned agents.
+//
+// Boundary exception: AGENTS.md keeps SDK-specific *calls* inside
+// src/agent-runtime/*-session.ts. This file imports only TYPES from
+// @anthropic-ai/claude-agent-sdk — the hook-callback contract the SDK invokes
+// (HookCallbackMatcher, HookInput, HookJSONOutput, …). These are `import type`
+// only, erased at compile time with no runtime SDK dependency, so the module
+// stays provider-agnostic at runtime. Kept here (rather than moved behind the
+// agent-runtime boundary) because the hooks are consumed by both the Claude and
+// Codex session adapters and typing them against the SDK's own contract is
+// clearer than re-declaring it.
 
 import { execSync } from 'node:child_process';
 import type {
